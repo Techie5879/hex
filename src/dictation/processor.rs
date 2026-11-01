@@ -259,7 +259,7 @@ impl Profiles {
 
     pub fn processes(&self, context: &ContextSnapshot) -> bool {
         let profile = self.select(context);
-        profile.ai_enabled || !profile.transformations.is_empty()
+        crate::labs::local_polish() || profile.ai_enabled || !profile.transformations.is_empty()
     }
 
     pub fn process_cancellable(
@@ -295,6 +295,24 @@ impl Profiles {
             transcript
         };
         let corrected = profile.replacements.replace(transcript);
+        if crate::labs::local_polish() {
+            let started = Instant::now();
+            let (text, fallback) =
+                match super::local_polish::polish(&corrected, &profile.prompt, cancelled) {
+                    Ok(text) => (text, None),
+                    Err(error) => (corrected, Some(error.to_string())),
+                };
+            let observation = ProcessingObservation {
+                profile: format!("{} / local SpeakoFlow", profile.name),
+                latency_ms: started.elapsed().as_millis() as u64,
+                fallback,
+            };
+            return Processed {
+                text,
+                observation: Some(observation),
+                transformations: profile.transformations.clone(),
+            };
+        }
         if !profile.ai_enabled {
             return Processed {
                 text: corrected,

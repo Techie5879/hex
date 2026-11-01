@@ -1376,3 +1376,10 @@ TextEdit process were stopped afterward.
 - **Native checks require deliberate setup:** permissions, model, keyboard,
   microphone, output device, and a disposable text target must be recorded. This
   map does not authorize operating the installed app or injecting global input.
+
+## Local cleanup in this fork
+
+When `labs.local_polish` is on, corrections feed a local SpeakoFlow pass before
+text transformations and paste. It takes precedence over the mode’s OpenCode
+rewrite setting. Raw dictation skips this pass. The Output pane identifies the
+local step. [Details and verification scope](../local-cleanup.md).

@@ -1342,6 +1342,8 @@ impl Default for ExperimentalSettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct LabsSettings {
+    /// Clean up dictation with an app-owned local SpeakoFlow worker.
+    pub local_polish: bool,
     /// Live text beside the HUD while dictating.
     pub live_text: bool,
     /// Live chapters while a meeting records.
@@ -1411,6 +1413,7 @@ pub const UNLOAD_IDLE_MINUTES: [u32; 4] = [5, 15, 30, 60];
 impl Default for LabsSettings {
     fn default() -> Self {
         Self {
+            local_polish: false,
             live_text: false,
             live_chapters: false,
             playground: false,

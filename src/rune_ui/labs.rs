@@ -160,6 +160,9 @@ fn rows(ui: &Ui) -> Vec<Row> {
         locked: false,
     };
     let mut rows = Vec::new();
+    if cfg!(target_os = "macos") {
+        rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac. Replaces OpenCode rewriting; unloads after five idle minutes."));
+    }
     if caps.meetings {
         rows.push(row(
             Feature::Meetings,
@@ -393,6 +396,7 @@ fn row_key(feature: Feature) -> &'static str {
         Feature::CustomModels => "lab-custom-models",
         Feature::ParakeetUltra => "lab-parakeet-ultra",
         Feature::StandaloneSpecialKeys => "lab-special-keys",
+        Feature::LocalPolish => "lab-local-polish",
     }
 }
 

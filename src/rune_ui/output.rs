@@ -137,7 +137,13 @@ fn steps(ui: &Ui, mode: &DictationMode) -> Vec<Step> {
             }
         });
     }
-    if mode.post_processing.enabled {
+    if ui.settings.labs.local_polish {
+        steps.push(Step {
+            title: "Clean up locally with SpeakoFlow".into(),
+            detail: Some("On this Mac; no OpenCode connection".into()),
+            runner: Runner::Rewrite,
+        });
+    } else if mode.post_processing.enabled {
         steps.push(Step {
             title: tr("Rewrite with OpenCode").into(),
             detail: mode.post_processing.model.clone(),

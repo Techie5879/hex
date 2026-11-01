@@ -114,6 +114,11 @@ const NUMERIC_CHOICES: [&str; 2] = ["meetings.calendar.lead_minutes", "labs.unlo
 
 const KEYS: &[Key] = &[
     key(
+        "labs.local_polish",
+        Kind::Bool,
+        "Labs: clean up dictation locally with SpeakoFlow instead of OpenCode",
+    ),
+    key(
         "keyboard_model_switching.enabled",
         Kind::Bool,
         "Labs: switch the model when the keyboard input source changes (macOS, Windows, X11)",

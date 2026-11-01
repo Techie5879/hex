@@ -86,10 +86,11 @@ pub enum Feature {
     CustomModels,
     ParakeetUltra,
     StandaloneSpecialKeys,
+    LocalPolish,
 }
 
 impl Feature {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -118,6 +119,7 @@ impl Feature {
         Self::CustomModels,
         Self::ParakeetUltra,
         Self::StandaloneSpecialKeys,
+        Self::LocalPolish,
     ];
 
     /// The features this OS and build have.
@@ -168,7 +170,8 @@ impl Feature {
             | Self::BenchmarkDetails
             | Self::CustomModels
             | Self::ParakeetUltra
-            | Self::StandaloneSpecialKeys => Audience::Everyone,
+            | Self::StandaloneSpecialKeys
+            | Self::LocalPolish => Audience::Everyone,
         }
     }
 
@@ -202,6 +205,7 @@ impl Feature {
             Self::VoiceFilter => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::TerminalPaste | Self::ShareShortcut => cfg!(target_os = "windows"),
             Self::StandaloneSpecialKeys => cfg!(target_os = "linux"),
+            Self::LocalPolish => cfg!(target_os = "macos"),
             Self::MouseShortcuts
             | Self::PauseBrowser
             | Self::KeepOnClipboard
@@ -257,6 +261,7 @@ impl Feature {
             Self::CustomModels => "custom-models",
             Self::ParakeetUltra => "parakeet-ultra",
             Self::StandaloneSpecialKeys => "special-keys",
+            Self::LocalPolish => "local-polish",
         }
     }
 
@@ -291,6 +296,7 @@ impl Feature {
             Self::CustomModels => "labs.custom_models",
             Self::ParakeetUltra => "labs.parakeet_ultra",
             Self::StandaloneSpecialKeys => "labs.standalone_special_keys",
+            Self::LocalPolish => "labs.local_polish",
         }
     }
 
@@ -359,6 +365,9 @@ impl Feature {
             Self::ParakeetUltra => {
                 "Offer Parakeet Ultra, Moondream's post-trained Parakeet v3, in the Local transcription picker"
             }
+            Self::LocalPolish => {
+                "Clean up dictation with SpeakoFlow on this Mac instead of OpenCode"
+            }
             Self::StandaloneSpecialKeys => {
                 "Use Menu, Pause, or Scroll Lock alone as a shortcut, such as Caps Lock remapped to Menu"
             }
@@ -400,11 +409,13 @@ impl Feature {
             Self::CustomModels => settings.labs.custom_models,
             Self::ParakeetUltra => settings.labs.parakeet_ultra,
             Self::StandaloneSpecialKeys => settings.labs.standalone_special_keys,
+            Self::LocalPolish => settings.labs.local_polish,
         }
     }
 
     pub fn set(self, settings: &mut AppSettings, on: bool) {
         match self {
+            Self::LocalPolish => settings.labs.local_polish = on,
             Self::Meetings => settings.meetings.enabled = on,
             Self::VoiceFilter => settings.experimental.hex_microphone = on,
             Self::Playground => settings.labs.playground = on,
@@ -462,9 +473,15 @@ const CUSTOM_MODELS: u32 = 1 << 16;
 const PARAKEET_ULTRA: u32 = 1 << 17;
 /// Unload-idle minutes (at most 1,440, 11 bits) sit above the switches.
 const MINUTES_SHIFT: u32 = 18;
+const MINUTES_MASK: u32 = (1 << 11) - 1;
+const LOCAL_POLISH: u32 = 1 << 29;
 
-/// This process's `labs` switches: unknown until settings load or one is
-/// first read.
+/// Local dictation cleanup instead of OpenCode rewriting.
+pub(crate) fn local_polish() -> bool {
+    cfg!(target_os = "macos") && on(LOCAL_POLISH)
+}
+
+/// This process's switches, initialized when settings are first read.
 static STATE: AtomicU32 = AtomicU32::new(0);
 
 fn on(bit: u32) -> bool {
@@ -582,9 +599,13 @@ pub fn parakeet_ultra() -> bool {
 /// How long the speech model may sit unused before the engine unloads it,
 /// while Labs › Unload model when idle is on.
 pub fn unload_idle() -> Option<std::time::Duration> {
-    let state = state();
-    (state & UNLOAD_IDLE != 0)
-        .then(|| std::time::Duration::from_secs(u64::from(state >> MINUTES_SHIFT) * 60))
+    unload_idle_from(state())
+}
+
+fn unload_idle_from(state: u32) -> Option<std::time::Duration> {
+    (state & UNLOAD_IDLE != 0).then(|| {
+        std::time::Duration::from_secs(u64::from((state >> MINUTES_SHIFT) & MINUTES_MASK) * 60)
+    })
 }
 
 /// Records the switches the loaded or saved settings hold.
@@ -601,6 +622,7 @@ fn encode(settings: &LabsSettings) -> u32 {
 fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u32 {
     let minutes = settings.unload_idle_minutes.clamp(1, 24 * 60) << MINUTES_SHIFT;
     [
+        (Feature::LocalPolish, settings.local_polish, LOCAL_POLISH),
         (Feature::LiveText, settings.live_text, LIVE_TEXT),
         (Feature::LiveChapters, settings.live_chapters, LIVE_CHAPTERS),
         (Feature::Playground, settings.playground, PLAYGROUND),
@@ -796,6 +818,22 @@ pub fn run_retired_experiments() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_polish_does_not_change_speech_model_idle_minutes() {
+        let settings = crate::app_settings::LabsSettings {
+            local_polish: true,
+            unload_idle: true,
+            unload_idle_minutes: 5,
+            ..Default::default()
+        };
+        let bits = super::encode_where(&settings, |_| true);
+        assert_ne!(bits & super::LOCAL_POLISH, 0);
+        assert_eq!(
+            super::unload_idle_from(bits),
+            Some(std::time::Duration::from_secs(300))
+        );
+    }
+
     use super::*;
 
     #[test]

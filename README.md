@@ -4,6 +4,10 @@
 
 <h1 align="center">Hex</h1>
 
+This public fork adds [local SpeakoFlow dictation cleanup](docs/local-cleanup.md).
+Owner-built local releases keep upstream automatic updates off.
+
+
 <p align="center">
   <strong>Speak. It appears.</strong><br />
   Local-first voice dictation, built in Rust.

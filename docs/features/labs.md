@@ -707,3 +707,9 @@ Checks: `labs_is_one_flat_list_of_toggles_off_by_default`,
 [control/settings.rs](../../src/control/settings.rs). Passed on Linux on
 2026-10-30; the macOS build was not checked, and the Windows build was
 type-checked only.
+
+## Local SpeakoFlow cleanup in this fork
+
+Labs > Local SpeakoFlow cleanup is off by default and available on macOS. It
+replaces OpenCode rewriting for normal dictation with an app-owned local model.
+See [setup, lifecycle, fallback behavior, and checks](../local-cleanup.md).
