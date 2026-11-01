@@ -107,7 +107,8 @@ mod tests {
         let peer = thread::spawn(move || {
             let (mut s, _) = listener.accept().unwrap();
             let mut b = [0; 2048];
-            s.read(&mut b).unwrap();
+            let received = s.read(&mut b).unwrap();
+            assert!(received > 0);
             s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
                 .unwrap();
             let _ = wait.recv_timeout(Duration::from_secs(2));

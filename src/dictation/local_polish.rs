@@ -396,7 +396,7 @@ mod tests {
     #[test]
     #[ignore = "requires the local SpeakoFlow installation"]
     fn installed_model_cleanup_and_cancel() {
-        let r = Runtime::new();
+        let r = Arc::new(Runtime::new());
         let result = r
             .run(
                 "Send it on Thursday, no, Friday.",
@@ -409,6 +409,25 @@ mod tests {
             r.run("hello", DEFAULT_INSTRUCTIONS, &AtomicBool::new(true))
                 .is_err()
         );
+        // A cancelled request that never starts must not discard a warm model.
+        assert!(r.worker.lock().unwrap().is_some());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let run = r.clone();
+        let flag = cancelled.clone();
+        let task = thread::spawn(move || {
+            run.run(
+                &"Please send the report tomorrow. ".repeat(60),
+                DEFAULT_INSTRUCTIONS,
+                &flag,
+            )
+        });
+        let until = Instant::now() + Duration::from_secs(2);
+        while r.worker.try_lock().is_ok() {
+            assert!(Instant::now() < until, "request never acquired the worker");
+            thread::sleep(Duration::from_millis(1));
+        }
+        cancelled.store(true, Ordering::Release);
+        assert!(task.join().unwrap().is_err());
         assert!(r.worker.lock().unwrap().is_none());
     }
 }
