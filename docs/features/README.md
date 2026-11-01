@@ -889,7 +889,9 @@ Foreground context -> Select processing
 
 Selected mode                            // replaces Global, does not layer over it
   -> Corrections
+  -> Local SpeakoFlow cleanup            // optional macOS Labs feature
   -> OpenCode transformation             // optional provider-backed rewrite
+     -> Configured same-model provider   // Labs opt-in, typed quota/rate rejection only
   -> Transformations                     // ordered text chain
   -> Paste or Send
 
@@ -944,6 +946,11 @@ the switch and the setup/retry notice below;
 the `desktop/opencode_service` tests cover registration, stale-PID, loopback, chunked,
 deadline, and cancellation handling against a local fixture, not a live
 provider.
+
+[Provider quota fallback](../local-cleanup.md#provider-quota-fallback) is a separate
+Labs opt-in. A mode explicitly names its alternate provider; only a typed
+rate/quota rejection can use it, within the original deadline. The generation
+fixtures cover this routing without exhausting a live provider allowance.
 
 `ordinary_processing_snapshots_modes_before_stage_and_keeps_transformations` in
 [parakeet.rs](../../src/parakeet.rs) checks processing-time profile acquisition,

@@ -28,6 +28,30 @@ If SpeakoFlow fails, an explicitly enabled OpenCode pass can still rewrite the
 corrected original. History names the failed stage. Cancellation stops the
 chain before starting another model call.
 
+## Provider quota fallback
+
+Labs > Provider quota fallback is off by default. When enabled, a mode may set
+`post_processing.quota_fallback_provider` to a second OpenCode provider ID.
+An explicitly selected model is required; Auto keeps its existing ranked-model
+behavior. The fallback preserves the exact model ID, variant, and prompt.
+For example, a mode using `opencode-go/gpt-6-luna`, variant `none`, can set the
+fallback provider to `openai`. The `openai` provider uses whichever credentials
+are configured in OpenCode; use its Codex OAuth login for subscription access.
+
+Only OpenCode's structured `ProviderRequestError` with `reason: "rate_limit"`
+and the requested `providerID` triggers the fallback. OpenCode 2.2.5 maps both
+quota exhaustion and rate limiting to this reason. Human-readable messages are
+never inspected. Timeouts, network failures, authentication, invalid requests,
+provider outages, untyped errors, and empty output keep the prior stage's text.
+One alternate request is allowed, sharing the original total deadline and
+cancellation flag. If that request fails, the previous text is kept. A log event
+records the primary provider, fallback provider, model, and structured reason.
+
+The protocol comes from OpenCode's
+[generate handler](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/server/src/handlers/generate.ts)
+and [typed generation errors](https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/generate.ts).
+An older service without these fields fails closed instead of guessing from text.
+
 ## Setup
 
 1. Install llama.cpp with `brew install llama.cpp`.
@@ -87,3 +111,8 @@ or native paste; verify those separately in the installed app.
 The `dictation::processor::rewrite` tests cover chaining order, independent
 prompts, local-only and OpenCode-only modes, failed or empty OpenCode output,
 local failure, and cancellation between stages using deterministic model doubles.
+
+The `dictation::processor::generation` fixtures cover typed quota rejection over
+HTTP, provider identity, unchanged prompt/model/variant, transport failure,
+cancellation, shared deadlines, and at most one fallback. These fixtures do not
+exhaust a live provider's allowance or verify a physical dictation.

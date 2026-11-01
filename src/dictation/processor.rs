@@ -11,7 +11,9 @@ use crate::dictation::context::{ContextSelector, ContextSnapshot};
 use crate::dictation::text_replacements::ReplacementSet;
 use crate::dictation::vocabulary::VocabularyEntry;
 
+mod generation;
 mod rewrite;
+use generation::*;
 
 const PROTOCOL_PROMPT: &str = "You transform dictated speech into replacement text. Return only the text that should be pasted. Do not add an explanation, label, alternative, or Markdown fence.";
 const CATALOG_DEADLINE: Duration = Duration::from_secs(10);
@@ -27,6 +29,7 @@ pub struct Profile {
     prompt: String,
     model: Option<Model>,
     deadline: Duration,
+    quota_fallback_provider: Option<String>,
     replacements: ReplacementSet,
     transformations: Vec<String>,
 }
@@ -39,6 +42,7 @@ impl Profile {
             prompt: prompt.into(),
             model: None,
             deadline: Duration::from_secs(30),
+            quota_fallback_provider: None,
             replacements: ReplacementSet::default(),
             transformations: Vec::new(),
         }
@@ -121,6 +125,7 @@ impl Profile {
                 profile = profile.variant(variant);
             }
         }
+        profile.quota_fallback_provider = settings.quota_fallback_provider.clone();
         profile.deadline(Duration::from_secs(settings.deadline_seconds.max(1)))
     }
 }
@@ -309,7 +314,15 @@ impl Profiles {
                     context,
                     &crate::dictation::vocabulary::entries(),
                 );
-                generate_cancellable(&prompt, profile.model.as_ref(), profile.deadline, cancelled)
+                generate_cancellable_with_fallback(
+                    &prompt,
+                    profile.model.as_ref(),
+                    crate::labs::provider_fallback()
+                        .then_some(profile.quota_fallback_provider.as_deref())
+                        .flatten(),
+                    profile.deadline,
+                    cancelled,
+                )
             },
         )
     }
@@ -671,204 +684,6 @@ fn vocabulary_lines(vocabulary: &[VocabularyEntry]) -> String {
     format!("Vocabulary (spell these exactly when the speaker means them): {terms}\n\n")
 }
 
-#[derive(Serialize)]
-struct Request<'a> {
-    prompt: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    model: Option<&'a Model>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Response {
-    Success { data: ResponseData },
-    Error { message: String },
-}
-
-#[derive(Deserialize)]
-struct ResponseData {
-    text: String,
-}
-
-#[cfg(test)]
-fn generate(prompt: &str, model: Option<&Model>, deadline: Duration) -> Result<String> {
-    generate_cancellable(prompt, model, deadline, &AtomicBool::new(false))
-}
-
-fn generate_cancellable(
-    prompt: &str,
-    model: Option<&Model>,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-) -> Result<String> {
-    let started = Instant::now();
-    let service = crate::desktop::opencode_service::find()
-        .ok_or_else(|| eyre!(crate::desktop::opencode_service::NOT_RUNNING))?;
-    generate_with_candidates(
-        prompt,
-        model,
-        || ranked_candidates_for(&service),
-        started,
-        deadline,
-        cancelled,
-        |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
-    )
-}
-
-fn generate_with_candidates(
-    prompt: &str,
-    model: Option<&Model>,
-    candidates: impl FnOnce() -> Vec<Model>,
-    started: Instant,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-    post: impl FnMut(&str, Duration, &AtomicBool) -> Result<Response>,
-) -> Result<String> {
-    if model.is_none() {
-        let candidates = candidates();
-        if !candidates.is_empty() {
-            return generate_with_ranked_candidates(
-                prompt,
-                &candidates,
-                started,
-                deadline,
-                cancelled,
-                post,
-            );
-        }
-    }
-    generate_single_model(prompt, model, started, deadline, cancelled, post)
-}
-
-fn remaining_generation_deadline(started: Instant, deadline: Duration) -> Result<Duration> {
-    let remaining = deadline.saturating_sub(started.elapsed());
-    if remaining.is_zero() {
-        Err(eyre!(
-            "OpenCode generation exceeded {} seconds",
-            deadline.as_secs()
-        ))
-    } else {
-        Ok(remaining)
-    }
-}
-
-fn generate_with_ranked_candidates(
-    prompt: &str,
-    candidates: &[Model],
-    started: Instant,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-    mut post: impl FnMut(&str, Duration, &AtomicBool) -> Result<Response>,
-) -> Result<String> {
-    let mut last_error = None;
-    for (index, candidate) in candidates.iter().enumerate() {
-        let remaining = remaining_generation_deadline(started, deadline)?;
-        let data = serde_json::to_string(&Request {
-            prompt,
-            model: Some(candidate),
-        })?;
-        match post(&data, remaining, cancelled)? {
-            Response::Success { data } => return Ok(data.text),
-            Response::Error { message } => {
-                if index + 1 < candidates.len() {
-                    tracing::warn!(
-                        provider = %candidate.provider,
-                        model = %candidate.id,
-                        %message,
-                        "ranked OpenCode model failed; trying next available candidate"
-                    );
-                }
-                last_error = Some(eyre!("OpenCode generation failed: {message}"));
-            }
-        }
-    }
-    Err(last_error.unwrap_or_else(|| eyre!("no OpenCode models available")))
-}
-
-fn generate_single_model(
-    prompt: &str,
-    model: Option<&Model>,
-    started: Instant,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-    mut post: impl FnMut(&str, Duration, &AtomicBool) -> Result<Response>,
-) -> Result<String> {
-    let request = Request { prompt, model };
-    let data = serde_json::to_string(&request)?;
-    for attempt in 0..2 {
-        let remaining = remaining_generation_deadline(started, deadline)?;
-        match post(&data, remaining, cancelled)? {
-            Response::Success { data } => return Ok(data.text),
-            Response::Error { message } if attempt == 0 && retryable_generation_error(&message) => {
-                tracing::warn!(%message, "OpenCode model unavailable during startup; retrying");
-                wait_for_generation_retry(started, deadline, cancelled)?;
-            }
-            Response::Error { message } => {
-                return Err(eyre!("OpenCode generation failed: {message}"));
-            }
-        }
-    }
-    unreachable!("generation loop returns on its second attempt")
-}
-
-/// Posts to the newest generation route and falls back to the older name only
-/// when the server reports that route missing. Every attempt shares one deadline.
-fn post_generation(
-    service: &Service,
-    data: &str,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-) -> Result<Response> {
-    let started = Instant::now();
-    let mut response = None;
-    for path in GENERATE_ENDPOINTS {
-        let attempt = service.request(
-            "POST",
-            path,
-            Some(data.as_bytes()),
-            None,
-            deadline.saturating_sub(started.elapsed()),
-            cancelled,
-        )?;
-        let missing = attempt.status == 404;
-        response = Some(attempt);
-        if !missing {
-            break;
-        }
-    }
-    let response = response.expect("at least one generation route");
-    if response.status == 404 {
-        return Err(eyre!("OpenCode does not serve a generation route"));
-    }
-    serde_json::from_slice(&response.body)
-        .wrap_err("OpenCode returned an invalid generation response")
-}
-
-fn retryable_generation_error(message: &str) -> bool {
-    message.starts_with("Model unavailable:")
-}
-
-fn wait_for_generation_retry(
-    started: Instant,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-) -> Result<()> {
-    let wait_started = Instant::now();
-    while wait_started.elapsed() < Duration::from_millis(1_500) {
-        if cancelled.load(Ordering::Acquire) {
-            return Err(eyre!("OpenCode generation was cancelled"));
-        }
-        if started.elapsed() >= deadline {
-            return Err(eyre!(
-                "OpenCode generation exceeded {} seconds",
-                deadline.as_secs()
-            ));
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,6 +932,7 @@ mod tests {
 
     #[test]
     fn mode_corrections_run_before_registered_transformations() {
+        crate::labs::apply(&crate::app_settings::LabsSettings::default());
         let profile = Profile::new("Global", "")
             .replacements(ReplacementSet::new(&[
                 crate::dictation::text_replacements::TextReplacement {
@@ -1140,11 +956,21 @@ mod tests {
 
     #[test]
     fn only_model_unavailability_is_retried() {
-        assert!(retryable_generation_error(
-            "Model unavailable: example/rewrite-model"
-        ));
-        assert!(!retryable_generation_error("Provider request failed"));
-        assert!(!retryable_generation_error("processor returned empty text"));
+        assert!(
+            GenerationFailure {
+                tag: "InvalidRequestError".into(),
+                field: Some("model".into()),
+                ..Default::default()
+            }
+            .model_unavailable()
+        );
+        assert!(
+            !GenerationFailure {
+                message: "Model unavailable: example/rewrite-model".into(),
+                ..Default::default()
+            }
+            .model_unavailable()
+        );
     }
 
     #[test]
@@ -1160,7 +986,7 @@ mod tests {
     }
 
     /// The service fixture answering each `(path, status, body)` POST in order.
-    fn generation_server(
+    pub(super) fn generation_server(
         routes: Vec<(&'static str, u16, &'static str)>,
     ) -> (Service, thread::JoinHandle<Vec<Vec<u8>>>) {
         let (url, server) = crate::desktop::opencode_service::tests::serve(
@@ -1221,7 +1047,7 @@ mod tests {
             );
             match (result, expected) {
                 (Ok(Response::Success { data }), Ok(text)) => assert_eq!(data.text, text),
-                (Ok(Response::Error { message }), Err(text)) => assert_eq!(message, text),
+                (Ok(Response::Error(error)), Err(text)) => assert_eq!(error.message, text),
                 (Err(error), Err(text)) => assert!(error.to_string().contains(text), "{error}"),
                 (result, expected) => {
                     panic!(

@@ -87,10 +87,11 @@ pub enum Feature {
     ParakeetUltra,
     StandaloneSpecialKeys,
     LocalPolish,
+    ProviderFallback,
 }
 
 impl Feature {
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -120,6 +121,7 @@ impl Feature {
         Self::ParakeetUltra,
         Self::StandaloneSpecialKeys,
         Self::LocalPolish,
+        Self::ProviderFallback,
     ];
 
     /// The features this OS and build have.
@@ -171,7 +173,8 @@ impl Feature {
             | Self::CustomModels
             | Self::ParakeetUltra
             | Self::StandaloneSpecialKeys
-            | Self::LocalPolish => Audience::Everyone,
+            | Self::LocalPolish
+            | Self::ProviderFallback => Audience::Everyone,
         }
     }
 
@@ -226,7 +229,8 @@ impl Feature {
             | Self::BenchmarkDetails
             | Self::CustomModels
             | Self::ParakeetUltra
-            | Self::FillerWords => true,
+            | Self::FillerWords
+            | Self::ProviderFallback => true,
         }
     }
 
@@ -262,6 +266,7 @@ impl Feature {
             Self::ParakeetUltra => "parakeet-ultra",
             Self::StandaloneSpecialKeys => "special-keys",
             Self::LocalPolish => "local-polish",
+            Self::ProviderFallback => "provider-fallback",
         }
     }
 
@@ -297,6 +302,7 @@ impl Feature {
             Self::ParakeetUltra => "labs.parakeet_ultra",
             Self::StandaloneSpecialKeys => "labs.standalone_special_keys",
             Self::LocalPolish => "labs.local_polish",
+            Self::ProviderFallback => "labs.provider_fallback",
         }
     }
 
@@ -365,6 +371,9 @@ impl Feature {
             Self::ParakeetUltra => {
                 "Offer Parakeet Ultra, Moondream's post-trained Parakeet v3, in the Local transcription picker"
             }
+            Self::ProviderFallback => {
+                "Use a configured alternate provider only when rewriting hits a quota or rate limit"
+            }
             Self::LocalPolish => {
                 "Clean up dictation with SpeakoFlow on this Mac instead of OpenCode"
             }
@@ -410,12 +419,14 @@ impl Feature {
             Self::ParakeetUltra => settings.labs.parakeet_ultra,
             Self::StandaloneSpecialKeys => settings.labs.standalone_special_keys,
             Self::LocalPolish => settings.labs.local_polish,
+            Self::ProviderFallback => settings.labs.provider_fallback,
         }
     }
 
     pub fn set(self, settings: &mut AppSettings, on: bool) {
         match self {
             Self::LocalPolish => settings.labs.local_polish = on,
+            Self::ProviderFallback => settings.labs.provider_fallback = on,
             Self::Meetings => settings.meetings.enabled = on,
             Self::VoiceFilter => settings.experimental.hex_microphone = on,
             Self::Playground => settings.labs.playground = on,
@@ -475,6 +486,11 @@ const PARAKEET_ULTRA: u32 = 1 << 17;
 const MINUTES_SHIFT: u32 = 18;
 const MINUTES_MASK: u32 = (1 << 11) - 1;
 const LOCAL_POLISH: u32 = 1 << 29;
+const PROVIDER_FALLBACK: u32 = 1 << 30;
+
+pub(crate) fn provider_fallback() -> bool {
+    on(PROVIDER_FALLBACK)
+}
 
 /// Local dictation cleanup instead of OpenCode rewriting.
 pub(crate) fn local_polish() -> bool {
@@ -623,6 +639,11 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
     let minutes = settings.unload_idle_minutes.clamp(1, 24 * 60) << MINUTES_SHIFT;
     [
         (Feature::LocalPolish, settings.local_polish, LOCAL_POLISH),
+        (
+            Feature::ProviderFallback,
+            settings.provider_fallback,
+            PROVIDER_FALLBACK,
+        ),
         (Feature::LiveText, settings.live_text, LIVE_TEXT),
         (Feature::LiveChapters, settings.live_chapters, LIVE_CHAPTERS),
         (Feature::Playground, settings.playground, PLAYGROUND),
