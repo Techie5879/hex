@@ -366,6 +366,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let log_dir = app_paths::init_process_logging(&SHUTDOWN)?;
+    let _local_polish_shutdown = dictation::local_polish::Shutdown;
 
     let event_path = log_dir.join("live.ndjson");
     let bundled_service = executable_name.as_deref() == Some(std::ffi::OsStr::new("hex-service"));

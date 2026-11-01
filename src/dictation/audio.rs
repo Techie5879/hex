@@ -1021,6 +1021,7 @@ impl Owner {
     }
 
     fn start_capture_at(&mut self, kind: CaptureKind, at: CaptureInstant) {
+        super::local_polish::prewarm();
         match kind {
             CaptureKind::Hotkey => self.capture.start_at(at),
             CaptureKind::Programmatic => self.capture.start_programmatic_at(at),
