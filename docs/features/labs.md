@@ -711,5 +711,6 @@ type-checked only.
 ## Local SpeakoFlow cleanup in this fork
 
 Labs > Local SpeakoFlow cleanup is off by default and available on macOS. It
-replaces OpenCode rewriting for normal dictation with an app-owned local model.
+cleans normal dictation with an app-owned local model before any enabled
+per-mode OpenCode rewrite. OpenCode rewriting stays off by default.
 See [setup, lifecycle, fallback behavior, and checks](../local-cleanup.md).

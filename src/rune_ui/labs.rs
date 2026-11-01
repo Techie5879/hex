@@ -161,7 +161,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
     };
     let mut rows = Vec::new();
     if cfg!(target_os = "macos") {
-        rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac. Replaces OpenCode rewriting; unloads after five idle minutes."));
+        rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac before optional OpenCode rewriting; unloads after five idle minutes."));
     }
     if caps.meetings {
         rows.push(row(

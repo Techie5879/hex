@@ -11,6 +11,8 @@ use crate::dictation::context::{ContextSelector, ContextSnapshot};
 use crate::dictation::text_replacements::ReplacementSet;
 use crate::dictation::vocabulary::VocabularyEntry;
 
+mod rewrite;
+
 const PROTOCOL_PROMPT: &str = "You transform dictated speech into replacement text. Return only the text that should be pasted. Do not add an explanation, label, alternative, or Markdown fence.";
 const CATALOG_DEADLINE: Duration = Duration::from_secs(10);
 /// Newest one-shot generation route first; older OpenCode V2 builds only serve the later name.
@@ -295,57 +297,21 @@ impl Profiles {
             transcript
         };
         let corrected = profile.replacements.replace(transcript);
-        if crate::labs::local_polish() {
-            let started = Instant::now();
-            let (text, fallback) =
-                match super::local_polish::polish(&corrected, &profile.prompt, cancelled) {
-                    Ok(text) => (text, None),
-                    Err(error) => (corrected, Some(error.to_string())),
-                };
-            let observation = ProcessingObservation {
-                profile: format!("{} / local SpeakoFlow", profile.name),
-                latency_ms: started.elapsed().as_millis() as u64,
-                fallback,
-            };
-            return Processed {
-                text,
-                observation: Some(observation),
-                transformations: profile.transformations.clone(),
-            };
-        }
-        if !profile.ai_enabled {
-            return Processed {
-                text: corrected,
-                observation: None,
-                transformations: profile.transformations.clone(),
-            };
-        }
-        let prompt = prompt(
-            profile,
-            &corrected,
-            context,
-            &crate::dictation::vocabulary::entries(),
-        );
-        let (text, observation) = generate_observed(
-            &prompt,
-            profile.model.as_ref(),
-            profile.deadline,
+        profile.rewrite(
+            corrected,
+            crate::labs::local_polish(),
             cancelled,
-            &profile.name,
-            Instant::now(),
-        );
-        if observation.fallback.is_none() {
-            tracing::info!(
-                profile = profile.name,
-                latency_ms = observation.latency_ms,
-                "dictation post-processing completed"
-            );
-        }
-        Processed {
-            text: text.unwrap_or(corrected),
-            observation: Some(observation),
-            transformations: profile.transformations.clone(),
-        }
+            |input, instructions| super::local_polish::polish(input, instructions, cancelled),
+            |input| {
+                let prompt = prompt(
+                    profile,
+                    input,
+                    context,
+                    &crate::dictation::vocabulary::entries(),
+                );
+                generate_cancellable(&prompt, profile.model.as_ref(), profile.deadline, cancelled)
+            },
+        )
     }
 }
 
@@ -357,30 +323,6 @@ pub(crate) fn generate_text(
     cancelled: &AtomicBool,
 ) -> Result<String> {
     generate_cancellable(prompt, None, deadline, cancelled)
-}
-
-/// Runs one generation and reports it as a processing observation. The text is
-/// `None` whenever the caller must fall back, with the reason recorded in the
-/// observation.
-fn generate_observed(
-    prompt: &str,
-    model: Option<&Model>,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-    profile_name: &str,
-    started: Instant,
-) -> (Option<String>, ProcessingObservation) {
-    let (text, fallback) = match generate_cancellable(prompt, model, deadline, cancelled) {
-        Ok(text) if !text.trim().is_empty() => (Some(text.trim().into()), None),
-        Ok(_) => (None, Some("processor returned empty text".into())),
-        Err(error) => (None, Some(error.to_string())),
-    };
-    let observation = ProcessingObservation {
-        profile: profile_name.into(),
-        latency_ms: started.elapsed().as_millis() as u64,
-        fallback,
-    };
-    (text, observation)
 }
 
 #[derive(Clone, Debug)]

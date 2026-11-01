@@ -2,14 +2,31 @@
 
 This fork can clean dictation with SpeakoFlow Mini on an Apple Silicon Mac,
 without OpenCode or a cloud provider. Enable **Labs > Local SpeakoFlow cleanup**.
-It applies to normal dictation in every mode and takes precedence over OpenCode
-rewriting. The raw-dictation shortcut still bypasses processing.
+It applies to normal dictation in every mode. A mode can optionally run OpenCode
+afterward. The raw-dictation shortcut still bypasses processing.
 
-The mode's instructions become the system message, preceded by a short
+When OpenCode is disabled, the mode's instructions become the system message, preceded by a short
 output-only instruction. The corrected transcript is the user message by
 itself. Application metadata, XML wrappers, and vocabulary lists are not added
 to the prompt. Spelling replacements and speech-model vocabulary remain the
 places to correct names. Deterministic transformations still run afterward.
+
+## Optional OpenCode pass
+
+Enable `post_processing.enabled` in the desired mode and set its
+`post_processing.prompt` to the extra instruction. OpenCode then receives
+SpeakoFlow's cleaned output, along with Hex's usual app context and vocabulary.
+SpeakoFlow uses its basic cleanup prompt in this combination; only OpenCode
+receives the mode's custom instruction. The Output pane shows both steps.
+
+The order is speech recognition, replacements, SpeakoFlow, OpenCode, then
+transformations and paste. OpenCode stays off by default. It uses the running
+OpenCode service, selected model and deadline. Its provider may receive the
+text, depending on the chosen model. It adds a second generation to dictation
+latency. If OpenCode fails or returns empty text, Hex keeps SpeakoFlow's result.
+If SpeakoFlow fails, an explicitly enabled OpenCode pass can still rewrite the
+corrected original. History names the failed stage. Cancellation stops the
+chain before starting another model call.
 
 ## Setup
 
@@ -31,7 +48,7 @@ with `~/Library/Application Support/hex/local-polishing.json`:
 ```
 
 Restart Hex after changing these paths. Missing files cause a visible processing
-fallback; they never cause a cloud request.
+fallback; they never enable OpenCode implicitly.
 
 ## Lifetime and failure behavior
 
@@ -47,7 +64,7 @@ leaving it generating in the background.
 Empty, truncated, or metadata-contaminated output is rejected. A guard also
 rejects changed quoted text, missing numbers, and changed technical tokens.
 Explicit numeric self-correction such as "12, no, 13" may remove the old number.
-On a failure, the corrected input is pasted and the reason is recorded in
+On a failure, that stage's input is preserved and the reason is recorded in
 processing history. These guards are conservative checks, not a guarantee that
 the model preserves every word or meaning.
 
@@ -66,3 +83,7 @@ HTTP completion without waiting for EOF, malformed responses, and output guards.
 The ignored `installed_model_cleanup_and_cancel` test exercises an installed
 model using synthetic text. These tests do not prove physical microphone capture
 or native paste; verify those separately in the installed app.
+
+The `dictation::processor::rewrite` tests cover chaining order, independent
+prompts, local-only and OpenCode-only modes, failed or empty OpenCode output,
+local failure, and cancellation between stages using deterministic model doubles.

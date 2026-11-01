@@ -116,7 +116,7 @@ const KEYS: &[Key] = &[
     key(
         "labs.local_polish",
         Kind::Bool,
-        "Labs: clean up dictation locally with SpeakoFlow instead of OpenCode",
+        "Labs: clean up dictation locally with SpeakoFlow before optional OpenCode rewriting",
     ),
     key(
         "keyboard_model_switching.enabled",

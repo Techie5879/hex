@@ -90,8 +90,8 @@ struct Step {
     runner: Runner,
 }
 
-/// A mode's steps in the order they run: its corrections, its
-/// transformations, then OpenCode rewriting when it is on.
+/// A mode's steps in execution order: corrections, local cleanup, OpenCode,
+/// then transformations. Each rewrite is independently optional.
 fn steps(ui: &Ui, mode: &DictationMode) -> Vec<Step> {
     let mut steps = Vec::new();
     if !mode.replacements.is_empty() {
@@ -115,6 +115,20 @@ fn steps(ui: &Ui, mode: &DictationMode) -> Vec<Step> {
             runner: Runner::BuiltIn,
         });
     }
+    if ui.settings.labs.local_polish {
+        steps.push(Step {
+            title: "Clean up locally with SpeakoFlow".into(),
+            detail: Some("On this Mac; before any OpenCode rewrite".into()),
+            runner: Runner::Rewrite,
+        });
+    }
+    if mode.post_processing.enabled {
+        steps.push(Step {
+            title: tr("Rewrite with OpenCode").into(),
+            detail: mode.post_processing.model.clone(),
+            runner: Runner::Rewrite,
+        });
+    }
     for id in &mode.transformations {
         steps.push(match builtin(id) {
             Some((title, detail)) => Step {
@@ -135,19 +149,6 @@ fn steps(ui: &Ui, mode: &DictationMode) -> Vec<Step> {
                     runner: Runner::Script,
                 }
             }
-        });
-    }
-    if ui.settings.labs.local_polish {
-        steps.push(Step {
-            title: "Clean up locally with SpeakoFlow".into(),
-            detail: Some("On this Mac; no OpenCode connection".into()),
-            runner: Runner::Rewrite,
-        });
-    } else if mode.post_processing.enabled {
-        steps.push(Step {
-            title: tr("Rewrite with OpenCode").into(),
-            detail: mode.post_processing.model.clone(),
-            runner: Runner::Rewrite,
         });
     }
     steps
@@ -573,7 +574,12 @@ fn agent_prompt() -> String {
          \n\
          Built-in transformations: \"lowercase\", \"no-trailing-punctuation\", \
          \"spongebob-case\". Others are functions in ~/.config/hex/hex.config.ts \
-         (run `hex commands init` for its typings). Leave `post_processing.enabled` false.\n\
+         (run `hex commands init` for its typings).\n\
+         - Optional OpenCode rewriting: set `post_processing.enabled` true and \
+         `post_processing.prompt` to its instruction. It runs after local SpeakoFlow \
+         cleanup when `labs.local_polish` is on, and before transformations. \
+         SpeakoFlow then uses basic cleanup instructions; the custom prompt goes \
+         only to OpenCode. Leave OpenCode disabled unless requested.\n\
          \n\
          Read the current value with `hex settings get dictation_processing`, then \
          change it with `hex settings set dictation_processing.default_mode '<json>'` \
@@ -624,6 +630,40 @@ pub(super) fn fixture(ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_lists_local_then_opencode_then_transformations() {
+        let mut ui = Ui::fixture_base();
+        ui.settings.labs.local_polish = true;
+        let mode = DictationMode {
+            transformations: vec!["lowercase".into()],
+            post_processing: crate::app_settings::DictationPostProcessing {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let titles = |mode: &DictationMode| {
+            steps(&ui, mode)
+                .into_iter()
+                .map(|step| step.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&mode),
+            [
+                "Clean up locally with SpeakoFlow",
+                "Rewrite with OpenCode",
+                "Lowercase"
+            ]
+        );
+        let mut local_only = mode;
+        local_only.post_processing.enabled = false;
+        assert_eq!(
+            titles(&local_only),
+            ["Clean up locally with SpeakoFlow", "Lowercase"]
+        );
+    }
 
     #[test]
     fn the_preview_runs_corrections_then_built_in_steps_in_order() {

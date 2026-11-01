@@ -1380,6 +1380,8 @@ TextEdit process were stopped afterward.
 ## Local cleanup in this fork
 
 When `labs.local_polish` is on, corrections feed a local SpeakoFlow pass before
-text transformations and paste. It takes precedence over the mode’s OpenCode
-rewrite setting. Raw dictation skips this pass. The Output pane identifies the
-local step. [Details and verification scope](../local-cleanup.md).
+the mode's optional OpenCode rewrite, text transformations, and paste. With
+both rewrites on, SpeakoFlow uses basic cleanup instructions and OpenCode uses
+the mode's custom prompt. Each failure keeps that stage's input, and cancellation
+prevents starting the next stage. Raw dictation skips processing. The Output pane
+lists both enabled steps in order. [Details and verification scope](../local-cleanup.md).
