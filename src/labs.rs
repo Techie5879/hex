@@ -507,7 +507,11 @@ fn on(bit: u32) -> bool {
 fn state() -> u32 {
     match STATE.load(Ordering::Acquire) {
         0 => {
+            #[cfg(not(test))]
             let saved = encode(&AppSettings::saved_labs());
+            // Unit tests must not load the owner's models or providers.
+            #[cfg(test)]
+            let saved = encode(&LabsSettings::default());
             let _ = STATE.compare_exchange(0, saved, Ordering::AcqRel, Ordering::Acquire);
             STATE.load(Ordering::Acquire)
         }

@@ -932,7 +932,6 @@ mod tests {
 
     #[test]
     fn mode_corrections_run_before_registered_transformations() {
-        crate::labs::apply(&crate::app_settings::LabsSettings::default());
         let profile = Profile::new("Global", "")
             .replacements(ReplacementSet::new(&[
                 crate::dictation::text_replacements::TextReplacement {

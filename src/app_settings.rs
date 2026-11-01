@@ -2190,6 +2190,7 @@ impl AppSettings {
 
     /// The saved `labs` switches, read without loading, normalizing, or
     /// writing anything else.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn saved_labs() -> LabsSettings {
         #[derive(Deserialize)]
         struct File {

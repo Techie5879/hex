@@ -116,3 +116,8 @@ The `dictation::processor::generation` fixtures cover typed quota rejection over
 HTTP, provider identity, unchanged prompt/model/variant, transport failure,
 cancellation, shared deadlines, and at most one fallback. These fixtures do not
 exhaust a live provider's allowance or verify a physical dictation.
+
+Unit-test Labs defaults are isolated from the owner's saved settings, so test
+profiles cannot accidentally start the owner's local model or cloud rewrite.
+The ignored `live_quota_fallback_to_codex` check injects a synthetic primary quota
+rejection and sends one synthetic prompt through the real secondary provider.
