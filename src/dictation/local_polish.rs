@@ -374,7 +374,8 @@ mod tests {
     #[test]
     fn idle_worker_is_reaped_but_not_during_recording() {
         let runtime = Runtime::new();
-        let child = std::process::Command::new("/bin/sleep")
+        // Nix exposes coreutils through PATH, not /bin.
+        let child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()
             .unwrap();
