@@ -724,3 +724,13 @@ same explicit model and variant. It runs only after OpenCode returns a typed
 rate/quota-limit rejection from the selected provider; timeouts preserve the
 previous stage's text. Both requests share one deadline and cancellation flag.
 See [configuration, error contract, and fixture coverage](../local-cleanup.md#provider-quota-fallback).
+
+
+## Save dictation audio in this fork
+
+macOS Labs > Save dictation audio (`labs.save_dictation_audio`) is off by
+default. It keeps new intentional dictation recordings locally as Ogg/Opus,
+including cancelled and failed-transcription clips. History's separate Audio
+retention menu defaults to Forever and also offers Off, 24 hours, 7 days and
+30 days. Requires ffmpeg with libopus. It does not recover older audio or change
+text history retention. See [format, failure recovery and checks](dictation.md#compressed-dictation-audio).

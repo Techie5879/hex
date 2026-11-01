@@ -107,6 +107,8 @@ enum CaptureKind {
     Programmatic,
 }
 
+struct CancelledAudio(Option<Vec<f32>>);
+
 enum Command {
     Start {
         at: CaptureInstant,
@@ -126,7 +128,7 @@ enum Command {
         reply: SyncSender<Finish>,
     },
     Cancel {
-        reply: SyncSender<()>,
+        reply: SyncSender<CancelledAudio>,
     },
     SelectMicrophone {
         revision: u64,
@@ -345,7 +347,11 @@ impl DictationAudio {
     }
 
     pub fn cancel(&self) -> Result<()> {
-        self.call(|reply| Command::Cancel { reply })
+        let CancelledAudio(samples) = self.call(|reply| Command::Cancel { reply })?;
+        if let Some(samples) = samples {
+            super::audio_archive::retain(&samples, "cancelled");
+        }
+        Ok(())
     }
 
     #[cfg(hex_capture)]
@@ -658,9 +664,14 @@ impl Owner {
                 if !self.input.is_open() && !self.capture_sink_open() {
                     self.input.cancel_open();
                 }
-                self.capture.cancel();
+                let samples = if crate::labs::save_dictation_audio() {
+                    self.capture.take_cancelled_audio()
+                } else {
+                    self.capture.cancel();
+                    None
+                };
                 self.state.recording.store(false, Ordering::Release);
-                let _ = reply.send(());
+                let _ = reply.send(CancelledAudio(samples));
             }
             Command::SelectMicrophone { revision, device } => {
                 self.input.request_selection(revision, device.as_deref());
@@ -1273,7 +1284,9 @@ mod tests {
                                 reply,
                             });
                         }
-                        "cancel" => control(&mut owner, |reply| Command::Cancel { reply }),
+                        "cancel" => {
+                            control(&mut owner, |reply| Command::Cancel { reply });
+                        }
                         "start" | "start-finish" => {
                             start(&mut owner, at);
                             if boundary == "start-finish" {
@@ -1331,7 +1344,9 @@ mod tests {
                             reply,
                         });
                     }
-                    "cancel" => control(&mut owner, |reply| Command::Cancel { reply }),
+                    "cancel" => {
+                        control(&mut owner, |reply| Command::Cancel { reply });
+                    }
                     "start" => start(&mut owner, CaptureInstant::from_nanos(0)),
                     _ => {}
                 }

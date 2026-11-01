@@ -261,6 +261,30 @@ fn header_actions(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<El> {
         })
         .build(p.k, layer);
     let mut actions = vec![retention];
+    if ui.platform.caps.os == super::platform::Os::Macos && ui.settings.labs.save_dictation_audio {
+        let current = format!("Audio: {}", tr(ui.settings.audio_retention.label()));
+        actions.push(
+            Select::new("audio-retention", &labels)
+                .appearance(SelectAppearance::Inline)
+                .current(Some(&current))
+                .open(ui.open == Some(Menu::AudioRetention))
+                .on_toggle(|ui: &mut Ui| {
+                    ui.open =
+                        (ui.open != Some(Menu::AudioRetention)).then_some(Menu::AudioRetention);
+                })
+                .on_close(|ui: &mut Ui| ui.open = None)
+                .on_choose(|ui: &mut Ui, choice: &str, _: &mut Tx| {
+                    if let Some(retention) = HistoryRetention::ALL
+                        .into_iter()
+                        .find(|r| tr(r.label()) == choice)
+                    {
+                        ui.open = None;
+                        ui.update(|settings| settings.audio_retention = retention);
+                    }
+                })
+                .build(p.k, layer),
+        );
+    }
     if !ui.history.entries.is_empty() || ui.history.clear_armed {
         actions.push(if ui.history.clear_armed {
             button(

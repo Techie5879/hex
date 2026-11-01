@@ -1,6 +1,8 @@
 #[cfg(target_os = "macos")]
 pub(crate) mod audio;
 #[cfg(target_os = "macos")]
+pub(crate) mod audio_archive;
+#[cfg(target_os = "macos")]
 pub(crate) mod config;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 pub(crate) mod context;
@@ -119,6 +121,8 @@ fn signed_ms(later: CaptureInstant, earlier: CaptureInstant) -> i64 {
 
 pub struct DictationClip {
     samples: Vec<f32>,
+    #[cfg(target_os = "macos")]
+    audio_retained: bool,
     /// How many trailing samples were captured after the release. The stop
     /// tone sounds during them, so the silence gate ignores them.
     tail_samples: usize,
@@ -165,6 +169,8 @@ impl DictationClip {
     pub fn for_test(samples: Vec<f32>) -> Self {
         Self {
             samples,
+            #[cfg(target_os = "macos")]
+            audio_retained: false,
             tail_samples: 0,
             press_samples: 0,
             timeline: ClipTimeline::default(),
@@ -269,7 +275,17 @@ impl DictationClip {
         samples
     }
 
-    pub fn into_transcription_samples(self) -> Vec<f32> {
+    /// Stages audio from the caller thread, never the microphone owner.
+    pub fn retain_audio(&mut self) {
+        #[cfg(target_os = "macos")]
+        if !self.audio_retained {
+            audio_archive::retain(&self.samples, "completed");
+            self.audio_retained = true;
+        }
+    }
+
+    pub fn into_transcription_samples(mut self) -> Vec<f32> {
+        self.retain_audio();
         self.samples
     }
 }
@@ -799,6 +815,13 @@ impl DictationCapture {
         self.recording = None;
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn take_cancelled_audio(&mut self) -> Option<Vec<f32>> {
+        let intentional = self.is_intentional();
+        let recording = self.recording.take()?;
+        intentional.then(|| recording.finish(None))
+    }
+
     /// When the active recording started, without its pre-roll.
     pub fn started_at(&self) -> Option<CaptureInstant> {
         self.recording
@@ -925,6 +948,8 @@ impl DictationCapture {
         let capture = recording.capture.take();
         let samples = recording.finish(Some(ended_at + tail));
         Finish::Transcribe(DictationClip {
+            #[cfg(target_os = "macos")]
+            audio_retained: false,
             tail_samples: samples_for(kept_tail, PARAKEET_SAMPLE_RATE).min(samples.len()),
             press_samples: samples_for(pre_press, PARAKEET_SAMPLE_RATE).min(samples.len()),
             timeline,

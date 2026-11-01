@@ -217,7 +217,12 @@ See [flags and the versioned JSON schema](docs/transcript-cli.md).
 ## Privacy And Local Data
 
 - Speech transcription runs locally.
-- Hex does not save dictation audio by default.
+- Hex does not save dictation audio by default. In this fork, macOS Labs >
+  Save dictation audio keeps new recordings as local Ogg/Opus files at 24 kbps
+  in `~/Library/Application Support/hex/dictation-audio/`. It requires ffmpeg.
+  History has a separate Audio retention menu: Off, 24 hours, 7 days, 30 days,
+  or Forever (the default), independently of text history.
+  Turning the feature off stops future saves and preserves existing files.
 - History retains successfully pasted dictation text
   for seven days by default, including the local transcript, final text, and
   limited application and timing metadata. It never stores audio, full browser

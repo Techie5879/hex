@@ -161,6 +161,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
     };
     let mut rows = Vec::new();
     if cfg!(target_os = "macos") {
+        rows.push(row(Feature::SaveDictationAudio, &WAVE, "Save dictation audio", "Keep compressed recordings on this Mac. Choose retention in History; default Forever. Requires ffmpeg."));
         rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac before optional OpenCode rewriting; unloads after five idle minutes."));
     }
     if caps.meetings {
@@ -399,6 +400,7 @@ fn row_key(feature: Feature) -> &'static str {
         Feature::StandaloneSpecialKeys => "lab-special-keys",
         Feature::LocalPolish => "lab-local-polish",
         Feature::ProviderFallback => "lab-provider-fallback",
+        Feature::SaveDictationAudio => "lab-save-dictation-audio",
     }
 }
 

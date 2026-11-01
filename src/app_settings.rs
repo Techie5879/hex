@@ -1342,6 +1342,8 @@ impl Default for ExperimentalSettings {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct LabsSettings {
+    /// Keep compressed local recordings from new dictations.
+    pub save_dictation_audio: bool,
     /// Clean up dictation with an app-owned local SpeakoFlow worker.
     pub local_polish: bool,
     /// Allow an explicitly configured same-model provider on quota rejection.
@@ -1415,6 +1417,7 @@ pub const UNLOAD_IDLE_MINUTES: [u32; 4] = [5, 15, 30, 60];
 impl Default for LabsSettings {
     fn default() -> Self {
         Self {
+            save_dictation_audio: false,
             local_polish: false,
             provider_fallback: false,
             live_text: false,
@@ -1838,6 +1841,8 @@ pub struct AppSettings {
     )]
     pub retired_voice_action: Option<serde_json::Value>,
     pub history_retention: crate::history::HistoryRetention,
+    /// Compressed dictation audio retention; independent of text history.
+    pub audio_retention: crate::history::HistoryRetention,
     pub meetings: MeetingSettings,
     #[cfg(hex_capture)]
     pub capture: CaptureSettings,
@@ -1953,6 +1958,7 @@ impl Default for AppSettings {
             dictation_processing: DictationProcessingSettings::default(),
             retired_voice_action: None,
             history_retention: crate::history::HistoryRetention::default(),
+            audio_retention: crate::history::HistoryRetention::Forever,
             meetings: MeetingSettings::default(),
             #[cfg(hex_capture)]
             capture: CaptureSettings::default(),
@@ -2277,6 +2283,8 @@ impl AppSettings {
             Ordering::Release,
         );
         crate::labs::apply(&self.labs);
+        #[cfg(target_os = "macos")]
+        crate::dictation::audio_archive::set_retention(self.audio_retention);
         #[cfg(hex_capture)]
         {
             *CAPTURE_SETTINGS

@@ -88,10 +88,11 @@ pub enum Feature {
     StandaloneSpecialKeys,
     LocalPolish,
     ProviderFallback,
+    SaveDictationAudio,
 }
 
 impl Feature {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -122,6 +123,7 @@ impl Feature {
         Self::StandaloneSpecialKeys,
         Self::LocalPolish,
         Self::ProviderFallback,
+        Self::SaveDictationAudio,
     ];
 
     /// The features this OS and build have.
@@ -174,7 +176,8 @@ impl Feature {
             | Self::ParakeetUltra
             | Self::StandaloneSpecialKeys
             | Self::LocalPolish
-            | Self::ProviderFallback => Audience::Everyone,
+            | Self::ProviderFallback
+            | Self::SaveDictationAudio => Audience::Everyone,
         }
     }
 
@@ -208,7 +211,7 @@ impl Feature {
             Self::VoiceFilter => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::TerminalPaste | Self::ShareShortcut => cfg!(target_os = "windows"),
             Self::StandaloneSpecialKeys => cfg!(target_os = "linux"),
-            Self::LocalPolish => cfg!(target_os = "macos"),
+            Self::LocalPolish | Self::SaveDictationAudio => cfg!(target_os = "macos"),
             Self::MouseShortcuts
             | Self::PauseBrowser
             | Self::KeepOnClipboard
@@ -267,6 +270,7 @@ impl Feature {
             Self::StandaloneSpecialKeys => "special-keys",
             Self::LocalPolish => "local-polish",
             Self::ProviderFallback => "provider-fallback",
+            Self::SaveDictationAudio => "save-dictation-audio",
         }
     }
 
@@ -303,6 +307,7 @@ impl Feature {
             Self::StandaloneSpecialKeys => "labs.standalone_special_keys",
             Self::LocalPolish => "labs.local_polish",
             Self::ProviderFallback => "labs.provider_fallback",
+            Self::SaveDictationAudio => "labs.save_dictation_audio",
         }
     }
 
@@ -371,6 +376,9 @@ impl Feature {
             Self::ParakeetUltra => {
                 "Offer Parakeet Ultra, Moondream's post-trained Parakeet v3, in the Local transcription picker"
             }
+            Self::SaveDictationAudio => {
+                "Keep compressed local audio for new dictations with separate retention (requires ffmpeg)"
+            }
             Self::ProviderFallback => {
                 "Use a configured alternate provider only when rewriting hits a quota or rate limit"
             }
@@ -420,6 +428,7 @@ impl Feature {
             Self::StandaloneSpecialKeys => settings.labs.standalone_special_keys,
             Self::LocalPolish => settings.labs.local_polish,
             Self::ProviderFallback => settings.labs.provider_fallback,
+            Self::SaveDictationAudio => settings.labs.save_dictation_audio,
         }
     }
 
@@ -427,6 +436,7 @@ impl Feature {
         match self {
             Self::LocalPolish => settings.labs.local_polish = on,
             Self::ProviderFallback => settings.labs.provider_fallback = on,
+            Self::SaveDictationAudio => settings.labs.save_dictation_audio = on,
             Self::Meetings => settings.meetings.enabled = on,
             Self::VoiceFilter => settings.experimental.hex_microphone = on,
             Self::Playground => settings.labs.playground = on,
@@ -487,6 +497,12 @@ const MINUTES_SHIFT: u32 = 18;
 const MINUTES_MASK: u32 = (1 << 11) - 1;
 const LOCAL_POLISH: u32 = 1 << 29;
 const PROVIDER_FALLBACK: u32 = 1 << 30;
+const SAVE_DICTATION_AUDIO: u32 = 1 << 31;
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn save_dictation_audio() -> bool {
+    cfg!(target_os = "macos") && on(SAVE_DICTATION_AUDIO)
+}
 
 pub(crate) fn provider_fallback() -> bool {
     on(PROVIDER_FALLBACK)
@@ -643,6 +659,11 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
     let minutes = settings.unload_idle_minutes.clamp(1, 24 * 60) << MINUTES_SHIFT;
     [
         (Feature::LocalPolish, settings.local_polish, LOCAL_POLISH),
+        (
+            Feature::SaveDictationAudio,
+            settings.save_dictation_audio,
+            SAVE_DICTATION_AUDIO,
+        ),
         (
             Feature::ProviderFallback,
             settings.provider_fallback,

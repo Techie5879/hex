@@ -2020,3 +2020,22 @@ fn fun_driver_installed(rt: &rune::Runtime<Ui>) -> bool {
         .as_ref()
         .is_some_and(|status| status.driver_bundle_installed)
 }
+
+#[test]
+fn audio_retention_menu_defaults_to_forever_and_does_not_change_text_retention() {
+    let mut rt = runtime("history", true, PANE_SIZE);
+    rt.state.platform.caps = platform::Capabilities::MACOS;
+    assert!(rt.find("audio-retention").is_none());
+    rt.state.settings.labs.save_dictation_audio = true;
+    refresh(&mut rt);
+    assert!(texts(&rt).iter().any(|text| text == "Audio: Forever"));
+    let text_retention = rt.state.settings.history_retention;
+    tap(&mut rt, "audio-retention");
+    tap_option(&mut rt, 1);
+    assert_eq!(
+        rt.state.settings.audio_retention,
+        crate::history::HistoryRetention::Day
+    );
+    assert_eq!(rt.state.settings.history_retention, text_retention);
+    assert!(saved(&rt) > 0);
+}

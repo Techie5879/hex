@@ -722,6 +722,7 @@ enum Menu {
     TourMicrophone,
     /// How long History keeps dictations.
     HistoryRetention,
+    AudioRetention,
     /// The OpenCode thinking variant.
     Variant,
     /// The selected meeting's overflow menu.

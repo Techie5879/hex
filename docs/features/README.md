@@ -591,7 +591,13 @@ They do not prove that an arbitrary target consumed its clipboard contents.
 Send is not an atomic target-app transaction. Chromium 155 and 156 get the text
 typed instead of pasted for a [Chrome paste bug](dictation.md#ongoing-jobs-and-output).
 
-**Easy to misread:** History Off does not stop diagnostic logging. Diagnostic
+On macOS, Labs > Save dictation audio optionally keeps new intentional captures
+as compressed local files, separately from History. It includes completed,
+cancelled and near-silent captures; it saves before transcription so failed
+recognition still has audio. No legacy audio is recovered. See
+[compressed dictation audio](dictation.md#compressed-dictation-audio).
+
+**Easy to misread:** History Off does not stop audio retention or diagnostic logging. Diagnostic
 logs are separate and currently unbounded on disk. See the
 [privacy guide](../../README.md#privacy-and-local-data).
 

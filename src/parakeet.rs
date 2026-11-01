@@ -404,6 +404,7 @@ impl DictationWorker {
         context: ContextSnapshot,
         print: Option<crate::control::PrintReply>,
     ) -> Result<DictationJobId, &'static str> {
+        clip.retain_audio();
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let job_id = DictationJobId(state.next_output_sequence()?);
         let (Some(engine), Some(jobs)) = (&self.engine, &self.inference_jobs) else {

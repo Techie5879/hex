@@ -114,6 +114,16 @@ const NUMERIC_CHOICES: [&str; 2] = ["meetings.calendar.lead_minutes", "labs.unlo
 
 const KEYS: &[Key] = &[
     key(
+        "audio_retention",
+        Kind::Choice(&["off", "day", "week", "month", "forever"]),
+        "How long compressed dictation recordings are kept; independent of text history",
+    ),
+    key(
+        "labs.save_dictation_audio",
+        Kind::Bool,
+        "Labs: save compressed local dictation audio using audio_retention (requires ffmpeg)",
+    ),
+    key(
         "labs.provider_fallback",
         Kind::Bool,
         "Labs: use a configured alternate rewrite provider on quota or rate limits only",
@@ -1392,6 +1402,9 @@ mod tests {
         let retention = get(&settings, "history_retention").unwrap();
         assert_eq!(retention[0].value, Value::String("week".into()));
         assert_eq!(retention[0].choices.len(), 5);
+        let audio = get(&settings, "audio_retention").unwrap();
+        assert_eq!(audio[0].value, Value::String("forever".into()));
+        assert_eq!(audio[0].choices.len(), 5);
     }
 
     #[test]
