@@ -478,7 +478,7 @@ const LOCAL_POLISH: u32 = 1 << 29;
 
 /// Local dictation cleanup instead of OpenCode rewriting.
 pub(crate) fn local_polish() -> bool {
-    on(LOCAL_POLISH)
+    cfg!(target_os = "macos") && on(LOCAL_POLISH)
 }
 
 /// This process's switches, initialized when settings are first read.
