@@ -114,9 +114,14 @@ const NUMERIC_CHOICES: [&str; 2] = ["meetings.calendar.lead_minutes", "labs.unlo
 
 const KEYS: &[Key] = &[
     key(
+        "labs.provider_fallback",
+        Kind::Bool,
+        "Labs: use a configured alternate rewrite provider on quota or rate limits only",
+    ),
+    key(
         "labs.local_polish",
         Kind::Bool,
-        "Labs: clean up dictation locally with SpeakoFlow instead of OpenCode",
+        "Labs: clean up dictation locally with SpeakoFlow before optional OpenCode rewriting",
     ),
     key(
         "keyboard_model_switching.enabled",

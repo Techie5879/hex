@@ -1344,6 +1344,8 @@ impl Default for ExperimentalSettings {
 pub struct LabsSettings {
     /// Clean up dictation with an app-owned local SpeakoFlow worker.
     pub local_polish: bool,
+    /// Allow an explicitly configured same-model provider on quota rejection.
+    pub provider_fallback: bool,
     /// Live text beside the HUD while dictating.
     pub live_text: bool,
     /// Live chapters while a meeting records.
@@ -1414,6 +1416,7 @@ impl Default for LabsSettings {
     fn default() -> Self {
         Self {
             local_polish: false,
+            provider_fallback: false,
             live_text: false,
             live_chapters: false,
             playground: false,
@@ -1563,6 +1566,13 @@ pub struct DictationPostProcessing {
     pub model: Option<String>,
     pub variant: Option<String>,
     pub deadline_seconds: u64,
+    /// Same model and variant, retried only for typed provider rate/quota limits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_fallback_provider: Option<String>,
+    /// Run after local cleanup when either positive size threshold is met.
+    /// Both zero preserves the default: rewrite every enabled dictation.
+    pub min_words: usize,
+    pub min_chars: usize,
 }
 
 impl Default for DictationPostProcessing {
@@ -1573,6 +1583,9 @@ impl Default for DictationPostProcessing {
             model: None,
             variant: None,
             deadline_seconds: 30,
+            quota_fallback_provider: None,
+            min_words: 0,
+            min_chars: 0,
         }
     }
 }
@@ -2183,6 +2196,7 @@ impl AppSettings {
 
     /// The saved `labs` switches, read without loading, normalizing, or
     /// writing anything else.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn saved_labs() -> LabsSettings {
         #[derive(Deserialize)]
         struct File {

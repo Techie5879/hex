@@ -161,7 +161,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
     };
     let mut rows = Vec::new();
     if cfg!(target_os = "macos") {
-        rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac. Replaces OpenCode rewriting; unloads after five idle minutes."));
+        rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac before optional OpenCode rewriting; unloads after five idle minutes."));
     }
     if caps.meetings {
         rows.push(row(
@@ -363,6 +363,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
             tr("Paste with Ctrl+Shift+V so terminals accept it"),
         ));
     }
+    rows.push(row(Feature::ProviderFallback, &SPARKLES, tr("Provider quota fallback"), tr("Try the configured provider when rewriting hits a usage limit. Timeouts keep the previous text.")));
     rows
 }
 
@@ -397,6 +398,7 @@ fn row_key(feature: Feature) -> &'static str {
         Feature::ParakeetUltra => "lab-parakeet-ultra",
         Feature::StandaloneSpecialKeys => "lab-special-keys",
         Feature::LocalPolish => "lab-local-polish",
+        Feature::ProviderFallback => "lab-provider-fallback",
     }
 }
 

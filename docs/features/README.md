@@ -889,7 +889,9 @@ Foreground context -> Select processing
 
 Selected mode                            // replaces Global, does not layer over it
   -> Corrections
-  -> OpenCode transformation             // optional provider-backed rewrite
+  -> Local SpeakoFlow cleanup            // optional macOS Labs feature
+  -> OpenCode transformation             // optional provider-backed rewrite; per-mode min_words OR min_chars after cleanup
+     -> Configured same-model provider   // Labs opt-in, typed quota/rate rejection only
   -> Transformations                     // ordered text chain
   -> Paste or Send
 
@@ -899,7 +901,10 @@ Stage fails -> Preserve its input        // failed chain discards partial result
 Built-in text transformations run natively. Custom transformations come from
 `~/.config/hex/hex.config.ts` and run in Hex's embedded script engine with a 1 s
 limit per call. OpenCode rewriting sends documented
-context to the configured provider; speech transcription stays local.
+context to the configured provider; speech transcription stays local. Both
+cleanup stages receive vocabulary spelling guidance; aliases are optional.
+SpeakoFlow may still preserve misspelled names. Size thresholds default to zero
+and retain the existing always-rewrite behavior; see [local cleanup](../local-cleanup.md).
 
 The built-ins are Lowercase, SpongeBob case, and No trailing punctuation. The
 last removes only the final contiguous run of sentence marks (including
@@ -944,6 +949,11 @@ the switch and the setup/retry notice below;
 the `desktop/opencode_service` tests cover registration, stale-PID, loopback, chunked,
 deadline, and cancellation handling against a local fixture, not a live
 provider.
+
+[Provider quota fallback](../local-cleanup.md#provider-quota-fallback) is a separate
+Labs opt-in. A mode explicitly names its alternate provider; only a typed
+rate/quota rejection can use it, within the original deadline. The generation
+fixtures cover this routing without exhausting a live provider allowance.
 
 `ordinary_processing_snapshots_modes_before_stage_and_keeps_transformations` in
 [parakeet.rs](../../src/parakeet.rs) checks processing-time profile acquisition,
