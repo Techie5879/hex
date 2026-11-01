@@ -39,7 +39,7 @@ pub(super) fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
         content = content.child(s::listener_card(ui, p));
     }
     if !ui.records_shortcuts() {
-        content = content.child(s::desktop_commands(p));
+        content = content.child(s::desktop_commands(ui, p));
     }
     content = content
         .child(basics(ui, p, layer))
@@ -108,7 +108,6 @@ fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
             ));
         }
         rows.extend(configure_shortcuts_row(ui, p).map(CardRow::from));
-        rows.extend(cancel_shortcut_row(ui, p).map(CardRow::from));
     }
     let picker_button = value_button(
         p,
@@ -196,6 +195,7 @@ fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
         .into(),
     );
     rows.extend(microphone_rows(ui, p, layer));
+    rows.push(microphone_release_row(ui, p));
     rows.extend(launch_at_login_rows(ui, p));
     card(p, "basics", rows)
 }
@@ -318,19 +318,28 @@ fn configure_shortcuts_row(ui: &Ui, p: Paint) -> Option<El> {
         })
 }
 
-/// Cancel dictation, once the desktop gave it a key: Hex suggests none, so
-/// the key came from the desktop and is taken from every app (#624).
-/// Desktop shortcuts' Open changes it.
-fn cancel_shortcut_row(ui: &Ui, p: Paint) -> Option<El> {
-    let trigger = s::cancel_grant(ui)?;
-    Some(icon_described_row(
+/// Whether the microphone closes between dictations, beside the microphone
+/// picker: one switch, no confirmation, and a line saying what it means
+/// (issues 61 and #870's copy). The default keeps it ready.
+fn microphone_release_row(ui: &Ui, p: Paint) -> CardRow {
+    let release = ui.settings.release_microphone_while_idle;
+    icon_toggle_row(
         p,
-        "cancel-shortcut",
-        &KEYBOARD,
-        tr("Cancel dictation"),
-        Some((tr_fill("Your desktop granted {}", trigger), p.warning())),
-        row().key("cancel-shortcut-control"),
-    ))
+        "microphone-mode",
+        &ZAP,
+        tr("Turn off the mic when not dictating"),
+        if release {
+            tr("The mic opens only while you dictate; the first moment can be clipped")
+        } else {
+            tr("The mic stays ready so dictation starts instantly; your system shows it in use")
+        },
+        release,
+        |ui: &mut Ui| {
+            let release = !ui.settings.release_microphone_while_idle;
+            ui.update(|settings| settings.release_microphone_while_idle = release);
+        },
+    )
+    .into()
 }
 
 /// Labs › Also pause the browser's permission, under Pause media on macOS:
@@ -814,41 +823,6 @@ fn dictation(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<CardRow> {
             )
         }),
     ));
-    rows.push(
-        icon_row(
-            p,
-            "microphone-mode",
-            &ZAP,
-            tr("Microphone mode"),
-            settings
-                .release_microphone_while_idle
-                .then(|| tr("Opens only while holding the shortcut. Disables pre-roll.")),
-            pick_select(
-                ui,
-                p,
-                "microphone-mode",
-                vec![tr("Keep ready (fast)"), tr("Release when idle")],
-                usize::from(settings.release_microphone_while_idle),
-                |ui, index| {
-                    let release = index == 1;
-                    if release && !ui.settings.release_microphone_while_idle {
-                        ui.confirm_release = true;
-                        return;
-                    }
-                    ui.confirm_release = false;
-                    if ui.settings.release_microphone_while_idle != release {
-                        ui.update(|settings| settings.release_microphone_while_idle = release);
-                    }
-                },
-                layer,
-            ),
-        )
-        .into(),
-    );
-    rows.push(folding(
-        "release-confirmation-fold",
-        ui.confirm_release.then(|| s::release_confirmation(ui, p)),
-    ));
     // Labs › Switch model with keyboard language: its mappings, while on.
     if ui.platform.caps.keyboard_model_switching {
         rows.push(folding(
@@ -879,6 +853,11 @@ fn dictation(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<CardRow> {
         )
         .into(),
     );
+    // macOS runs its models on Metal or Apple's speech engine.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if ui.platform.caps.os != super::platform::Os::Macos {
+        rows.push(speech_engine_row(ui, p, layer));
+    }
     rows
 }
 
@@ -1198,7 +1177,6 @@ pub(super) fn advanced_toggle(ui: &Ui, p: Paint, pane: Pane) -> El {
         .on_press(move |ui: &mut Ui| {
             if let Some(index) = ui.advanced.iter().position(|open| *open == pane) {
                 ui.advanced.remove(index);
-                ui.confirm_release = false;
             } else {
                 ui.advanced.push(pane);
             }
@@ -1221,6 +1199,55 @@ pub(super) fn advanced_toggle(ui: &Ui, p: Paint, pane: Pane) -> El {
             .key("arrow")
             .color(c.icon_weaker),
         )
+}
+
+/// Where the speech model runs (#856): Auto, GPU or CPU, and why Auto
+/// stays on the CPU after a GPU failed.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn speech_engine_row(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> CardRow {
+    use crate::app_settings::TranscriptionDevice;
+    let device = ui.settings.transcription_device;
+    let control = pick_select(
+        ui,
+        p,
+        "speech-engine",
+        vec![tr("Auto"), tr("GPU"), tr("CPU")],
+        match device {
+            TranscriptionDevice::Auto => 0,
+            TranscriptionDevice::Gpu => 1,
+            TranscriptionDevice::Cpu => 2,
+        },
+        |ui, index| {
+            let device = [
+                TranscriptionDevice::Auto,
+                TranscriptionDevice::Gpu,
+                TranscriptionDevice::Cpu,
+            ][index];
+            if ui.settings.transcription_device != device {
+                ui.update(|settings| settings.transcription_device = device);
+            }
+        },
+        layer,
+    );
+    // Fixtures never read this machine's GPU record.
+    let failed = (ui.live() && device == TranscriptionDevice::Auto)
+        .then(crate::transcription::gpu_health::current)
+        .flatten();
+    let note = failed.map(|failure| {
+        tr_named(
+            "Auto uses the CPU because {device} stopped responding. Choose GPU to try it again.",
+            &[("device", failure.device.as_str())],
+        )
+    });
+    icon_row(
+        p,
+        "speech-engine",
+        &WAVE,
+        tr("Speech engine"),
+        note.as_deref(),
+        control,
+    )
+    .into()
 }
 
 /// An icon row choosing one of `labels` from a quiet select.

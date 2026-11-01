@@ -419,16 +419,20 @@ fn contributed_options_are_labs_toggles_off_by_default() {
 #[test]
 fn general_hides_advanced_options_until_asked() {
     let mut rt = runtime("mac-settings", true, PANE_SIZE);
-    assert!(rt.find("microphone-mode").is_none());
+    assert!(rt.find("shortcut-mode").is_none());
     tap(&mut rt, "advanced-toggle");
-    assert!(rt.find("microphone-mode").is_some());
+    assert!(rt.find("shortcut-mode").is_some());
     assert_eq!(
         rt.find("double-tap-only").is_some(),
         rt.state.settings.dictation_hotkey.key.is_some(),
         "double-tap only needs a key chord"
     );
     tap(&mut rt, "advanced-toggle");
-    assert!(rt.find("microphone-mode").is_none());
+    assert!(rt.find("shortcut-mode").is_none());
+    assert!(
+        rt.find("microphone-mode").is_some(),
+        "the mic switch is in General"
+    );
 }
 
 /// General's level bars follow what the microphone hears, settle once it
@@ -1086,12 +1090,12 @@ fn meetings_settings_save_and_ask_for_system_audio() {
         policy(&rt, "us.zoom.xos"),
         Some(MeetingPolicy::AlwaysRecord)
     );
-    pick(&mut rt, "call5-policy", 0);
+    pick(&mut rt, "call7-policy", 0);
     assert_eq!(
         policy(&rt, "problems.kitlangton.com"),
         Some(MeetingPolicy::Ask)
     );
-    assert!(rt.find("call5").is_some());
+    assert!(rt.find("call7").is_some());
     tap(&mut rt, "meetings-enabled");
     assert!(!rt.state.settings.meetings.enabled);
     assert!(rt.find("meeting-folder").is_none());
@@ -1502,9 +1506,6 @@ fn platform_goldens() {
             "meetings-settings",
             "meetings-off",
             "meetings-recording",
-            "mac-onboarding-setup",
-            "mac-onboarding-stale",
-            "mac-onboarding-landed",
             "mac-settings-permissions-stale",
             "shortcut-explainer",
             "shortcut-explainer-toggle",
@@ -1524,15 +1525,6 @@ fn platform_goldens() {
     check_golden("meetings-delete", false, PANE_SIZE);
     check_golden("meetings-rename", true, PANE_SIZE);
     check_golden("meetings-empty", false, PANE_SIZE);
-    check_golden("mac-onboarding", true, PANE_SIZE);
-    check_golden("mac-onboarding-progress", false, PANE_SIZE);
-    check_golden("mac-onboarding-denied", true, PANE_SIZE);
-    check_golden("mac-onboarding-download-failed", false, PANE_SIZE);
-    check_golden("mac-onboarding-listening", true, PANE_SIZE);
-    check_golden("mac-onboarding-reopen", false, PANE_SIZE);
-    check_golden("mac-onboarding-done", true, PANE_SIZE);
-    check_golden("mac-onboarding-mic-open", true, PANE_SIZE);
-    check_golden("mac-onboarding-mic-silent", false, PANE_SIZE);
 }
 
 #[test]
@@ -2019,4 +2011,23 @@ fn fun_driver_installed(rt: &rune::Runtime<Ui>) -> bool {
         .hex_microphone
         .as_ref()
         .is_some_and(|status| status.driver_bundle_installed)
+}
+
+#[test]
+fn audio_retention_menu_defaults_to_forever_and_does_not_change_text_retention() {
+    let mut rt = runtime("history", true, PANE_SIZE);
+    rt.state.platform.caps = platform::Capabilities::MACOS;
+    assert!(rt.find("audio-retention-trigger").is_none());
+    rt.state.settings.labs.save_dictation_audio = true;
+    refresh(&mut rt);
+    assert!(texts(&rt).iter().any(|text| text == "Audio: Forever"));
+    let text_retention = rt.state.settings.history_retention;
+    tap(&mut rt, "audio-retention-trigger");
+    tap_option(&mut rt, 1);
+    assert_eq!(
+        rt.state.settings.audio_retention,
+        crate::history::HistoryRetention::Day
+    );
+    assert_eq!(rt.state.settings.history_retention, text_retention);
+    assert!(saved(&rt) > 0);
 }

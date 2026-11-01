@@ -161,6 +161,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
     };
     let mut rows = Vec::new();
     if cfg!(target_os = "macos") {
+        rows.push(row(Feature::SaveDictationAudio, &WAVE, "Save dictation audio", "Keep compressed recordings on this Mac. Choose retention in History; default Forever. Requires ffmpeg."));
         rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac before optional OpenCode rewriting; unloads after five idle minutes."));
     }
     if caps.meetings {
@@ -278,6 +279,13 @@ fn rows(ui: &Ui) -> Vec<Row> {
                 tr("Tap or hold"),
                 tr("In Toggle mode, hold the shortcut to dictate until you let go; a short tap still starts and stops"),
             ));
+            // macOS's menu-bar menu lists them.
+            rows.push(row(
+                Feature::RecentDictations,
+                &HINTS,
+                tr("Copy recent dictations"),
+                tr("Copy one of your last five dictations from the menu bar, under Paste Last Dictation"),
+            ));
         }
     }
     // Linux's X11 grabs and shortcuts portal take these keys alone.
@@ -320,6 +328,12 @@ fn rows(ui: &Ui) -> Vec<Row> {
         tr("Remove filler words such as um and uh from dictations, without an AI model"),
     ));
     rows.push(row(
+        Feature::HistoryStats,
+        &HINTS,
+        tr("Dictation stats"),
+        tr("Show a summary of your retained dictations at the top of History, with hex history stats"),
+    ));
+    rows.push(row(
         Feature::PickerSortFilter,
         &HINTS,
         tr("Sort and filter models"),
@@ -330,12 +344,6 @@ fn rows(ui: &Ui) -> Vec<Row> {
         &HINTS,
         tr("Benchmark details"),
         tr("Show each model's raw error rate, benchmark, and source in the Local transcription picker"),
-    ));
-    rows.push(row(
-        Feature::CustomModels,
-        &HINTS,
-        tr("Use your own speech model"),
-        tr("Add a speech model file of your own (GGUF) from the Local transcription picker"),
     ));
     let ultra_locked = Feature::ParakeetUltra.off_refusal(&ui.settings).is_some();
     rows.push(Row {
@@ -394,11 +402,13 @@ fn row_key(feature: Feature) -> &'static str {
         Feature::SidedChords => "lab-sided-modifier-chords",
         Feature::TapOrHold => "lab-tap-or-hold",
         Feature::BenchmarkDetails => "lab-benchmark-details",
-        Feature::CustomModels => "lab-custom-models",
         Feature::ParakeetUltra => "lab-parakeet-ultra",
         Feature::StandaloneSpecialKeys => "lab-special-keys",
         Feature::LocalPolish => "lab-local-polish",
         Feature::ProviderFallback => "lab-provider-fallback",
+        Feature::SaveDictationAudio => "lab-save-dictation-audio",
+        Feature::HistoryStats => "lab-history-stats",
+        Feature::RecentDictations => "lab-recent-dictations",
     }
 }
 

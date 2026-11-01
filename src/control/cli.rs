@@ -60,10 +60,10 @@ pub enum ControlCli {
         #[command(flatten)]
         output: Output,
     },
-    /// Start, stop, cancel, or toggle a dictation, as the shortcut would.
+    /// Start, stop, or toggle a dictation, as the shortcut would.
     ///
-    /// `start` locks the recording: `stop` or the shortcut finishes it,
-    /// `cancel` or Escape discards it. Repeating a command changes nothing.
+    /// `start` locks the recording: `stop` or the shortcut finishes it.
+    /// Repeating a command changes nothing.
     Dictation {
         #[arg(value_enum)]
         action: CaptureAction,
@@ -280,7 +280,7 @@ pub enum ModelCommand {
         #[arg(long)]
         language: Option<String>,
     },
-    /// Labs: copy a GGUF speech model into Hex after checking its header,
+    /// Copy a GGUF speech model into Hex after checking its header,
     /// and print its id. The original is left as it is.
     Import {
         path: std::path::PathBuf,
@@ -288,12 +288,12 @@ pub enum ModelCommand {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Labs: rename an imported model.
+    /// Rename an imported or found model.
     Rename { model: String, name: String },
-    /// Labs: check Hex's copy of an import again; a copy whose contents
+    /// Check Hex's copy of an import (or a found file) again; a copy whose contents
     /// still match is ready again.
     Repair { model: String },
-    /// Labs: remove Hex's copy of an imported model.
+    /// Remove Hex's copy of an imported model, or forget a found one (its file stays).
     Remove { model: String },
 }
 
@@ -407,11 +407,18 @@ pub fn run(command: ControlCli) -> u8 {
             raw,
             output,
         } => {
-            if let Err(error) = super::check_flags(action, print, raw) {
+            if let Err(error) = super::check_flags(action.into(), print, raw) {
                 eprintln!("hex: {}", error.message);
                 return 2;
             }
-            send(ControlCommand::Dictation { action, print, raw }, output)
+            send(
+                ControlCommand::Dictation {
+                    action: action.into(),
+                    print,
+                    raw,
+                },
+                output,
+            )
         }
         ControlCli::PasteLast { output } => send(ControlCommand::PasteLast, output),
         ControlCli::Settings { command } => settings(command),
@@ -555,21 +562,15 @@ fn install_model(model: Option<String>, language: Option<String>, output: Output
 /// process; a running Hex lists it at once.
 fn import_model(path: &std::path::Path, name: Option<&str>) -> color_eyre::Result<()> {
     use crate::transcription::custom_models;
-    if !crate::labs::custom_models() {
-        color_eyre::eyre::bail!(custom_models::OFF);
-    }
     let id = custom_models::import(path, name, &std::sync::atomic::AtomicBool::new(false))?;
     let definition = custom_models::definition(id);
     println!("imported\t{}\t{}", id.as_str(), definition.name);
     Ok(())
 }
 
-/// The import `model` names, while Labs › Use your own speech model is on.
+/// The import or found model in use that `model` names.
 fn imported(model: &str) -> color_eyre::Result<crate::transcription::models::CustomModelId> {
     use crate::transcription::custom_models;
-    if !crate::labs::custom_models() {
-        color_eyre::eyre::bail!(custom_models::OFF);
-    }
     crate::transcription::models::CustomModelId::parse(model)
         .filter(|id| custom_models::is_registered(*id))
         .ok_or_else(|| {
@@ -718,6 +719,12 @@ pub enum CaptureCommand {
         #[command(flatten)]
         output: Output,
     },
+    /// Stop the capture that records, else start one (for a key that fires
+    /// on the press only).
+    Toggle {
+        #[command(flatten)]
+        output: Output,
+    },
     /// What records, what is being written, and the last capture.
     Status {
         #[command(flatten)]
@@ -810,6 +817,7 @@ pub fn capture(command: CaptureCommand) -> u8 {
         CaptureCommand::Start { output, .. } => (C::ScrawlCapture { action: A::Start }, output),
         CaptureCommand::Stop { output } => (C::ScrawlCapture { action: A::Stop }, output),
         CaptureCommand::Cancel { output } => (C::ScrawlCapture { action: A::Cancel }, output),
+        CaptureCommand::Toggle { output } => (C::ScrawlCapture { action: A::Toggle }, output),
         CaptureCommand::Status { output } => (C::ScrawlCapture { action: A::Status }, output),
         CaptureCommand::List { limit, output } => (C::ScrawlCaptureList { limit }, output),
         CaptureCommand::Show { capture, output } => (C::ScrawlCaptureShow { capture }, output),

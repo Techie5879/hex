@@ -1,6 +1,10 @@
 #[cfg(target_os = "macos")]
 pub(crate) mod audio;
 #[cfg(target_os = "macos")]
+pub(crate) mod audio_archive;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) mod browser_page;
+#[cfg(target_os = "macos")]
 pub(crate) mod config;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 pub(crate) mod context;
@@ -14,6 +18,7 @@ pub(crate) mod local_polish;
 pub(crate) mod modes;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 pub(crate) mod processor;
+pub(crate) mod silence;
 pub(crate) mod spoken_formatting;
 pub(crate) mod spoken_symbols;
 pub(crate) mod text_replacements;
@@ -73,7 +78,7 @@ pub enum ShortcutMode {
     /// Hold the shortcut while speaking; release to finish.
     #[default]
     Hold,
-    /// Press once to start and again to finish. Escape still cancels.
+    /// Press once to start and again to finish.
     Toggle,
 }
 
@@ -119,6 +124,8 @@ fn signed_ms(later: CaptureInstant, earlier: CaptureInstant) -> i64 {
 
 pub struct DictationClip {
     samples: Vec<f32>,
+    #[cfg(target_os = "macos")]
+    audio_retained: bool,
     /// How many trailing samples were captured after the release. The stop
     /// tone sounds during them, so the silence gate ignores them.
     tail_samples: usize,
@@ -165,6 +172,8 @@ impl DictationClip {
     pub fn for_test(samples: Vec<f32>) -> Self {
         Self {
             samples,
+            #[cfg(target_os = "macos")]
+            audio_retained: false,
             tail_samples: 0,
             press_samples: 0,
             timeline: ClipTimeline::default(),
@@ -205,11 +214,18 @@ impl DictationClip {
         }
     }
 
-    /// Whether the capture holds no speech worth transcribing: its level stays
-    /// below the silence threshold or, once the speech detector is installed,
-    /// the detector finds no speech in it (a key click, the start tone, or a
-    /// noisy room).
+    /// Whether the capture holds no speech worth transcribing.
+    #[cfg(test)]
     pub fn is_near_silent(&self) -> bool {
+        self.silence().is_some()
+    }
+
+    /// Why the capture holds no speech worth transcribing, if it doesn't: its
+    /// level stays below the silence threshold or, once the speech detector
+    /// is installed, the detector finds no speech in it (a key click, the
+    /// start tone, a noisy room, or a microphone turned down too far, #782).
+    /// Logs the measured level and peak against the thresholds.
+    pub fn silence(&self) -> Option<silence::Silence> {
         let level_dbfs = self.loudest_window_dbfs();
         let silent = level_dbfs < SILENCE_THRESHOLD_DBFS;
         if silent {
@@ -236,19 +252,25 @@ impl DictationClip {
                 since_glitch_ms = ms(source.and_then(|source| source.since_glitch)),
                 "discarded near-silent dictation without transcribing it"
             );
-            return true;
+            return Some(silence::Silence::TooQuiet);
         }
         let released = self.samples.len().saturating_sub(self.tail_samples);
         let started = std::time::Instant::now();
         match crate::transcription::speech_detector::contains_speech(&self.samples[..released]) {
             Some(false) => {
+                let peak = self.samples[..released]
+                    .iter()
+                    .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
                 tracing::info!(
                     level_dbfs,
+                    silence_threshold_dbfs = SILENCE_THRESHOLD_DBFS,
+                    peak_dbfs = 20.0 * peak.max(f32::MIN_POSITIVE).log10(),
+                    speech_threshold = crate::transcription::speech_detector::THRESHOLD,
                     audio_ms = self.duration_ms(),
                     vad_ms = started.elapsed().as_millis() as u64,
                     "discarded dictation without detected speech"
                 );
-                true
+                Some(silence::Silence::NoSpeech)
             }
             Some(true) => {
                 tracing::debug!(
@@ -256,9 +278,9 @@ impl DictationClip {
                     vad_ms = started.elapsed().as_millis() as u64,
                     "speech detected in dictation"
                 );
-                false
+                None
             }
-            None => false,
+            None => None,
         }
     }
 
@@ -269,7 +291,17 @@ impl DictationClip {
         samples
     }
 
-    pub fn into_transcription_samples(self) -> Vec<f32> {
+    /// Stages audio from the caller thread, never the microphone owner.
+    pub fn retain_audio(&mut self) {
+        #[cfg(target_os = "macos")]
+        if !self.audio_retained {
+            audio_archive::retain(&self.samples, "completed");
+            self.audio_retained = true;
+        }
+    }
+
+    pub fn into_transcription_samples(mut self) -> Vec<f32> {
+        self.retain_audio();
         self.samples
     }
 }
@@ -799,6 +831,13 @@ impl DictationCapture {
         self.recording = None;
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn take_cancelled_audio(&mut self) -> Option<Vec<f32>> {
+        let intentional = self.is_intentional();
+        let recording = self.recording.take()?;
+        intentional.then(|| recording.finish(None))
+    }
+
     /// When the active recording started, without its pre-roll.
     pub fn started_at(&self) -> Option<CaptureInstant> {
         self.recording
@@ -925,6 +964,8 @@ impl DictationCapture {
         let capture = recording.capture.take();
         let samples = recording.finish(Some(ended_at + tail));
         Finish::Transcribe(DictationClip {
+            #[cfg(target_os = "macos")]
+            audio_retained: false,
             tail_samples: samples_for(kept_tail, PARAKEET_SAMPLE_RATE).min(samples.len()),
             press_samples: samples_for(pre_press, PARAKEET_SAMPLE_RATE).min(samples.len()),
             timeline,
@@ -1502,7 +1543,7 @@ mod tests {
         second.publish(said("next"));
         assert_eq!(capture.take_partial(), Some(said("next")));
 
-        // Escape drops the text with the recording.
+        // A cancelled recording (a lost microphone) drops its text.
         second.publish(said("next one"));
         capture.cancel();
         assert_eq!(capture.take_partial(), None);
@@ -1538,7 +1579,7 @@ mod tests {
         cancelled.cancel();
         assert!(!cancelled.is_streaming());
         let (_, _, cancels) = stream_traffic(&commands);
-        assert_eq!(cancels, 1, "Escape cancels");
+        assert_eq!(cancels, 1, "a cancelled recording cancels its stream");
 
         let (offline, commands) = TranscriptionEngine::for_test_without_streaming();
         let mut capture = DictationCapture::new(16_000);

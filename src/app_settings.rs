@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection};
 
 mod persistence;
+mod post_processing;
+pub use post_processing::DictationPostProcessing;
 mod shortcut_repair;
 
 static RECORDING_DUCK_VOLUME: AtomicU32 = AtomicU32::new(0.2_f32.to_bits());
@@ -456,6 +458,15 @@ impl HotkeyKey {
             .filter(|number| (1..=32).contains(number))
     }
 
+    /// What its keycap shows: the label, except that on Windows a
+    /// punctuation key shows what it types on the active layout now (#815).
+    pub fn keycap(&self) -> String {
+        #[cfg(target_os = "windows")]
+        return crate::windows::input::keycap_label(&self.label);
+        #[cfg(not(target_os = "windows"))]
+        self.label.clone()
+    }
+
     fn same_key(&self, other: &Self) -> bool {
         if cfg!(target_os = "macos") {
             self.code == other.code
@@ -466,17 +477,27 @@ impl HotkeyKey {
 }
 
 /// The keycap label for a key name: one character in uppercase, otherwise
-/// the name with a leading capital ("space" -> "Space", "f12" -> "F12").
+/// each word with a leading capital ("space" -> "Space", "f12" -> "F12",
+/// "num enter" -> "Num Enter").
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn key_label(name: &str) -> String {
     let name = name.trim();
-    let mut characters = name.chars();
-    match characters.next() {
-        _ if shortcut_repair::is_scroll_lock(name) => "Scroll Lock".into(),
-        Some(first) if name.chars().count() == 1 => first.to_uppercase().collect(),
-        Some(first) => first.to_uppercase().chain(characters).collect(),
-        None => String::new(),
+    if shortcut_repair::is_scroll_lock(name) {
+        return "Scroll Lock".into();
     }
+    if name.chars().count() == 1 {
+        return name.to_uppercase();
+    }
+    name.split(' ')
+        .map(|word| {
+            let mut characters = word.chars();
+            characters
+                .next()
+                .map(|first| first.to_uppercase().chain(characters).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// A shortcut as a chord: the set of keys held together, any order and
@@ -822,7 +843,7 @@ impl HotkeyBinding {
         self.modifiers
             .keycaps()
             .map(str::to_string)
-            .chain(self.key.iter().map(|key| key.label.clone()))
+            .chain(self.key.iter().map(HotkeyKey::keycap))
             .collect()
     }
 
@@ -835,7 +856,7 @@ impl HotkeyBinding {
             .chain(
                 self.key
                     .iter()
-                    .map(|key| (key.label.clone(), ModifierSide::Either)),
+                    .map(|key| (key.keycap(), ModifierSide::Either)),
             )
             .collect()
     }
@@ -1247,12 +1268,14 @@ impl CalendarSettings {
 /// The call services Settings always lists, by provider key (the app's
 /// canonical bundle ID, or the website host for browser services) and
 /// English name.
-pub const KNOWN_MEETING_PROVIDERS: [(&str, &str); 5] = [
+pub const KNOWN_MEETING_PROVIDERS: [(&str, &str); 7] = [
     ("com.tinyspeck.slackmacgap", "Slack huddles"),
     ("us.zoom.xos", "Zoom"),
     ("meet.google.com", "Google Meet"),
     ("com.microsoft.teams2", "Microsoft Teams"),
     ("com.apple.FaceTime", "FaceTime"),
+    ("net.whatsapp.WhatsApp", "WhatsApp"),
+    ("com.gather.GatherV2", "Gather"),
 ];
 
 /// What Hex does when it detects a call from a provider.
@@ -1333,15 +1356,15 @@ impl Default for ExperimentalSettings {
     }
 }
 
-/// The `labs` switches (`crate::labs`), every one off by default. Labs
-/// features that already had a home keep it: `meetings.enabled`,
-/// `experimental.hex_microphone`, `paste_with_shift`,
-/// `keyboard_model_switching.enabled`, `pause_browser_media`, and
-/// `share_dictation_shortcut`. An older
-/// `labs.enabled` master switch is read and ignored.
+/// The `labs` switches (`crate::labs`), every one off by default (`history_stats`: issue 790, `recent_dictations`: issue 877, macOS).
+/// Labs features that already had a home keep it: `meetings.enabled`, `paste_with_shift`,
+/// `experimental.hex_microphone`, `keyboard_model_switching.enabled`, `pause_browser_media`,
+/// and `share_dictation_shortcut`. An older `labs.enabled` master switch is read and ignored.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct LabsSettings {
+    /// Keep compressed local recordings from new dictations.
+    pub save_dictation_audio: bool,
     /// Clean up dictation with an app-owned local SpeakoFlow worker.
     pub local_polish: bool,
     /// Allow an explicitly configured same-model provider on quota rejection.
@@ -1356,43 +1379,32 @@ pub struct LabsSettings {
     pub vocabulary_biasing: bool,
     /// Mouse buttons may be recorded as shortcuts (macOS, issue 209).
     pub mouse_shortcuts: bool,
-    /// The engine unloads the speech model after `unload_idle_minutes`
-    /// unused (issue 442).
+    /// The engine unloads the speech model after `unload_idle_minutes` unused (issue 442).
     pub unload_idle: bool,
     /// 5, 15 (the default), 30, or 60.
     pub unload_idle_minutes: u32,
-    /// Paste last dictation's row offers its default shortcut back
-    /// (issue 613).
+    /// Paste last dictation's row offers its default shortcut back (issue 613).
     pub restore_shortcut_default: bool,
-    /// A pasted dictation stays on the clipboard instead of the previous
-    /// clipboard coming back (macOS, issue 200).
+    /// A pasted dictation stays on the clipboard, not the previous one (macOS, issue 200).
     pub keep_on_clipboard: bool,
-    /// A dictation is put on the clipboard and never pasted (macOS,
-    /// issue 629).
+    /// A dictation is put on the clipboard and never pasted (macOS, issue 629).
     pub copy_only: bool,
-    /// Spoken "new line", "new paragraph", and "open/close quote" become
-    /// line breaks and quotation marks (issue 630).
+    /// Spoken "new line", "new paragraph", and "open/close quote" become line breaks and quotes (issue 630).
     pub spoken_formatting: bool,
-    /// Filler words such as "um" and "uh" are removed from dictations
-    /// (issue 631).
+    /// Filler words such as "um" and "uh" are removed from dictations (issue 631).
     pub filler_words: bool,
-    /// `hex meetings show --srt|--vtt` exports a meeting transcript as
-    /// timed subtitles (macOS, issue 633).
+    /// `hex meetings show --srt|--vtt` exports a transcript as timed subtitles (macOS, issue 633).
     pub subtitle_export: bool,
-    /// `second_dictation_hotkey` dictates like the dictation shortcut
-    /// (macOS, issue 627).
+    /// `second_dictation_hotkey` dictates like the dictation shortcut (macOS, issue 627).
     pub second_dictation_shortcut: bool,
-    /// A pasted dictation gets one leading space when the character before
-    /// the cursor is one a space belongs after (macOS, issue 632).
+    /// A paste gets a leading space when the character before the cursor wants one (macOS, issue 632).
     pub smart_spacing: bool,
-    /// Spoken punctuation and symbol words ("comma", "hashtag",
-    /// "underscore") become characters joined to their words (issue 678).
+    /// Spoken symbol words ("comma", "hashtag", "underscore") become characters joined to their words (issue 678).
     pub spoken_symbols: bool,
     /// The Local transcription picker offers a sort (Recommended, Size,
     /// Name) and a "Supports the saved language" toggle (issue 645).
     pub picker_sort_filter: bool,
-    /// The shortcut recorder keeps the side of each modifier in a
-    /// modifier-only chord, such as Right ⌘ + Right ⌥ (macOS, issue 710).
+    /// The recorder keeps each modifier's side in a modifier-only chord, such as Right ⌘ + Right ⌥ (macOS, issue 710).
     pub sided_modifier_chords: bool,
     /// In Toggle mode, a press held past the hold threshold dictates until
     /// it lifts; a short tap still starts and stops (macOS, issue 711).
@@ -1400,13 +1412,12 @@ pub struct LabsSettings {
     /// The Local transcription picker shows each model's raw error rate
     /// (WER or CER), its benchmark, source, and conditions (issue 647).
     pub benchmark_details: bool,
-    /// The Local transcription picker can add a GGUF speech model from disk
-    /// (issues 648 and 743).
-    pub custom_models: bool,
     /// Parakeet Ultra joins the Local transcription picker (issue 648).
     pub parakeet_ultra: bool,
     /// Menu, Pause, and Scroll Lock may be shortcut keys (Linux, issue 767).
     pub standalone_special_keys: bool,
+    pub history_stats: bool,
+    pub recent_dictations: bool,
 }
 
 /// The idle times Labs › Unload model when idle offers, in minutes.
@@ -1415,6 +1426,7 @@ pub const UNLOAD_IDLE_MINUTES: [u32; 4] = [5, 15, 30, 60];
 impl Default for LabsSettings {
     fn default() -> Self {
         Self {
+            save_dictation_audio: false,
             local_polish: false,
             provider_fallback: false,
             live_text: false,
@@ -1437,9 +1449,10 @@ impl Default for LabsSettings {
             sided_modifier_chords: false,
             tap_or_hold: false,
             benchmark_details: false,
-            custom_models: false,
             parakeet_ultra: false,
             standalone_special_keys: false,
+            history_stats: false,
+            recent_dictations: false,
         }
     }
 }
@@ -1467,6 +1480,17 @@ pub fn default_meeting_output_folder() -> PathBuf {
         } else {
             "Hex Meetings"
         })
+}
+
+/// Where Linux and Windows run the speech model (#856): Auto picks a GPU
+/// unless it failed before under its current driver, then the CPU.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionDevice {
+    #[default]
+    Auto,
+    Gpu,
+    Cpu,
 }
 
 /// Where the recording HUD appears while dictating.
@@ -1554,40 +1578,6 @@ pub struct DictationMode {
     pub replacements: Vec<TextReplacement>,
     pub transformations: Vec<String>,
     pub post_processing: DictationPostProcessing,
-}
-
-/// Persisted OpenCode rewrite settings for one mode.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct DictationPostProcessing {
-    pub enabled: bool,
-    pub prompt: String,
-    /// Optional `provider/model` key from the OpenCode catalog.
-    pub model: Option<String>,
-    pub variant: Option<String>,
-    pub deadline_seconds: u64,
-    /// Same model and variant, retried only for typed provider rate/quota limits.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quota_fallback_provider: Option<String>,
-    /// Run after local cleanup when either positive size threshold is met.
-    /// Both zero preserves the default: rewrite every enabled dictation.
-    pub min_words: usize,
-    pub min_chars: usize,
-}
-
-impl Default for DictationPostProcessing {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            prompt: "Rewrite the transcript into clear, natural text while preserving the speaker's intended meaning.".into(),
-            model: None,
-            variant: None,
-            deadline_seconds: 30,
-            quota_fallback_provider: None,
-            min_words: 0,
-            min_chars: 0,
-        }
-    }
 }
 
 /// Annotate: Scrawl's captures inside Hex, on macOS, Linux, and Windows
@@ -1826,6 +1816,8 @@ pub struct AppSettings {
     pub second_dictation_hotkey: Option<HotkeyBinding>,
     pub show_dock_icon: bool,
     pub transcription: TranscriptionSelection,
+    /// Where the speech model runs (Linux and Windows).
+    pub transcription_device: TranscriptionDevice,
     pub transcription_recents: Vec<TranscriptionSelection>,
     pub keyboard_model_switching: KeyboardModelSwitching,
     pub dictation_processing: DictationProcessingSettings,
@@ -1838,6 +1830,8 @@ pub struct AppSettings {
     )]
     pub retired_voice_action: Option<serde_json::Value>,
     pub history_retention: crate::history::HistoryRetention,
+    /// Compressed dictation audio retention; independent of text history.
+    pub audio_retention: crate::history::HistoryRetention,
     pub meetings: MeetingSettings,
     #[cfg(hex_capture)]
     pub capture: CaptureSettings,
@@ -1854,6 +1848,9 @@ pub struct AppSettings {
     pub enable_on_launch: bool,
     /// Paste with Ctrl-Shift-V for terminals (Linux and Windows).
     pub paste_with_shift: bool,
+    /// Hex keeps its own GNOME custom keyboard shortcuts, on GNOME without a
+    /// shortcuts portal (Linux, #781).
+    pub gnome_keyboard_shortcuts: bool,
     /// Let other apps see the dictation shortcut's key presses too
     /// (Windows), so a push-to-talk key can drive both.
     pub share_dictation_shortcut: bool,
@@ -1948,11 +1945,13 @@ impl Default for AppSettings {
             second_dictation_hotkey: None,
             show_dock_icon: true,
             transcription: default_transcription(),
+            transcription_device: TranscriptionDevice::Auto,
             transcription_recents: Vec::new(),
             keyboard_model_switching: KeyboardModelSwitching::default(),
             dictation_processing: DictationProcessingSettings::default(),
             retired_voice_action: None,
             history_retention: crate::history::HistoryRetention::default(),
+            audio_retention: crate::history::HistoryRetention::Forever,
             meetings: MeetingSettings::default(),
             #[cfg(hex_capture)]
             capture: CaptureSettings::default(),
@@ -1962,6 +1961,7 @@ impl Default for AppSettings {
             labs: LabsSettings::default(),
             enable_on_launch: true,
             paste_with_shift: false,
+            gnome_keyboard_shortcuts: false,
             share_dictation_shortcut: false,
             mouse_shortcut_notice: false,
             ui_language: None,
@@ -2260,6 +2260,8 @@ impl AppSettings {
         crate::feedback::set_sound_set(self.sound_theme);
         crate::desktop::i18n::apply(self.ui_language.as_deref());
         INDICATOR_POSITION.store(self.indicator_position as u8, Ordering::Relaxed);
+        #[cfg(not(target_os = "macos"))]
+        crate::transcription::local_transcriber::set_device(self.transcription_device);
         RECORDING_DUCK_VOLUME.store(self.recording_duck_volume.to_bits(), Ordering::Relaxed);
         RECORDING_AUDIO_BEHAVIOR.store(self.recording_audio_behavior.encoded(), Ordering::Relaxed);
         PAUSE_BROWSER_MEDIA.store(self.pause_browser_media, Ordering::Relaxed);
@@ -2277,6 +2279,8 @@ impl AppSettings {
             Ordering::Release,
         );
         crate::labs::apply(&self.labs);
+        #[cfg(target_os = "macos")]
+        crate::dictation::audio_archive::set_retention(self.audio_retention);
         #[cfg(hex_capture)]
         {
             *CAPTURE_SETTINGS
