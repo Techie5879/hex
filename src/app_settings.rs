@@ -1569,6 +1569,10 @@ pub struct DictationPostProcessing {
     /// Same model and variant, retried only for typed provider rate/quota limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_fallback_provider: Option<String>,
+    /// Run after local cleanup when either positive size threshold is met.
+    /// Both zero preserves the default: rewrite every enabled dictation.
+    pub min_words: usize,
+    pub min_chars: usize,
 }
 
 impl Default for DictationPostProcessing {
@@ -1580,6 +1584,8 @@ impl Default for DictationPostProcessing {
             variant: None,
             deadline_seconds: 30,
             quota_fallback_provider: None,
+            min_words: 0,
+            min_chars: 0,
         }
     }
 }

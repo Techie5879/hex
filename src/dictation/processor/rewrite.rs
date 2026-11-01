@@ -3,6 +3,12 @@
 use super::*;
 
 impl Profile {
+    fn meets_rewrite_threshold(&self, text: &str) -> bool {
+        (self.min_words == 0 && self.min_chars == 0)
+            || (self.min_words > 0 && text.split_whitespace().count() >= self.min_words)
+            || (self.min_chars > 0 && text.chars().count() >= self.min_chars)
+    }
+
     pub(super) fn rewrite(
         &self,
         mut text: String,
@@ -20,12 +26,15 @@ impl Profile {
             let result = polish(&text, instructions);
             apply(&mut text, result, "SpeakoFlow", &mut failures);
         }
-        if self.ai_enabled && !cancelled.load(Ordering::Acquire) {
+        let run_ai = self.ai_enabled
+            && self.meets_rewrite_threshold(&text)
+            && !cancelled.load(Ordering::Acquire);
+        if run_ai {
             let result = generate(&text);
             apply(&mut text, result, "OpenCode", &mut failures);
         }
-        let observation = (local || self.ai_enabled).then(|| ProcessingObservation {
-            profile: match (local, self.ai_enabled) {
+        let observation = (local || run_ai).then(|| ProcessingObservation {
+            profile: match (local, run_ai) {
                 (true, true) => format!("{} / local SpeakoFlow + OpenCode", self.name),
                 (true, false) => format!("{} / local SpeakoFlow", self.name),
                 _ => self.name.clone(),
@@ -60,6 +69,93 @@ fn apply(text: &mut String, result: Result<String>, stage: &str, failures: &mut 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thresholds_are_inclusive_use_either_limit_and_count_unicode_characters() {
+        let mut profile = Profile::new("Global", "").ai_enabled(true);
+        assert!(profile.meets_rewrite_threshold("hi"));
+        profile.min_words = 3;
+        profile.min_chars = 10;
+        assert!(!profile.meets_rewrite_threshold("one two"));
+        assert!(profile.meets_rewrite_threshold("a b c"));
+        assert!(profile.meets_rewrite_threshold("abcdefghij"));
+        assert!(!profile.meets_rewrite_threshold("é".repeat(9).as_str()));
+        assert!(profile.meets_rewrite_threshold("é".repeat(10).as_str()));
+        profile.min_words = 0;
+        assert!(!profile.meets_rewrite_threshold("a b c"));
+        profile.min_chars = 0;
+        profile.min_words = 3;
+        assert!(!profile.meets_rewrite_threshold("abcdefghij"));
+        assert!(profile.meets_rewrite_threshold("a\tb\nc"));
+    }
+
+    #[test]
+    fn size_gate_uses_local_output_and_reports_only_executed_steps() {
+        let mut profile = Profile::new("Global", "Only for OpenCode").ai_enabled(true);
+        profile.min_words = 3;
+        for local in [false, true] {
+            let result = profile.rewrite(
+                "uh one two".into(),
+                local,
+                &AtomicBool::new(false),
+                |_, instructions| {
+                    assert_eq!(instructions, "");
+                    Ok("one two".into())
+                },
+                |_| {
+                    assert!(!local, "cleaned input is below the cutoff");
+                    Ok("one two three".into())
+                },
+            );
+            assert_eq!(result.text, if local { "one two" } else { "one two three" });
+            assert_eq!(
+                result.observation.unwrap().profile,
+                if local {
+                    "Global / local SpeakoFlow"
+                } else {
+                    "Global"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn skipped_cloud_pass_without_local_cleanup_has_no_observation() {
+        let mut profile = Profile::new("Global", "").ai_enabled(true);
+        profile.min_words = 150;
+        let result = profile.rewrite(
+            "short".into(),
+            false,
+            &AtomicBool::new(false),
+            |_, _| panic!("local disabled"),
+            |_| panic!("below cutoff"),
+        );
+        assert_eq!(result.text, "short");
+        assert!(result.observation.is_none());
+    }
+
+    #[test]
+    fn failed_local_cleanup_checks_original_size_before_cloud_pass() {
+        let settings = PostProcessingSettings {
+            enabled: true,
+            min_words: 3,
+            min_chars: 100,
+            ..Default::default()
+        };
+        let profile = Profile::configured("Global", ReplacementSet::default(), vec![], &settings);
+        let result = profile.rewrite(
+            "one two three".into(),
+            true,
+            &AtomicBool::new(false),
+            |_, _| Err(eyre!("unavailable")),
+            |text| Ok(text.into()),
+        );
+        assert_eq!(result.text, "one two three");
+        assert_eq!(
+            result.observation.unwrap().fallback.as_deref(),
+            Some("SpeakoFlow: unavailable")
+        );
+    }
 
     #[test]
     fn local_cleanup_feeds_opencode_and_leaves_transformations_until_last() {

@@ -148,6 +148,39 @@ fn prompt_for(entries: &[VocabularyEntry], max_chars: usize) -> Option<String> {
     (!prompt.is_empty()).then_some(prompt)
 }
 
+/// Shared name-spelling context for local cleanup and OpenCode. The character
+/// budget includes instructions and admits only complete vocabulary entries.
+pub(crate) fn cleanup_prompt(entries: &[VocabularyEntry], max_chars: usize) -> String {
+    const PREFIX: &str = "Vocabulary (spell these exactly when the speaker means them): ";
+    const RULES: &str = "\nCorrect a likely phonetic or spelling error to a vocabulary term only when the surrounding sentence supports that name. Listed alternative spellings are examples, not an exhaustive list. Do not replace ordinary words merely because they resemble a term. Preserve quoted text, code, numbers, and all unrelated wording.\n\n";
+    let mut remaining = max_chars.saturating_sub(PREFIX.chars().count() + RULES.chars().count());
+    let mut terms = String::new();
+    for entry in entries {
+        let term = if entry.sounds_like.is_empty() {
+            entry.term.clone()
+        } else {
+            format!(
+                "{} (may be transcribed as {})",
+                entry.term,
+                entry.sounds_like.join(", ")
+            )
+        };
+        let separator = if terms.is_empty() { "" } else { "; " };
+        let length = separator.len() + term.chars().count();
+        if length > remaining {
+            continue;
+        }
+        terms.push_str(separator);
+        terms.push_str(&term);
+        remaining -= length;
+    }
+    if terms.is_empty() {
+        String::new()
+    } else {
+        format!("{PREFIX}{terms}{RULES}")
+    }
+}
+
 /// Adds each name in recognition hints saved before they merged into the
 /// vocabulary (comma, semicolon, or line separated), skipping names already
 /// listed in any case. Returns whether the list changed.
@@ -327,6 +360,29 @@ mod tests {
             term: term.into(),
             sounds_like: sounds_like.iter().map(|&text| text.into()).collect(),
         }
+    }
+
+    #[test]
+    fn cleanup_context_supports_unlisted_misspellings_and_optional_aliases() {
+        let prompt = cleanup_prompt(&[entry("Nexa", &[]), entry("Zephyr", &["zefir"])], 1_024);
+        assert!(prompt.contains("Nexa; Zephyr (may be transcribed as zefir)"));
+        assert!(prompt.contains("phonetic or spelling error"));
+        assert!(prompt.contains("not an exhaustive list"));
+        assert!(prompt.contains("Preserve quoted text, code, numbers"));
+        assert_eq!(cleanup_prompt(&[], 1_024), "");
+    }
+
+    #[test]
+    fn cleanup_context_respects_budget_without_partial_entries_or_unicode_splitting() {
+        let entries = [entry("Café", &["caffay"]), entry("Zephyr", &[])];
+        let full = cleanup_prompt(&entries, 1_024);
+        let exact = full.chars().count();
+        assert_eq!(cleanup_prompt(&entries, exact), full);
+        let limited = cleanup_prompt(&entries, exact - 1);
+        assert!(limited.chars().count() < exact);
+        assert!(limited.contains("Café (may be transcribed as caffay)"));
+        assert!(!limited.contains("Zephyr"));
+        assert_eq!(cleanup_prompt(&entries, 1), "");
     }
 
     #[test]

@@ -30,6 +30,8 @@ pub struct Profile {
     model: Option<Model>,
     deadline: Duration,
     quota_fallback_provider: Option<String>,
+    min_words: usize,
+    min_chars: usize,
     replacements: ReplacementSet,
     transformations: Vec<String>,
 }
@@ -43,6 +45,8 @@ impl Profile {
             model: None,
             deadline: Duration::from_secs(30),
             quota_fallback_provider: None,
+            min_words: 0,
+            min_chars: 0,
             replacements: ReplacementSet::default(),
             transformations: Vec::new(),
         }
@@ -126,6 +130,8 @@ impl Profile {
             }
         }
         profile.quota_fallback_provider = settings.quota_fallback_provider.clone();
+        profile.min_words = settings.min_words;
+        profile.min_chars = settings.min_chars;
         profile.deadline(Duration::from_secs(settings.deadline_seconds.max(1)))
     }
 }
@@ -659,29 +665,8 @@ fn prompt(
     format!(
         "{PROTOCOL_PROMPT}\n\nProfile instructions:\n{}\n\n{}Foreground application: {application}\nBrowser host: {host}\n\nRaw transcript:\n<transcript>\n{transcript}\n</transcript>",
         profile.prompt,
-        vocabulary_lines(vocabulary)
+        crate::dictation::vocabulary::cleanup_prompt(vocabulary, usize::MAX)
     )
-}
-
-/// The vocabulary as prompt lines, so a rewrite spells its terms right;
-/// nothing when it is empty (or its experiment is off).
-fn vocabulary_lines(vocabulary: &[VocabularyEntry]) -> String {
-    if vocabulary.is_empty() {
-        return String::new();
-    }
-    let terms = vocabulary
-        .iter()
-        .map(|entry| match entry.sounds_like.as_slice() {
-            [] => entry.term.clone(),
-            spellings => format!(
-                "{} (may be transcribed as {})",
-                entry.term,
-                spellings.join(", ")
-            ),
-        })
-        .collect::<Vec<_>>()
-        .join("; ");
-    format!("Vocabulary (spell these exactly when the speaker means them): {terms}\n\n")
 }
 
 #[cfg(test)]
@@ -917,7 +902,7 @@ mod tests {
         );
         assert!(prompt.contains(
             "Vocabulary (spell these exactly when the speaker means them): cappuccino (may be \
-             transcribed as capuchin, cap a chino); Rune\n\nForeground application: Slack"
+             transcribed as capuchin, cap a chino); Rune\nCorrect a likely phonetic"
         ));
     }
 

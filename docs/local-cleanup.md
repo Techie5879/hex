@@ -7,9 +7,18 @@ afterward. The raw-dictation shortcut still bypasses processing.
 
 When OpenCode is disabled, the mode's instructions become the system message, preceded by a short
 output-only instruction. The corrected transcript is the user message by
-itself. Application metadata, XML wrappers, and vocabulary lists are not added
-to the prompt. Spelling replacements and speech-model vocabulary remain the
-places to correct names. Deterministic transformations still run afterward.
+itself. Application metadata and XML wrappers are not added. Both cleanup
+stages receive the saved vocabulary as spelling context, with instructions to
+recognize plausible phonetic or spelling errors from the surrounding sentence.
+Aliases are optional examples, not an exhaustive mapping. Ordinary words,
+quoted text, code and numbers should be preserved. The local vocabulary block
+is capped at 1,024 characters, including instructions, with whole entries only.
+
+This is model guidance, not a spelling guarantee. In local replay probes,
+SpeakoFlow ignored several name corrections despite receiving the vocabulary.
+Its fine-tuning favors preserving names. A short dictation that skips OpenCode
+can therefore retain a misspelled name. Deterministic transformations still run
+afterward.
 
 ## Optional OpenCode pass
 
@@ -17,7 +26,16 @@ Enable `post_processing.enabled` in the desired mode and set its
 `post_processing.prompt` to the extra instruction. OpenCode then receives
 SpeakoFlow's cleaned output, along with Hex's usual app context and vocabulary.
 SpeakoFlow uses its basic cleanup prompt in this combination; only OpenCode
-receives the mode's custom instruction. The Output pane shows both steps.
+receives the mode's custom instruction. The Output pane shows both configured steps.
+
+Optional `post_processing.min_words` and `post_processing.min_chars` set an
+inclusive size gate, evaluated after local cleanup. OpenCode runs if either
+positive threshold is met. Both default to zero, preserving rewriting on every
+enabled dictation. A zero threshold is ignored when the other is positive.
+For example, `min_words: 150` and `min_chars: 3000` keep shorter dictations local.
+Words are whitespace-separated; characters are Unicode characters, not bytes.
+When local cleanup fails, the gate uses its unchanged input. History only names
+OpenCode if it actually ran. Raw dictation still bypasses both steps.
 
 The order is speech recognition, replacements, SpeakoFlow, OpenCode, then
 transformations and paste. OpenCode stays off by default. It uses the running
@@ -110,7 +128,10 @@ or native paste; verify those separately in the installed app.
 
 The `dictation::processor::rewrite` tests cover chaining order, independent
 prompts, local-only and OpenCode-only modes, failed or empty OpenCode output,
-local failure, and cancellation between stages using deterministic model doubles.
+local failure, cancellation between stages, inclusive size boundaries, Unicode
+character counts and gating after cleanup using deterministic model doubles.
+Vocabulary tests cover shared spelling instructions, optional aliases and
+bounded whole-entry context. They do not establish model correction accuracy.
 
 The `dictation::processor::generation` fixtures cover typed quota rejection over
 HTTP, provider identity, unchanged prompt/model/variant, transport failure,
