@@ -9,9 +9,16 @@ use std::sync::OnceLock;
 #[cfg(not(test))]
 use std::sync::atomic::{AtomicU8, Ordering};
 
+mod portuguese;
+
+/// A persisted interface-language code (`None` follows the system) and its
+/// native name.
+pub(crate) type LanguageChoice = (Option<&'static str>, &'static str);
+
 /// The selectable interface languages: persisted code and native name. The
-/// leading `None` entry follows the system display language.
-pub(crate) const LANGUAGE_CHOICES: &[(Option<&str>, &str)] = &[
+/// leading `None` entry follows the system display language. Português
+/// (Brasil) has not had a native speaker's review yet.
+pub(crate) const LANGUAGE_CHOICES: &[LanguageChoice] = &[
     (None, "System"),
     (Some("en"), "English"),
     (Some("pl"), "Polski"),
@@ -20,6 +27,7 @@ pub(crate) const LANGUAGE_CHOICES: &[(Option<&str>, &str)] = &[
     (Some("de"), "Deutsch"),
     (Some("es"), "Español"),
     (Some("uk"), "Українська"),
+    (Some("pt"), "Português (Brasil)"),
 ];
 
 /// Active language column into [`TRANSLATIONS`]; 255 means English.
@@ -54,7 +62,11 @@ fn set_current(code: u8) {
 }
 
 const ENGLISH: u8 = 255;
+/// Brazilian Portuguese, kept in its own table ([`portuguese::TRANSLATIONS`]).
+const PORTUGUESE_COLUMN: u8 = 6;
 
+/// The column for a persisted code; `pt` (any Portuguese system language)
+/// is Brazilian Portuguese.
 fn column_for_code(code: &str) -> u8 {
     match code {
         "pl" => 0,
@@ -63,6 +75,7 @@ fn column_for_code(code: &str) -> u8 {
         "de" => 3,
         "es" => 4,
         "uk" => 5,
+        "pt" => PORTUGUESE_COLUMN,
         _ => ENGLISH,
     }
 }
@@ -177,10 +190,12 @@ pub(crate) fn tr(english: &str) -> &str {
     if column == ENGLISH {
         return english;
     }
-    tables()[column as usize]
-        .get(english)
-        .copied()
-        .unwrap_or(english)
+    let table = if column == PORTUGUESE_COLUMN {
+        portuguese::table()
+    } else {
+        &tables()[column as usize]
+    };
+    table.get(english).copied().unwrap_or(english)
 }
 
 /// Translate a `{}` template and substitute the dynamic value, keeping
@@ -238,6 +253,8 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Labs", ["Laboratorium", "实验室", "ラボ", "Labs", "Labs", "Лабораторія"]),
     ("Tap or hold", ["Stuknij lub przytrzymaj", "轻点或按住", "タップまたは長押し", "Tippen oder halten", "Toca o mantén", "Торкніться або утримуйте"]),
     ("In Toggle mode, hold the shortcut to dictate until you let go; a short tap still starts and stops", ["W trybie przełączania przytrzymaj skrót, aby dyktować do puszczenia; krótkie stuknięcie nadal uruchamia i zatrzymuje", "在切换模式下，按住快捷键即可听写，松开即结束；轻点仍可开始和停止", "切り替えモードでショートカットを長押しすると、離すまで音声入力します。短いタップでは従来どおり開始と停止をします", "Im Umschaltmodus diktierst du, solange du das Kürzel hältst; kurzes Tippen startet und stoppt weiterhin", "En el modo alternar, mantén el atajo para dictar hasta soltarlo; un toque corto sigue iniciando y deteniendo", "У режимі перемикання утримуйте комбінацію, щоб диктувати, доки не відпустите; коротке торкання й далі запускає та зупиняє"]),
+    ("Copy recent dictations", ["Kopiowanie ostatnich dyktowań", "复制最近的听写", "最近の音声入力をコピー", "Letzte Diktate kopieren", "Copiar dictados recientes", "Копіювання останніх диктувань"]),
+    ("Copy one of your last five dictations from the menu bar, under Paste Last Dictation", ["Kopiuj jedno z pięciu ostatnich dyktowań z paska menu, pod Wklej ostatnie dyktowanie", "从菜单栏“粘贴上次听写”下方复制最近五条听写中的一条", "メニューバーの「最後の音声入力を貼り付け」の下から、直近 5 件の音声入力のいずれかをコピーします", "Eines deiner letzten fünf Diktate in der Menüleiste unter „Letztes Diktat einfügen“ kopieren", "Copia uno de tus últimos cinco dictados desde la barra de menús, bajo Pegar último dictado", "Копіюйте одне з п'яти останніх диктувань у рядку меню, під «Вставити останнє диктування»"]),
     ("Record your screen, draw on it, and talk over it", ["Nagrywaj ekran, rysuj po nim i mów w trakcie", "录制屏幕，边画边说", "画面を録画しながら描き、話します", "Bildschirm aufnehmen, darauf zeichnen und dazu sprechen", "Graba la pantalla, dibuja sobre ella y habla mientras tanto", "Записуйте екран, малюйте на ньому й коментуйте голосом"]),
     ("Hex Microphone virtual input and real-time voice filters", ["Wirtualne wejście Hex Microphone i filtry głosu na żywo", "Hex Microphone 虚拟输入与实时声音滤镜", "Hex Microphone 仮想入力とリアルタイムのボイスフィルター", "Virtueller Eingang Hex Microphone und Echtzeit-Stimmfilter", "Entrada virtual Hex Microphone y filtros de voz en tiempo real", "Віртуальний вхід Hex Microphone та голосові фільтри наживо"]),
     ("Live text", ["Tekst na żywo", "实时文字", "ライブテキスト", "Live-Text", "Texto en vivo", "Текст наживо"]),
@@ -278,8 +295,6 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Only models that support {language}", ["Tylko modele obsługujące język {language}", "仅显示支持{language}的模型", "{language} に対応するモデルのみ", "Nur Modelle, die {language} unterstützen", "Solo modelos compatibles con {language}", "Лише моделі з підтримкою {language}"]),
     ("Only models that detect the language automatically", ["Tylko modele, które same rozpoznają język", "仅显示可自动检测语言的模型", "言語を自動で検出するモデルのみ", "Nur Modelle, die die Sprache automatisch erkennen", "Solo modelos que detectan el idioma automáticamente", "Лише моделі, що визначають мову автоматично"]),
     ("{model} is hidden by the language filter: {state}", ["{model} jest ukryty przez filtr języka: {state}", "{model} 已被语言筛选隐藏：{state}", "{model} は言語の絞り込みで非表示です: {state}", "{model} ist durch den Sprachfilter ausgeblendet: {state}", "{model} está oculto por el filtro de idioma: {state}", "{model} приховано фільтром мови: {state}"]),
-    ("Use your own speech model", ["Własny model mowy", "使用你自己的语音模型", "自分の音声モデルを使う", "Eigenes Sprachmodell verwenden", "Usar tu propio modelo de voz", "Власна модель мовлення"]),
-    ("Add a speech model file of your own (GGUF) from the Local transcription picker", ["Dodaj własny plik modelu mowy (GGUF) z listy lokalnej transkrypcji", "从本地转录模型列表添加你自己的语音模型文件（GGUF）", "ローカル文字起こしの一覧から自分の音声モデルファイル（GGUF）を追加します", "Eine eigene Sprachmodell-Datei (GGUF) in der Liste der lokalen Transkription hinzufügen", "Añade tu propio archivo de modelo de voz (GGUF) desde la lista de transcripción local", "Додайте власний файл моделі мовлення (GGUF) зі списку локальної транскрипції"]),
     ("Add model file…", ["Dodaj plik modelu…", "添加模型文件…", "モデルファイルを追加…", "Modelldatei hinzufügen…", "Añadir archivo de modelo…", "Додати файл моделі…"]),
     ("Adding model…", ["Dodawanie modelu…", "正在添加模型…", "モデルを追加中…", "Modell wird hinzugefügt…", "Añadiendo modelo…", "Додавання моделі…"]),
     ("Add model file", ["Dodaj plik modelu", "添加模型文件", "モデルファイルを追加", "Modelldatei hinzufügen", "Añadir archivo de modelo", "Додати файл моделі"]),
@@ -288,13 +303,25 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Model could not be added.", ["Nie udało się dodać modelu.", "无法添加模型。", "モデルを追加できませんでした。", "Das Modell konnte nicht hinzugefügt werden.", "No se pudo añadir el modelo.", "Не вдалося додати модель."]),
     ("Its file is missing. Import it again, or remove it.", ["Brakuje jego pliku. Zaimportuj go ponownie albo usuń.", "它的文件不见了。请重新导入或将其移除。", "ファイルが見つかりません。もう一度取り込むか、削除してください。", "Die Datei fehlt. Importiere sie erneut oder entferne das Modell.", "Falta su archivo. Vuelve a importarlo o elimínalo.", "Його файл зник. Імпортуйте його знову або вилучіть."]),
     ("Its file changed since it was imported. Check it again, import it again, or remove it.", ["Jego plik zmienił się od importu. Sprawdź go ponownie, zaimportuj ponownie albo usuń.", "它的文件在导入后已更改。请重新检查、重新导入或将其移除。", "取り込み後にファイルが変わりました。もう一度確認するか、取り込み直すか、削除してください。", "Die Datei hat sich seit dem Import geändert. Prüfe sie erneut, importiere sie erneut oder entferne das Modell.", "Su archivo cambió desde que se importó. Compruébalo de nuevo, vuelve a importarlo o elimínalo.", "Його файл змінився після імпорту. Перевірте його знову, імпортуйте знову або вилучіть."]),
-    ("Turn on Labs › Use your own speech model to use it.", ["Włącz Laboratorium › Własny model mowy, aby go używać.", "开启实验室 › 使用你自己的语音模型后即可使用。", "使うにはラボ › 自分の音声モデルを使う をオンにしてください。", "Aktiviere Labs › Eigenes Sprachmodell verwenden, um es zu nutzen.", "Activa Labs › Usar tu propio modelo de voz para usarlo.", "Увімкніть Лабораторія › Власна модель мовлення, щоб її використовувати."]),
     ("The imported model", ["Zaimportowany model", "导入的模型", "取り込んだモデル", "Das importierte Modell", "El modelo importado", "Імпортована модель"]),
     ("{model} is missing, so Hex uses {fallback} until you import it again or choose another model", ["Brakuje modelu {model}, więc Hex używa {fallback}, dopóki nie zaimportujesz go ponownie albo nie wybierzesz innego modelu", "{model} 不见了，因此在你重新导入或选择其他模型之前，Hex 将使用 {fallback}", "{model} が見つからないため、もう一度取り込むか別のモデルを選ぶまで Hex は {fallback} を使います", "{model} fehlt, daher verwendet Hex {fallback}, bis du es erneut importierst oder ein anderes Modell wählst", "Falta {model}, así que Hex usa {fallback} hasta que lo vuelvas a importar o elijas otro modelo", "{model} зникла, тож Hex використовує {fallback}, доки ви не імпортуєте її знову або не виберете іншу модель"]),
     ("{model} changed since it was imported, so Hex uses {fallback} until you import it again or choose another model", ["Model {model} zmienił się od importu, więc Hex używa {fallback}, dopóki nie zaimportujesz go ponownie albo nie wybierzesz innego modelu", "{model} 在导入后已更改，因此在你重新导入或选择其他模型之前，Hex 将使用 {fallback}", "{model} は取り込み後に変わったため、もう一度取り込むか別のモデルを選ぶまで Hex は {fallback} を使います", "{model} hat sich seit dem Import geändert, daher verwendet Hex {fallback}, bis du es erneut importierst oder ein anderes Modell wählst", "{model} cambió desde que se importó, así que Hex usa {fallback} hasta que lo vuelvas a importar o elijas otro modelo", "{model} змінилася після імпорту, тож Hex використовує {fallback}, доки ви не імпортуєте її знову або не виберете іншу модель"]),
-    ("{model} needs Labs › Use your own speech model, so Hex uses {fallback} until you turn it on or choose another model", ["Model {model} wymaga Laboratorium › Własny model mowy, więc Hex używa {fallback}, dopóki go nie włączysz albo nie wybierzesz innego modelu", "{model} 需要开启实验室 › 使用你自己的语音模型，因此在你开启它或选择其他模型之前，Hex 将使用 {fallback}", "{model} にはラボ › 自分の音声モデルを使う が必要なため、オンにするか別のモデルを選ぶまで Hex は {fallback} を使います", "{model} braucht Labs › Eigenes Sprachmodell verwenden, daher verwendet Hex {fallback}, bis du es aktivierst oder ein anderes Modell wählst", "{model} necesita Labs › Usar tu propio modelo de voz, así que Hex usa {fallback} hasta que lo actives o elijas otro modelo", "{model} потребує Лабораторія › Власна модель мовлення, тож Hex використовує {fallback}, доки ви її не увімкнете або не виберете іншу модель"]),
     ("Remove {}?", ["Usunąć {}?", "移除 {}？", "{} を削除しますか？", "{} entfernen?", "¿Quitar {}?", "Вилучити {}?"]),
     ("Import again…", ["Zaimportuj ponownie…", "重新导入…", "もう一度取り込む…", "Erneut importieren…", "Importar de nuevo…", "Імпортувати знову…"]),
+    ("Choose a speech model", ["Wybierz model mowy", "选择语音模型", "音声モデルを選ぶ", "Sprachmodell wählen", "Elige un modelo de voz", "Виберіть модель мовлення"]),
+    ("Not tested by Hex", ["Nie testowany przez Hex", "未经 Hex 测试", "Hex では未テスト", "Nicht von Hex getestet", "No probado por Hex", "Не перевірена Hex"]),
+    ("Compatible doesn't mean accurate: a model that loads can still transcribe poorly.", ["Zgodny nie znaczy dokładny: model, który się wczytuje, wciąż może źle transkrybować.", "兼容不代表准确：能加载的模型仍可能转写得很差。", "互換性があっても正確とは限りません。読み込めるモデルでも文字起こしの精度が低いことがあります。", "Kompatibel heißt nicht genau: Ein Modell, das lädt, kann trotzdem schlecht transkribieren.", "Compatible no significa preciso: un modelo que carga aún puede transcribir mal.", "Сумісна не означає точна: модель, що завантажується, все одно може погано транскрибувати."]),
+    ("Found on this computer", ["Znaleziony na tym komputerze", "在这台电脑上找到", "このコンピュータで見つかりました", "Auf diesem Computer gefunden", "Encontrado en este ordenador", "Знайдено на цьому комп’ютері"]),
+    ("Model could not be used.", ["Nie udało się użyć modelu.", "无法使用该模型。", "モデルを使えませんでした。", "Das Modell konnte nicht verwendet werden.", "No se pudo usar el modelo.", "Не вдалося використати модель."]),
+    ("It may be too big for this computer's GPU memory.", ["Może być za duży dla pamięci GPU tego komputera.", "它可能超出这台电脑的 GPU 显存。", "このコンピュータの GPU メモリには大きすぎるかもしれません。", "Es ist für den GPU-Speicher dieses Computers vielleicht zu groß.", "Puede que sea demasiado grande para la memoria GPU de este ordenador.", "Вона може бути завеликою для пам’яті GPU цього комп’ютера."]),
+    ("Forget", ["Zapomnij", "忘记", "忘れる", "Vergessen", "Olvidar", "Забути"]),
+    ("Forget it?", ["Zapomnieć go?", "要忘记它吗？", "忘れますか？", "Vergessen?", "¿Olvidarlo?", "Забути її?"]),
+    ("Checking the model stopped.", ["Sprawdzanie modelu zostało przerwane.", "模型检查已中止。", "モデルの確認が止まりました。", "Die Prüfung des Modells wurde abgebrochen.", "La comprobación del modelo se detuvo.", "Перевірку моделі зупинено."]),
+    ("{} download", ["{} do pobrania", "需下载 {}", "{} のダウンロード", "{} Download", "{} de descarga", "{} для завантаження"]),
+    ("On this computer", ["Na tym komputerze", "在这台电脑上", "このコンピュータにあります", "Auf diesem Computer", "En este ordenador", "На цьому комп’ютері"]),
+    ("On this computer · not tested by Hex", ["Na tym komputerze · nie testowany przez Hex", "在这台电脑上 · 未经 Hex 测试", "このコンピュータにあります · Hex では未テスト", "Auf diesem Computer · nicht von Hex getestet", "En este ordenador · no probado por Hex", "На цьому комп’ютері · не перевірена Hex"]),
+    ("Downloading… {}%", ["Pobieranie… {}%", "正在下载… {}%", "ダウンロード中… {}%", "Wird geladen… {} %", "Descargando… {} %", "Завантаження… {}%"]),
+    ("Couldn't prepare this model", ["Nie udało się przygotować tego modelu", "无法准备此模型", "このモデルを準備できませんでした", "Dieses Modell konnte nicht vorbereitet werden", "No se pudo preparar este modelo", "Не вдалося підготувати цю модель"]),
     ("Imported", ["Zaimportowany", "已导入", "取り込み済み", "Importiert", "Importado", "Імпортовано"]),
     ("Not benchmarked", ["Bez testów porównawczych", "未做基准测试", "ベンチマークなし", "Nicht getestet", "Sin pruebas comparativas", "Без тестів"]),
     ("{} languages", ["Języki: {}", "{} 种语言", "{} 言語", "{} Sprachen", "{} idiomas", "Мов: {}"]),
@@ -304,6 +331,11 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("On while it is the dictation model. Choose another model to turn it off.", ["Włączone, dopóki jest modelem dyktowania. Wybierz inny model, aby je wyłączyć.", "它是听写模型时保持开启。请选择其他模型后再关闭。", "音声入力モデルである間はオンのままです。オフにするには別のモデルを選んでください。", "Bleibt an, solange es das Diktiermodell ist. Wähle ein anderes Modell, um es auszuschalten.", "Sigue activo mientras sea el modelo de dictado. Elige otro modelo para desactivarlo.", "Увімкнено, поки це модель диктування. Виберіть іншу модель, щоб вимкнути."]),
     ("Special keys alone", ["Klawisze specjalne bez modyfikatora", "单独使用特殊键", "特殊キーを単独で使う", "Sondertasten allein", "Teclas especiales solas", "Спеціальні клавіші окремо"]),
     ("Use Menu, Pause, or Scroll Lock as a shortcut without a modifier, such as Caps Lock remapped to Menu", ["Używaj klawisza Menu, Pause lub Scroll Lock jako skrótu bez modyfikatora, np. Caps Lock przemapowanego na Menu", "将 Menu、Pause 或 Scroll Lock 单独用作快捷键，例如重新映射为 Menu 的 Caps Lock", "Menu、Pause、Scroll Lock を修飾キーなしでショートカットに使います。Menu に割り当て直した Caps Lock など", "Menu, Pause oder Scroll Lock ohne Modifikator als Kürzel verwenden, etwa Caps Lock, das auf Menu umgelegt ist", "Usa Menu, Pause o Scroll Lock como atajo sin modificador, como Bloq Mayús reasignado a Menu", "Використовуйте Menu, Pause або Scroll Lock як комбінацію без модифікатора, наприклад Caps Lock, перепризначений на Menu"]),
+    ("Dictation stats", ["Statystyki dyktowania", "听写统计", "音声入力の統計", "Diktatstatistik", "Estadísticas de dictado", "Статистика диктування"]),
+    ("Show a summary of your retained dictations at the top of History, with hex history stats", ["Pokazuje podsumowanie zachowanych dyktowań na górze Historii, także poleceniem hex history stats", "在历史记录顶部显示已保留听写的摘要，也可使用 hex history stats", "履歴の上部に保存済みの音声入力の概要を表示します。hex history stats でも確認できます", "Zeigt oben im Verlauf eine Zusammenfassung deiner behaltenen Diktate, auch mit hex history stats", "Muestra un resumen de tus dictados conservados en la parte superior del Historial, también con hex history stats", "Показує підсумок збережених диктувань угорі Історії, а також командою hex history stats"]),
+    ("Dictations: {count} · Words: {words} · Words per minute: {wpm}", ["Dyktowania: {count} · Słowa: {words} · Słowa na minutę: {wpm}", "听写：{count} · 字词：{words} · 每分钟字词：{wpm}", "音声入力: {count} · 単語: {words} · 毎分の単語数: {wpm}", "Diktate: {count} · Wörter: {words} · Wörter pro Minute: {wpm}", "Dictados: {count} · Palabras: {words} · Palabras por minuto: {wpm}", "Диктувань: {count} · Слів: {words} · Слів за хвилину: {wpm}"]),
+    ("Changed by Output: {percent}% · Daily streak: {days}", ["Zmienione przez Wyjście: {percent}% · Seria dni: {days}", "被输出更改：{percent}% · 连续天数：{days}", "出力による変更: {percent}% · 連続日数: {days}", "Von der Ausgabe geändert: {percent} % · Tage in Folge: {days}", "Cambiados por Salida: {percent} % · Días seguidos: {days}", "Змінено Виведенням: {percent}% · Днів поспіль: {days}"]),
+    ("Top apps: {}", ["Najczęstsze aplikacje: {}", "常用应用：{}", "よく使うアプリ: {}", "Häufigste Apps: {}", "Apps principales: {}", "Найчастіші програми: {}"]),
     ("Details", ["Szczegóły", "详情", "詳細", "Details", "Detalles", "Подробиці"]),
     ("Hide details", ["Ukryj szczegóły", "隐藏详情", "詳細を隠す", "Details ausblenden", "Ocultar detalles", "Сховати подробиці"]),
     ("Peak memory: {memory} on {hardware}; not measured on other hardware", ["Szczytowe użycie pamięci: {memory} na {hardware}; na innym sprzęcie niezmierzone", "峰值内存：{memory}（{hardware}）；其他硬件未测量", "最大メモリ: {memory}（{hardware}）。ほかのハードウェアでは未測定", "Spitzenspeicher: {memory} auf {hardware}; auf anderer Hardware nicht gemessen", "Memoria máxima: {memory} en {hardware}; no medida en otro hardware", "Пікова пам'ять: {memory} на {hardware}; на іншому обладнанні не виміряно"]),
@@ -341,6 +373,9 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Restore default shortcut", ["Przywróć domyślny skrót", "恢复默认快捷键", "既定のショートカットに戻す", "Standardkürzel wiederherstellen", "Restaurar atajo predeterminado", "Відновити типову комбінацію"]),
     ("Default shortcut: {}", ["Domyślny skrót: {}", "默认快捷键：{}", "既定のショートカット: {}", "Standardkürzel: {}", "Atajo predeterminado: {}", "Типова комбінація: {}"]),
     ("Unload after", ["Zwolnij po", "卸载前等待", "解放までの時間", "Entladen nach", "Descargar tras", "Вивантажити через"]),
+    ("Turn off the mic when not dictating", ["Wyłączaj mikrofon, gdy nie dyktujesz", "不听写时关闭麦克风", "音声入力していないときはマイクをオフにする", "Mikrofon ausschalten, wenn du nicht diktierst", "Apagar el micrófono cuando no dictas", "Вимикати мікрофон, коли не диктуєте"]),
+    ("The mic opens only while you dictate; the first moment can be clipped", ["Mikrofon otwiera się tylko podczas dyktowania; pierwsza chwila może zostać ucięta", "麦克风只在听写时打开；开头一瞬间可能被截掉", "マイクは音声入力中だけ開きます。最初の一瞬が切れることがあります", "Das Mikrofon öffnet sich nur beim Diktieren; der erste Moment kann abgeschnitten werden", "El micrófono solo se abre mientras dictas; el primer instante puede cortarse", "Мікрофон відкривається лише під час диктування; перша мить може обрізатися"]),
+    ("The mic stays ready so dictation starts instantly; your system shows it in use", ["Mikrofon jest stale gotowy, więc dyktowanie zaczyna się od razu; system pokazuje, że jest używany", "麦克风保持就绪，听写可立即开始；系统会显示它正在使用", "マイクを待機させておくので音声入力がすぐ始まります。システムには使用中と表示されます", "Das Mikrofon bleibt bereit, damit das Diktat sofort beginnt; dein System zeigt es als benutzt an", "El micrófono queda listo para que el dictado empiece al instante; tu sistema lo muestra en uso", "Мікрофон лишається готовим, тож диктування починається миттєво; система показує, що він використовується"]),
     ("Send feedback", ["Wyślij opinię", "发送反馈", "フィードバックを送信", "Feedback senden", "Enviar comentarios", "Надіслати відгук"]),
     ("Run setup again", ["Uruchom konfigurację ponownie", "重新运行设置", "セットアップをもう一度実行", "Einrichtung erneut ausführen", "Volver a ejecutar la configuración", "Запустити налаштування знову"]),
     ("Play the first run again. Settings, models, and permissions stay", ["Przejdź pierwsze uruchomienie jeszcze raz. Ustawienia, modele i uprawnienia zostają", "再次体验首次运行。设置、模型和权限保持不变", "初回起動をもう一度行います。設定、モデル、権限はそのままです", "Den ersten Start noch einmal durchlaufen. Einstellungen, Modelle und Berechtigungen bleiben", "Repite el primer inicio. La configuración, los modelos y los permisos se conservan", "Пройти перший запуск ще раз. Налаштування, моделі й дозволи залишаться"]),
@@ -429,6 +464,13 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Shortcuts", ["Skróty", "快捷键", "ショートカット", "Tastenkürzel", "Atajos", "Комбінації клавіш"]),
     ("Your desktop granted {}", ["Pulpit przyznał {}", "桌面已授予 {}", "デスクトップが {} を割り当て", "Vom Desktop vergeben: {}", "Tu escritorio concedió {}", "Система надала {}"]),
     ("Your desktop did not grant this shortcut", ["Pulpit nie przyznał tego skrótu", "桌面未授予此快捷键", "デスクトップはこのショートカットを割り当てませんでした", "Der Desktop hat dieses Tastenkürzel nicht vergeben", "Tu escritorio no concedió este atajo", "Система не надала цю комбінацію клавіш"]),
+    ("Last dictation discarded: {}", ["Ostatnie dyktowanie odrzucone: {}", "上次听写已丢弃：{}", "前回の音声入力は破棄されました: {}", "Letztes Diktat verworfen: {}", "Último dictado descartado: {}", "Останнє диктування відкинуто: {}"]),
+    ("too quiet, check your mic level", ["za cicho, sprawdź poziom mikrofonu", "声音太小，请检查麦克风音量", "音が小さすぎます。マイクの音量を確認してください", "zu leise, prüfe den Mikrofonpegel", "demasiado bajo, revisa el nivel del micrófono", "надто тихо, перевірте рівень мікрофона"]),
+    ("no speech heard, check your mic level", ["nie usłyszano mowy, sprawdź poziom mikrofonu", "未听到语音，请检查麦克风音量", "音声が聞き取れませんでした。マイクの音量を確認してください", "keine Sprache gehört, prüfe den Mikrofonpegel", "no se oyó voz, revisa el nivel del micrófono", "мовлення не почуто, перевірте рівень мікрофона"]),
+    ("GNOME keyboard shortcuts", ["Skróty klawiszowe GNOME", "GNOME 键盘快捷键", "GNOME のキーボードショートカット", "GNOME-Tastaturkürzel", "Atajos de teclado de GNOME", "Комбінації клавіш GNOME"]),
+    ("Add GNOME keyboard shortcuts", ["Dodaj skróty klawiszowe GNOME", "添加 GNOME 键盘快捷键", "GNOME のキーボードショートカットを追加", "GNOME-Tastaturkürzel hinzufügen", "Añadir atajos de teclado de GNOME", "Додати комбінації клавіш GNOME"]),
+    ("Adds dictation, paste last and Annotate to GNOME Settings › Keyboard › Custom Shortcuts with your shortcuts. GNOME runs them on the key press, so dictation toggles.", ["Dodaje dyktowanie, wklejanie ostatniego i Adnotacje do Ustawień GNOME › Klawiatura › Własne skróty z Twoimi skrótami. GNOME uruchamia je przy naciśnięciu klawisza, więc dyktowanie się przełącza.", "将听写、粘贴上次和批注以你的快捷键添加到 GNOME 设置 › 键盘 › 自定义快捷键。GNOME 在按下按键时运行它们，因此听写为切换方式。", "音声入力、前回を貼り付け、注釈をあなたのショートカットで GNOME 設定 › キーボード › カスタムショートカットに追加します。GNOME はキーを押したときに実行するため、音声入力は切り替え式になります。", "Fügt Diktat, Letztes einfügen und Annotieren mit deinen Tastenkürzeln zu GNOME-Einstellungen › Tastatur › Eigene Tastenkürzel hinzu. GNOME führt sie beim Tastendruck aus, daher schaltet das Diktat um.", "Añade dictado, pegar el último y Anotar a Configuración de GNOME › Teclado › Atajos personalizados con tus atajos. GNOME los ejecuta al pulsar la tecla, así que el dictado se alterna.", "Додає диктування, вставлення останнього та Анотації до Налаштувань GNOME › Клавіатура › Власні комбінації з вашими комбінаціями. GNOME запускає їх під час натискання клавіші, тож диктування перемикається."]),
+    ("Added to GNOME Settings › Keyboard › Custom Shortcuts while Hex is enabled. GNOME runs them on the key press, so your dictation shortcut toggles dictation. Change the keys there.", ["Dodane do Ustawień GNOME › Klawiatura › Własne skróty, gdy Hex jest włączony. GNOME uruchamia je przy naciśnięciu klawisza, więc skrót dyktowania je przełącza. Klawisze zmienisz tam.", "Hex 启用时已添加到 GNOME 设置 › 键盘 › 自定义快捷键。GNOME 在按下按键时运行它们，因此听写快捷键会切换听写。可在那里更改按键。", "Hex が有効な間、GNOME 設定 › キーボード › カスタムショートカットに追加されます。GNOME はキーを押したときに実行するため、音声入力のショートカットは切り替え式です。キーはそこで変更できます。", "Zu GNOME-Einstellungen › Tastatur › Eigene Tastenkürzel hinzugefügt, solange Hex aktiv ist. GNOME führt sie beim Tastendruck aus, daher schaltet dein Diktat-Kürzel das Diktat um. Ändere die Tasten dort.", "Añadidos a Configuración de GNOME › Teclado › Atajos personalizados mientras Hex está activado. GNOME los ejecuta al pulsar la tecla, así que tu atajo de dictado lo alterna. Cambia las teclas allí.", "Додано до Налаштувань GNOME › Клавіатура › Власні комбінації, поки Hex увімкнено. GNOME запускає їх під час натискання клавіші, тож ваша комбінація диктування перемикає його. Змініть клавіші там."]),
     ("GNOME uses {} itself, so it never reaches Hex. Record another shortcut, or change it in GNOME Settings › Keyboard › Keyboard Shortcuts.", ["GNOME używa {} do własnych celów, więc nie dociera on do Hex. Nagraj inny skrót albo zmień go w Ustawieniach GNOME › Klawiatura › Skróty klawiszowe.", "GNOME 自己使用 {}，所以它不会传到 Hex。请录制其他快捷键，或在 GNOME 设置 › 键盘 › 键盘快捷键中更改。", "GNOME が {} を使用しているため、Hex に届きません。別のショートカットを記録するか、GNOME 設定 › キーボード › キーボードショートカットで変更してください。", "GNOME verwendet {} selbst, daher erreicht es Hex nie. Nimm ein anderes Tastenkürzel auf oder ändere es in den GNOME-Einstellungen › Tastatur › Tastaturkürzel.", "GNOME usa {} para sí mismo, así que nunca llega a Hex. Graba otro atajo o cámbialo en Configuración de GNOME › Teclado › Atajos de teclado.", "GNOME використовує {} сам, тому вона не доходить до Hex. Запишіть іншу комбінацію або змініть її в Налаштуваннях GNOME › Клавіатура › Комбінації клавіш."]),
     ("Your desktop kept a shortcut for itself. Record another one, or free it in your desktop's keyboard settings (on niri, remove its bind from config.kdl).", ["Pulpit zachował skrót dla siebie. Nagraj inny albo zwolnij go w ustawieniach klawiatury pulpitu (w niri usuń jego przypisanie z config.kdl).", "桌面保留了某个快捷键。请录制其他快捷键，或在桌面的键盘设置中释放它（在 niri 中，从 config.kdl 删除其绑定）。", "デスクトップがショートカットを使用中です。別のショートカットを記録するか、デスクトップのキーボード設定で空けてください（niri では config.kdl からその割り当てを削除）。", "Der Desktop behält ein Tastenkürzel für sich. Nimm ein anderes auf oder gib es in den Tastatureinstellungen des Desktops frei (unter niri die Belegung aus config.kdl entfernen).", "Tu escritorio se reservó un atajo. Graba otro o libéralo en los ajustes de teclado del escritorio (en niri, quita su asignación de config.kdl).", "Система залишила комбінацію клавіш за собою. Запишіть іншу або звільніть її в налаштуваннях клавіатури системи (у niri видаліть її призначення з config.kdl)."]),
     ("Not granted", ["Nie przyznano", "未授予", "未割り当て", "Nicht vergeben", "No concedido", "Не надано"]),
@@ -437,8 +479,6 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Hold to dictate", ["Przytrzymaj, aby dyktować", "按住听写", "押している間音声入力", "Halten zum Diktieren", "Mantén pulsado para dictar", "Утримуйте, щоб диктувати"]),
     ("Bind start to the key press and stop to its release", ["Przypisz start do naciśnięcia klawisza, a stop do jego zwolnienia", "将 start 绑定到按下按键，将 stop 绑定到松开按键", "start をキーを押したとき、stop を離したときに割り当て", "start an das Drücken und stop an das Loslassen der Taste binden", "Asigna start al pulsar la tecla y stop al soltarla", "Привʼяжіть start до натискання клавіші, а stop до її відпускання"]),
     ("Toggle dictation", ["Przełącz dyktowanie", "切换听写", "音声入力を切り替え", "Diktat umschalten", "Alternar dictado", "Перемкнути диктування"]),
-    ("Cancel dictation", ["Anuluj dyktowanie", "取消听写", "音声入力をキャンセル", "Diktat abbrechen", "Cancelar dictado", "Скасувати диктування"]),
-    ("Discard the current recording", ["Odrzuć bieżące nagranie", "丢弃当前录音", "現在の録音を破棄", "Aktuelle Aufnahme verwerfen", "Descartar la grabación actual", "Відкинути поточний запис"]),
     ("Ready anywhere · Use your desktop's shortcuts to dictate", ["Gotowe wszędzie · Dyktuj skrótami pulpitu", "随处可用 · 使用桌面快捷键听写", "どこでも利用可能 · デスクトップのショートカットで音声入力", "Überall bereit · Diktiere mit den Tastenkürzeln des Desktops", "Listo en cualquier lugar · Dicta con los atajos del escritorio", "Готово всюди · Диктуйте за допомогою системних комбінацій клавіш"]),
     ("Interface language", ["Język interfejsu", "界面语言", "表示言語", "Sprache der Oberfläche", "Idioma de la interfaz", "Мова інтерфейсу"]),
     ("Language of the Hex interface", ["Język interfejsu Hex", "Hex 界面语言", "Hex の表示言語", "Sprache der Hex-Oberfläche", "Idioma de la interfaz de Hex", "Мова інтерфейсу Hex"]),
@@ -467,6 +507,10 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Recordings", ["Nagrania", "录音", "録音", "Aufnahmen", "Grabaciones", "Записи"]),
     ("Advanced", ["Zaawansowane", "高级", "詳細", "Erweitert", "Avanzado", "Додатково"]),
     ("Output", ["Wyjście", "输出", "出力", "Ausgabe", "Salida", "Виведення"]),
+    ("GPU", ["GPU", "GPU", "GPU", "GPU", "GPU", "GPU"]),
+    ("CPU", ["CPU", "CPU", "CPU", "CPU", "CPU", "CPU"]),
+    ("Speech engine", ["Silnik mowy", "语音引擎", "音声エンジン", "Sprach-Engine", "Motor de voz", "Рушій мовлення"]),
+    ("Auto uses the CPU because {device} stopped responding. Choose GPU to try it again.", ["Tryb automatyczny używa CPU, bo {device} przestał odpowiadać. Wybierz GPU, aby spróbować ponownie.", "自动使用 CPU，因为 {device} 停止响应。选择 GPU 可再次尝试。", "{device} が応答しなくなったため、自動では CPU を使います。もう一度試すには GPU を選んでください。", "Automatisch nutzt die CPU, weil {device} nicht mehr reagiert hat. Wähle GPU, um es erneut zu versuchen.", "Automático usa la CPU porque {device} dejó de responder. Elige GPU para volver a intentarlo.", "Авто використовує CPU, бо {device} перестав відповідати. Виберіть GPU, щоб спробувати знову."]),
     ("Dictation HUD", ["Wskaźnik dyktowania", "听写指示器", "音声入力インジケーター", "Diktatanzeige", "Indicador de dictado", "HUD диктування"]),
     ("Call recording", ["Nagrywanie rozmów", "通话录音", "通話の録音", "Anrufaufzeichnung", "Grabación de llamadas", "Запис дзвінків"]),
     ("Check for updates", ["Sprawdź aktualizacje", "检查更新", "アップデートを確認", "Nach Updates suchen", "Buscar actualizaciones", "Перевірити оновлення"]),
@@ -661,14 +705,12 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Install or start OpenCode to transform dictated text.", ["Zainstaluj lub uruchom OpenCode, aby przekształcać dyktowany tekst.", "安装或启动 OpenCode 以转换听写文本。", "OpenCode をインストールまたは起動すると、音声入力したテキストを変換できます。", "Installiere oder starte OpenCode, um diktierten Text umzuwandeln.", "Instala o inicia OpenCode para transformar el texto dictado.", "Встановіть або запустіть OpenCode, щоб перетворювати продиктований текст."]),
     ("Instructions", ["Instrukcje", "说明", "指示", "Anweisungen", "Instrucciones", "Інструкції"]),
     ("Keep Hex in the menu bar when Settings is closed", ["Zostaw Hex na pasku menu po zamknięciu Ustawień", "关闭设置后将 Hex 保留在菜单栏", "設定を閉じても Hex をメニューバーに表示", "Hex in der Menüleiste behalten, wenn die Einstellungen geschlossen sind", "Mantener Hex en la barra de menús al cerrar Ajustes", "Залишати Hex на смузі меню, коли вікно налаштувань закрите"]),
-    ("Keep ready (fast)", ["Gotowy (szybko)", "保持就绪（快）", "常に待機（高速）", "Bereit halten (schnell)", "Listo (rápido)", "Готовий (швидко)"]),
     ("Keeps the microphone open for instant start and pre-roll", ["Utrzymuje otwarty mikrofon dla natychmiastowego startu i wstępnego nagrywania", "保持麦克风打开，以便立即开始并预录音", "マイクを開いたままにし、すぐに開始してプリロールを使います", "Hält das Mikrofon offen für sofortigen Start und Vorlauf", "Mantiene el micrófono abierto para empezar al instante con pregrabación", "Мікрофон залишається ввімкненим для миттєвого початку й попереднього захоплення аудіо"]),
     ("Latency", ["Opóźnienie", "延迟", "レイテンシー", "Latenz", "Latencia", "Затримка"]),
     ("Left", ["Lewy", "左", "左", "Links", "Izquierda", "Ліва"]),
     ("Loading OpenCode…", ["Wczytywanie OpenCode…", "正在加载 OpenCode…", "OpenCode を読み込み中…", "OpenCode wird geladen…", "Cargando OpenCode…", "Завантаження OpenCode…"]),
     ("Loading custom transformations…", ["Wczytywanie własnych transformacji…", "正在加载自定义转换…", "カスタム変換を読み込み中…", "Eigene Transformationen werden geladen…", "Cargando las transformaciones personalizadas…", "Завантаження власних перетворень…"]),
     ("Meetings", ["Spotkania", "会议", "会議", "Besprechungen", "Reuniones", "Зустрічі"]),
-    ("Microphone mode", ["Tryb mikrofonu", "麦克风模式", "マイクモード", "Mikrofonmodus", "Modo del micrófono", "Режим мікрофона"]),
     ("Mode name", ["Nazwa trybu", "模式名称", "モード名", "Modusname", "Nombre del modo", "Назва режиму"]),
     ("Mute or pause other audio during dictation", ["Wycisz lub wstrzymaj inne dźwięki podczas dyktowania", "听写时静音或暂停其他音频", "音声入力中はほかの音声をミュートまたは一時停止", "Andere Audiowiedergabe während des Diktierens stummschalten oder pausieren", "Silencia o pausa otros audios durante el dictado", "Вимикати звук або призупиняти інше аудіо під час диктування"]),
     ("No applications found.", ["Nie znaleziono aplikacji.", "未找到应用。", "アプリが見つかりません。", "Keine Apps gefunden.", "No se encontraron aplicaciones.", "Програм не знайдено."]),
@@ -706,8 +748,6 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("OpenCode model", ["Model OpenCode", "OpenCode 模型", "OpenCode モデル", "OpenCode-Modell", "Modelo de OpenCode", "Модель OpenCode"]),
     ("OpenCode transformation", ["Transformacja OpenCode", "OpenCode 转换", "OpenCode 変換", "OpenCode-Transformation", "Transformación de OpenCode", "Перетворення за допомогою OpenCode"]),
     ("OpenCode transformation will be available after Hex connects to OpenCode.", ["Transformacja OpenCode będzie dostępna, gdy Hex połączy się z OpenCode.", "Hex 连接到 OpenCode 后即可使用 OpenCode 转换。", "Hex が OpenCode に接続すると OpenCode 変換を使えます。", "Die OpenCode-Transformation ist verfügbar, sobald Hex mit OpenCode verbunden ist.", "La transformación de OpenCode estará disponible cuando Hex se conecte a OpenCode.", "Перетворення за допомогою OpenCode стане доступним після підключення Hex до OpenCode."]),
-    ("Opens only while holding the shortcut. Disables pre-roll.", ["Otwiera się tylko podczas przytrzymania skrótu. Wyłącza wstępne nagrywanie.", "仅在按住快捷键时打开。会停用预录音。", "ショートカットを押している間だけ開きます。プリロールは無効になります。", "Öffnet sich nur, solange das Kürzel gehalten wird. Deaktiviert Vorlauf.", "Solo se abre mientras mantienes el atajo. Desactiva la pregrabación.", "Вмикає мікрофон лише під час утримання комбінації клавіш. Вимикає попереднє захоплення аудіо."]),
-    ("Opens the microphone on shortcut press without pre-roll.", ["Otwiera mikrofon po naciśnięciu skrótu, bez wstępnego nagrywania.", "按下快捷键时打开麦克风，不预录音。", "ショートカットを押したときにプリロールなしでマイクを開きます。", "Öffnet das Mikrofon beim Drücken des Kürzels ohne Vorlauf.", "Abre el micrófono al pulsar el atajo, sin pregrabación.", "Вмикає мікрофон після натискання комбінації клавіш без попереднього захоплення аудіо."]),
     ("Share dictation shortcut with other apps", ["Udostępniaj skrót dyktowania innym aplikacjom", "将听写快捷键共享给其他应用", "ディクテーションのショートカットを他のアプリと共有", "Diktierkürzel für andere Apps freigeben", "Compartir el atajo de dictado con otras aplicaciones", "Ділитися сполученням клавіш диктування з іншими програмами"]),
     ("Use another microphone instead of Bluetooth", ["Używaj innego mikrofonu zamiast Bluetooth", "使用其他麦克风而不是蓝牙", "Bluetooth の代わりに別のマイクを使う", "Anderes Mikrofon statt Bluetooth verwenden", "Usar otro micrófono en lugar de Bluetooth", "Використовувати інший мікрофон замість Bluetooth"]),
     ("Use the Mac's microphone instead of Bluetooth", ["Używaj mikrofonu Maca zamiast Bluetooth", "使用 Mac 的麦克风而不是蓝牙", "Bluetooth の代わりに Mac のマイクを使う", "Mikrofon des Mac statt Bluetooth verwenden", "Usar el micrófono del Mac en lugar de Bluetooth", "Використовувати мікрофон Mac замість Bluetooth"]),
@@ -721,11 +761,7 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Press shortcut", ["Naciśnij skrót", "按下快捷键", "ショートカットを押す", "Kürzel drücken", "Pulsa el atajo", "Натисніть комбінацію клавіш"]),
     ("Press to start dictating, press again to transcribe", ["Naciśnij, aby zacząć dyktować, i ponownie, aby transkrybować", "按下开始听写，再按一次进行转写", "押すと音声入力を開始し、もう一度押すと文字起こし", "Drücken zum Diktieren, erneut drücken zum Transkribieren", "Pulsa para empezar a dictar y otra vez para transcribir", "Натисніть, щоб почати диктувати, і натисніть знову, щоб розпізнати мовлення"]),
     ("Re-paste the most recent dictation", ["Wklej ponownie ostatnie dyktowanie", "再次粘贴最近一次听写", "最新の音声入力をもう一度貼り付け", "Letztes Diktat erneut einfügen", "Volver a pegar el dictado más reciente", "Повторно вставити останнє диктування"]),
-    ("Recording, cancellation, and error tones", ["Dźwięki nagrywania, anulowania i błędów", "录音、取消和错误提示音", "録音・キャンセル・エラーの効果音", "Töne für Aufnahme, Abbruch und Fehler", "Tonos de grabación, cancelación y error", "Звуки запису, скасування та помилок"]),
     ("Refresh", ["Odśwież", "刷新", "更新", "Aktualisieren", "Actualizar", "Оновити"]),
-    ("Release microphone", ["Zwolnij mikrofon", "释放麦克风", "マイクを解放", "Mikrofon freigeben", "Liberar micrófono", "Звільнити мікрофон"]),
-    ("Release the microphone when idle?", ["Zwalniać mikrofon w bezczynności?", "空闲时释放麦克风？", "待機中はマイクを解放しますか？", "Mikrofon im Leerlauf freigeben?", "¿Liberar el micrófono en reposo?", "Звільняти мікрофон, коли він не використовується?"]),
-    ("Release when idle", ["Zwalniaj w bezczynności", "空闲时释放", "待機中は解放", "Im Leerlauf freigeben", "Liberar en reposo", "Звільняти в простої"]),
     ("Replacement (e.g. OpenCode)", ["Zamiennik (np. OpenCode)", "替换为（例如 OpenCode）", "置換後（例: OpenCode）", "Ersetzung (z. B. OpenCode)", "Reemplazo (p. ej. OpenCode)", "Заміна (наприклад, OpenCode)"]),
     ("Switch to {channel} {version}", ["Przełącz na {channel} {version}", "切换到{channel} {version}", "{channel} {version} に切り替え", "Zu {channel} {version} wechseln", "Cambiar a {channel} {version}", "Перейти на {channel} {version}"]),
     ("Restart to update", ["Uruchom ponownie, aby zaktualizować", "重启以更新", "再起動してアップデート", "Zum Aktualisieren neu starten", "Reiniciar para actualizar", "Перезапустити для оновлення"]),
@@ -902,6 +938,7 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Delete {}?", ["Usunąć {}?", "删除 {}？", "{} を削除しますか？", "{} löschen?", "¿Eliminar {}?", "Видалити {}?"]),
     ("100 languages", ["100 języków", "100 种语言", "100 言語", "100 Sprachen", "100 idiomas", "100 мов"]),
     ("14 languages", ["14 języków", "14 种语言", "14 言語", "14 Sprachen", "14 idiomas", "14 мов"]),
+    ("27 languages", ["27 języków", "27 种语言", "27 言語", "27 Sprachen", "27 idiomas", "27 мов"]),
     ("25 languages", ["25 języków", "25 种语言", "25 言語", "25 Sprachen", "25 idiomas", "25 мов"]),
     ("30 languages", ["30 języków", "30 种语言", "30 言語", "30 Sprachen", "30 idiomas", "30 мов"]),
     ("5 languages", ["5 języków", "5 种语言", "5 言語", "5 Sprachen", "5 idiomas", "5 мов"]),
@@ -1119,12 +1156,27 @@ mod tests {
 
     #[test]
     fn system_language_tags_choose_their_interface_column() {
-        use super::{ENGLISH, column_for_code, column_for_language_tag};
+        use super::{
+            ENGLISH, LANGUAGE_CHOICES, PORTUGUESE_COLUMN, column_for_code, column_for_language_tag,
+        };
         assert_eq!(column_for_language_tag("zh-Hans-CN"), column_for_code("zh"));
         assert_eq!(column_for_language_tag("zh"), column_for_code("zh"));
         assert_eq!(column_for_language_tag("pl"), column_for_code("pl"));
-        assert_eq!(column_for_language_tag("pt-BR"), ENGLISH);
+        assert_eq!(column_for_language_tag("pt-BR"), PORTUGUESE_COLUMN);
+        assert_eq!(column_for_language_tag("pt_PT"), PORTUGUESE_COLUMN);
+        assert_eq!(column_for_code("pt"), PORTUGUESE_COLUMN);
         assert_eq!(column_for_language_tag(""), ENGLISH);
+        assert!(LANGUAGE_CHOICES.contains(&(Some("pt"), "Português (Brasil)")));
+    }
+
+    #[test]
+    fn portuguese_translates_with_its_column() {
+        super::set_current(super::PORTUGUESE_COLUMN);
+        assert_eq!(super::tr("Labs"), "Labs");
+        assert_eq!(super::tr("Don't switch"), "Não trocar");
+        assert_eq!(super::tr_fill("Remove {}?", "x"), "Remover x?");
+        super::set_current(super::ENGLISH);
+        assert_eq!(super::tr("Don't switch"), "Don't switch");
     }
 
     #[test]
@@ -1180,6 +1232,8 @@ mod tests {
         include_str!("../rune_ui/meeting_capsules.rs"),
         include_str!("../rune_ui/meetings.rs"),
         include_str!("../rune_ui/models.rs"),
+        include_str!("../rune_ui/found.rs"),
+        include_str!("../rune_ui/found_choice.rs"),
         include_str!("../rune_ui/model_details.rs"),
         include_str!("../rune_ui/model_import.rs"),
         include_str!("../rune_ui/modes.rs"),

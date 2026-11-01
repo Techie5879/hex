@@ -35,7 +35,12 @@ models toggle (off by default) adds a sort and a saved-language filter to the
 Local transcription picker (#645); its Benchmark details toggle (off by
 default) shows each card's raw WER or CER with its language, dataset, source,
 and conditions (#647).
+General › Advanced › Interface language offers Português (Brasil), and Hex
+uses it for any Portuguese system language (#867); its strings haven't had a
+native speaker's review yet.
 The [vocabulary](vocabulary.md) biases transcription toward names you list.
+[Your own speech models](own-models.md) covers adding a GGUF file and using
+models another app already downloaded.
 [Annotate](capture.md) (macOS, Linux,
 and Windows) records the screen while you draw and talk and sends it to an agent.
 The other capabilities stay here until they need their own verification recipe.
@@ -43,7 +48,7 @@ The other capabilities stay here until they need their own verification recipe.
 ## Get Ready
 
 Install the signed macOS app with `brew install --cask anomalyco/tap/hex` or the
-[manual DMG](../../README.md#install-hex). The cask uses a versioned, checksum-pinned
+[manual DMG](../../README.md#downloads). The cask uses a versioned, checksum-pinned
 DMG, requires Apple silicon/macOS 15+, and leaves updates to Hex's own updater. It does
 not require OpenCode, launch the app automatically, migrate the legacy
 Swift app, or forcibly replace an existing app destination. Homebrew uninstall
@@ -301,20 +306,38 @@ Settings picker or setup > model card     // setup.model-card; shared by every d
 ├── Labs > Parakeet Ultra (off) -> its card with a Labs tag and Details: languages,  // setup.parakeet-ultra
 │   measured memory, the CC BY 4.0 credit, notice, Source/License links, folded
 │   published benchmarks "not measured in Hex" (labs.md)
-└── Labs > Use your own speech model (off) -> "Add model file…" in the header;  // setup.custom-models
-    imported cards after the catalog: Imported · family · languages · Not
-    benchmarked · file · licence · SHA-256 prefix; Speed and Accuracy "Unknown";
-    Rename, Remove (not the active model); missing, changed, or off -> warning
-    line and no Use; changed -> Check again; missing or changed -> Import
-    again… (labs.md)
+├── "Add model file…" in the header -> imported cards after the catalog:  // setup.custom-models
+│   Imported · family · languages · Not benchmarked · file · licence · SHA-256
+│   prefix; Speed and Accuracy "Unknown"; Rename, Remove (not the active
+│   model); missing or changed -> warning line and no Use (own-models.md)
+└── Found on this computer -> a scan of the Hugging Face cache when the picker  // setup.found-models
+    opens: other compatible files at the top (Not tested by Hex, Use); a catalog
+    model already downloaded there says so and offers Use; a found file's
+    Delete is Forget (own-models.md)
 ```
 
-Only Parakeet Unified English is marked `streams`
-(`only_the_buffered_parakeet_artifact_is_marked_streaming`). The mark describes
+Parakeet Unified English (chunked attention) and Nemotron 3.5 ASR (cache-aware)
+are the models marked `streams`
+(`only_the_streaming_parakeet_artifacts_are_marked_streaming`). The mark describes
 the artifact; dictation still streams only after the load probe succeeds on a GPU
 device ([Streaming Finish](dictation.md#streaming-finish)). The menu bar lists
 names only and shows no tags. Scenes: `hex app -- --snap OUT --scene picker`
-(also `picker-downloading`, `picker-japanese`, `picker-custom-models`).
+(also `picker-downloading`, `picker-japanese`, `picker-custom-models`,
+`picker-found`).
+
+Nemotron 3.5 ASR (#834; NVIDIA's `nemotron-3.5-asr-streaming-0.6b`, OpenMDW-1.1)
+streams in 27 of Hex's languages and detects the language with Auto: Hex sends
+its language as the locale its prompt takes (`de` -> `de-DE`,
+`runtime_language`), and Auto sends none. It is not anyone's recommendation:
+Hex's own runs of transcribe.cpp's WER harness on apollo (Vulkan, 7045d1c) put
+it behind Parakeet v3 on every set measured: LibriSpeech test-clean 3.05%
+against 1.95%, FLEURS English 7.91% against 4.88%, and FLEURS German 10.39%
+against 5.17% (8.77% and 10.46% with Auto). It is there to stream with the
+language set, or across English and German in one model. Hex converted the
+pinned `.nemo` itself; the shipped file is handy-computer's, whose 653 tensors
+match that conversion byte for byte (`NEMOTRON_3_5_ASR_ARTIFACT`). Checks:
+`nemotron_takes_its_languages_as_locales_and_detects_with_auto`. Not observed:
+macOS (Metal), Windows, and Japanese, Korean, Chinese, or Vietnamese audio.
 
 Parakeet v3 remains available for Portuguese and its other existing language
 choices. Its card explains the limitation and suggests Whisper for
@@ -352,6 +375,15 @@ Checks start in [desktop/onboarding.rs](../../src/desktop/onboarding.rs),
 [transcription.rs](../../src/transcription.rs), and
 [transcription/models.rs](../../src/transcription/models.rs). Setup/picker previews
 prove rendering, not clean-account permission grants or model preparation.
+
+When the Hugging Face cache holds a compatible speech model, the setup step
+shows "Choose a speech model": one list with Hex's recommended model first and
+selected ("731 MB download", or "On this computer" when its exact file is
+there), then the found files ("On this computer", plus "not tested by Hex" for
+one outside the catalog). Picking a row starts it; Continue starts the
+selected one. With nothing found the step is unchanged
+([own-models.md](own-models.md#onboarding-choice), scenes
+`onboarding-model-found`, `-downloading`, `-recommended`).
 
 The tour is the pure `desktop::onboarding::Flow` (steps, row states, background
 download, practice hints, one-relaunch guard) drawn by
@@ -546,9 +578,7 @@ worker readiness; a later worker-load failure does not roll back saved selection
 Saved shortcut                           // dictation; Option by default; Windows and X11 accept mouse buttons, macOS with Labs > Mouse shortcuts
 ├── Hold -> Speak -> Release
 ├── Tap, tap -> Speak hands-free -> Press again   // Double-tap to lock enabled
-└── Escape
-    ├── Capture active -> Cancel that capture
-    └── Otherwise -> Cancel newest cancellable job
+└── Escape -> Nothing: no cancel, every dictation finishes and pastes (#786)
 
 General > Advanced > Double-tap only     // optional for key bindings
   -> Disable single-hold activation
@@ -556,7 +586,7 @@ General > Advanced > Double-tap only     // optional for key bindings
 
 Labs > Second dictation shortcut (macOS, off)   // labs.md; issue 627
   -> General shows "Second dictation shortcut" under Shortcut (unbound, clearable)
-  -> it dictates like the shortcut: Hold/Toggle, double-tap lock, Escape, release
+  -> it dictates like the shortcut: Hold/Toggle, double-tap lock, release
   -> the shortcut that starts a capture finishes it; the other stands down meanwhile
 
 Labs > Unload model when idle (off; 5/15/30/60 min, default 15)   // labs.md; transcription/engine
@@ -575,6 +605,7 @@ Do not start it beside an existing listener.
 Completed output                         // output
 ├── Paste -> Current focus, in submission order
 │   ├── Previous clipboard restored 500 ms later, unless something newer replaced it
+│   ├── Windows -> the transcript is marked out of clipboard history (Win+V) and cloud sync (#851)
 │   ├── Labs > Keep dictation on clipboard (macOS, off) -> the dictation stays on the clipboard (labs.md)
 │   └── Labs > Copy dictation only (macOS, off) -> clipboard only: no paste, typing, or restore (labs.md)
 ├── Paste Last Dictation                  // menu or Option-Shift-V / saved binding
@@ -670,7 +701,7 @@ General                                  // settings
 ├── Advanced ▸ -> one fold per pane, closed by default, even while a setting in it is in use
 │   ├── Collapse -> drops a pending release confirmation
 │   ├── Dictation -> Shortcut side, Shortcut mode (How it works), Double-tap to lock,
-│   │   Double-tap only, Microphone mode, keyboard-language mappings (while its Labs toggle is on),
+│   │   Double-tap only, keyboard-language mappings (while its Labs toggle is on),
 │   │   Use the Mac's microphone instead of Bluetooth (Linux, Windows: "Use another
 │   │   microphone instead of Bluetooth")
 │   ├── Output -> Paste last shortcut, While dictating, Dictation HUD, Terminal paste (Linux)
@@ -685,9 +716,12 @@ General                                  // settings
 │   └── On -> the hook passes the shortcut's key-down/up on instead of consuming it
 ├── Terminal paste (Advanced on Linux, Labs on Windows; off)
 │   └── On -> paste sends Ctrl+Shift+V instead of Ctrl+V; applies to the next paste
-├── Microphone mode (Advanced)
-│   ├── Keep ready (fast) -> Open while idle; pre-roll available
-│   └── Release when idle -> Confirm -> Open on press; no pre-roll; startup delay
+├── Turn off the mic when not dictating (General, under Microphone; off)   // release_microphone_while_idle
+│   ├── One switch, no confirmation; its line says what the state means (issue 61), on every OS
+│   ├── Off (default) -> "The mic stays ready so dictation starts instantly; your system shows it in use"
+│   │   Open while idle; pre-roll available
+│   └── On -> "The mic opens only while you dictate; the first moment can be clipped"
+│       Open on press; no pre-roll; startup delay
 ├── While dictating -> Mute / Pause media / Lower audio / Do nothing
 │   ├── Lower audio -> Lower to slider, 0–100% of the previous volume (default 20%)
 │   ├── Intentional capture only, not ordinary shortcut chords
@@ -1265,9 +1299,21 @@ update from an older supported build.
 ```ts
 Linux beta                               // not macOS feature parity
 ├── hex start -> One per-user Hex -> Alt-Space capture -> Stream (Vulkan GPU) -> Paste
+├── Speech engine (General › Advanced › Dictation; transcription_device) -> Auto | GPU | CPU (#856)
+│   ├── Auto -> best GPU unless gpu-failures.json lists it under its current driver
+│   │   (kernel + Vulkan driver libraries), then another GPU, then the CPU;
+│   │   the row says which GPU stopped responding
+│   ├── A GPU load, prewarm or run that fails with a device error (hang,
+│   │   reset, lost device, out of memory) -> reloads on the CPU; once the CPU
+│   │   works, that GPU is recorded
+│   ├── GPU -> tries the GPU anyway; working, it clears that GPU's record
+│   └── CPU -> CPU only
+│   // checked on apollo with a planted record (RADV); a real i915 hang not reproduced
 │   └── CPU or a model that cannot stream -> Transcribe the whole clip after release
 ├── hex / hex app -> Window in the same process; closing it leaves Hex running
-├── Recording sounds -> Shortcut press / capture stop / active cancellation
+│   └── Ctrl+Q in the window or Quit Hex in the sidebar -> quits Hex (#808)
+│       // check: ctrl_q_quits_hex (fixture; not run on a GNOME session)
+├── Recording sounds -> Shortcut press / capture stop
 ├── Shortcuts -> One state machine, three sources        // linux.shortcuts
 │   ├── X11 -> Root-window key grabs; General records the chord
 │   ├── Wayland + GlobalShortcuts portal -> Desktop grants the triggers
@@ -1299,28 +1345,27 @@ Linux beta                               // not macOS feature parity
 │   │   └── General hides shortcut rows and lists the commands
 │   └── Listener starting or stopped -> `hex status` reports Unregistered,
 │       never the X11 mode
-├── hex dictation start|stop|toggle|cancel, hex paste-last
+├── hex dictation start|stop|toggle, hex paste-last
 │   -> Same events as a shortcut                     // linux.commands
 │   ├── start|toggle --raw -> Dictate without processing's events
 │   ├── Idempotent: start while recording / stop while idle -> Nothing
 │   └── Hex missing or not listening -> One-line error, non-zero exit
 │       // as for hex quit|restart|status
-├── Escape -> Cancel active capture, not newest accepted job
-│   ├── X11 -> Grabbed only while recording; a grab conflict warns, dictation goes on
-│   └── Portal -> Never bound: "Cancel dictation" joins the one bind with no key;
-│       the user assigns one, idle presses do nothing (#482)
-│       ├── Desktop gave it a key anyway -> General shows a "Cancel dictation"
-│       │   row, "Your desktop granted <key>", and process.log warns (#624)
+├── Escape -> Ends nothing (#786); no Cancel dictation shortcut or command
+│   ├── X11 -> Grabbed only while Annotate draws (it stops drawing)
+│   └── Portal -> Never bound
 │       └── KDE startup -> before the bind, the pre-#579 `hex` set (with the
-│           pre-#492 `cancel` on Escape) and `cancel` under `anomaly.hex` are
-│           removed from kglobalaccel (`unregister`); other apps untouched
-│           // check: a_key_the_desktop_gave_cancel_dictation_is_shown (the row's
-│           // data only); the KDE removal is not run on a Plasma session
+│           pre-#492 `cancel` on Escape), and `cancel` and `cancel-dictation`
+│           under `anomaly.hex`, are removed from kglobalaccel (`unregister`);
+│           other apps untouched
+│           // check: only_requested_shortcuts_are_shown (a stale grant stays
+│           // out); the KDE removal is not run on a Plasma session
 ├── Recording HUD -> Dot scope, as on macOS, on the
 │   │   top or bottom edge, recording with the voice's level, then transcribing
 │   │   until accepted output finishes; Hidden position -> none   // linux.hud
-│   ├── Display -> picked at each capture start, kept until it hides (#486)
-│   │   ├── X11 -> the monitor under the pointer (XRandR monitors)
+│   ├── Display -> picked at each capture start (#486)
+│   │   ├── X11 -> the monitor under the pointer (XRandR monitors); while shown,
+│   │   │   checked every 250 ms; moves once two checks agree (#807)
 │   │   ├── Layer-shell (niri, Sway, Hyprland) -> no output pinned: the
 │   │   │   compositor's focused output
 │   │   └── GNOME, KDE (XDG_CURRENT_DESKTOP) -> the primary display
@@ -1344,6 +1389,8 @@ Linux beta                               // not macOS feature parity
 ├── Microphone -> System default or a saved device; `--device` overrides
 │   └── System default -> ALSA's default, resolved at each stream open // no live follow
 ├── General > Launch at login -> writes or removes ~/.config/autostart/anomaly.hex.desktop (X-Hex-Managed; linux/login_item)
+│   ├── Background portal (GNOME, KDE; xdg-desktop-portal 1.20+) -> the portal writes it (X-XDP-Autostart=anomaly.hex; linux/background)
+│   ├── Installed by mise or asdf -> starts the version manager's shim, if it runs Hex from home
 │   └── An entry without the mark -> error beside the row; Hex never replaces it
 ├── Microphone failure -> Same recovery as macOS (RecoveringAudioInput)
 │   ├── Stream fails -> Cancel an unfinished capture, "reopening" failure, retry with backoff
@@ -1386,7 +1433,9 @@ Linux beta                               // not macOS feature parity
     └── No anomaly.hex.desktop in XDG data dirs -> Hex writes
         ~/.local/share/applications/anomaly.hex.desktop (X-Hex-Managed),
         NoDisplay when an older package's hex.desktop already shows Hex,
-        removed once a package ships anomaly.hex.desktop
+        removed once a package ships anomaly.hex.desktop; never rewritten while
+        its program is there; pointed at this Hex (or a version manager's
+        shim) once its program is gone or superseded by that shim (#810)
         // KDE bindings and RemoteDesktop grants stored under `hex` are asked again once
         // checked by unit tests only, not on a GNOME 49 session
 GNOME portal shortcuts (#723)            // linux.gnome-shortcuts
@@ -1449,13 +1498,15 @@ Windows beta                             // x64 (Vulkan GPU) and ARM64 (CPU)
 │   1 s, then rests: windowed G-SYNC/FreeSync sees one rate change per
 │   interaction, not a swing per hover (#689; Rune e2ea18e4; not run on Windows)
 ├── Transcription GPU -> ggml's Vulkan, discrete before integrated, CPU last;
-│   a failed GPU load retries on the CPU
+│   a failed GPU load retries on the CPU; the GPU record and Settings ›
+│   Speech engine work as on Linux (#856)
 │   └── A launch that crashed starting the GPU (gpu-start.pending left in the
 │       data folder, same version) -> CPU only, warned in process.log, until
 │       Hex updates or the file is deleted (#662; not run on Windows)
 ├── Hex app -> General, tray, HUD; Enabled = shortcut works in every app
 ├── HUD display -> the monitor under the pointer (GetCursorPos) at each capture
-│   start, inside that monitor's work area, at its own DPI (#486)
+│   start, inside that monitor's work area, at its own DPI (#486); while
+│   shown, checked every 250 ms; moves once two checks agree (#807)
 ├── Launch again -> Running app shows its window; hidden (login) launch -> no-op
 ├── Tray icon -> White Hex mark; light taskbar (SystemUsesLightTheme) -> black mark
 │   └── Theme read when the tray is created; a later switch applies at the next launch
@@ -1465,8 +1516,20 @@ Windows beta                             // x64 (Vulkan GPU) and ARM64 (CPU)
 │   ├── Speech model: downloaded models, ✓ on the selected one; none while one prepares
 │   └── Update item · Enable / Disable Hex · Quit Hex
 ├── Single-modifier shortcut -> Left / Either / Right side picker, as macOS
+├── Recordable keys -> letters, digits, F1–F24, named keys, mouse buttons (#794)
+│   ├── Punctuation -> saved by virtual key (`oem 1`…`oem 102`), so a layout
+│   │   switch keeps it; every keycap (Settings chips, recorder, tray) shows
+│   │   what it types on the layout now (`Ù`, `HotkeyKey::keycap`, #815)
+│   ├── Numpad -> `Num 1`, `Num *`, `Num Enter`, apart from the top row and
+│   │   matched by scan code + extended flag, so Num Lock off still matches;
+│   │   the recorder runs its own keyboard hook for them (`NumpadWatch`), so
+│   │   Num Lock off records Num 8, not Up (#815)
+│   ├── Menu, Pause, Scroll Lock -> may stand alone
+│   ├── Insert, Home, End, Page Up, Page Down alone -> Labs › Special keys
+│   │   alone; off, a saved one goes back to its default
+│   └── Any other key -> the recorder says "Unsupported key" and starts over
 ├── Ctrl+Space -> Hold or Toggle -> Capture -> Stream (GPU) -> Paste
-├── Escape -> Cancel; a held modifier alone never ends or cancels a capture
+├── Escape -> Nothing (#786); a held modifier alone never ends or cancels a capture
 ├── One modifier alone (Right Alt, Right Ctrl) -> Shortcut; Alt/Win release masked (no menu, Start)
 ├── Microphone switched off in Settings › Privacy -> Onboarding Microphone row -> Allow opens it
 ├── Microphone -> System default or a saved device
@@ -1528,7 +1591,7 @@ closing it leaves the same process answering.
 
 Shortcut rules are pure and tested once for every source in
 [linux/input.rs](../../src/linux/input.rs): hold, double-tap lock, toggle,
-double-tap only, Escape, Paste Last, and command idempotence,
+double-tap only, Escape ending nothing, Paste Last, and command idempotence,
 plus X11 auto-repeat filtering and a portal release that never arrives
 (Hyprland's Lua binds drop it when the modifier comes up first; see
 [dictation.md](dictation.md)). The X11 grab tests run on an isolated display in
@@ -1537,7 +1600,7 @@ through one listener. [scripts/test-linux-service.py](../../scripts/test-linux-s
 checks that commands fail without a listening Hex.
 On 2026-10-22 the portal path was observed on niri with xdg-desktop-portal-gnome
 using synthetic uinput keys against an isolated service: granted triggers,
-hold and Escape while held (since replaced by Cancel dictation), double-tap lock, Paste Last, and commands. A
+hold and Escape while held (Escape no longer cancels since #786), double-tap lock, Paste Last, and commands. A
 physical keyboard press has not been recorded.
 
 `linux.hud`: [linux/rune_hud.rs](../../src/linux/rune_hud.rs) keeps the
@@ -1673,8 +1736,7 @@ Capture                                  // hex app and hex dictate
 │   └── Clip turns out near-silent or speechless -> Stop sound already played,
 │       nothing pasted
 ├── Brief discarded tap -> Start sound, but no stop sound or transcription
-├── Dictation pasted -> Done sound; failures play the error sound
-└── Cancel active capture -> Cancel sound; idle Escape stays silent
+└── Dictation pasted -> Done sound; failures play the error sound
 ```
 
 The shared [feedback player](../../src/feedback.rs) uses Hex's bundled sounds

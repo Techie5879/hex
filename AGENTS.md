@@ -137,7 +137,11 @@ substitute for source inspection or a second roadmap.
   the CPU and downloaded in the background, that keeps speechless dictation
   captures and meeting chunks away from the transcription models.
 - `transcription/local_transcriber`: the Linux and Windows GGUF loader, prewarm, whole-clip
-  transcription, and stream entry point.
+  transcription, and stream entry point. Loads where Settings › Speech engine
+  (`transcription_device`: Auto/GPU/CPU) says; a GPU device error reloads
+  on the CPU mid-run.
+- `transcription/gpu_health`: GPUs that failed while transcribing, remembered
+  per device and driver in `gpu-failures.json` (#856), which Auto skips.
 - `transcription/engine`: the thread that owns the loaded model on every OS and
   runs every inference in order: live streams fed during capture, their finish,
   whole-clip runs, and (macOS) model loads and switches. The capture owns its
@@ -162,11 +166,16 @@ substitute for source inspection or a second roadmap.
 - `transcription/model_details`: what a catalog model's details view adds:
   licence credit, source and licence links, the publisher's notice, measured
   memory, and benchmarks the publisher (never Hex) measured (Parakeet Ultra).
-- `transcription/custom_models`, `transcription/gguf_header`: Labs › Use your
-  own speech model: GGUF imports checked from their header alone (family,
-  variant, languages, F32/F16/Q8_0 tensors), copied into `models/custom/` under
-  their SHA-256 with a receipt and manifest, `TranscriptionModelId::Custom`
-  IDs, and the default-model fallback for an import that can't run.
+- `transcription/custom_models`, `transcription/gguf_header`: your own speech
+  models: GGUF imports checked from their header alone (family, variant,
+  languages, F32/F16/Q8_0 tensors), copied into `models/custom/` under their
+  SHA-256 with a receipt and manifest (or recorded in place for a found file),
+  `TranscriptionModelId::Custom` IDs, and the default-model fallback for an
+  import that can't run.
+- `transcription/found_models`: the Hugging Face cache scan (headers only, a
+  per-file cache keyed by path, size, mtime, and file ID), exact catalog
+  matches by pinned SHA-256 blob name, adopted catalog records in
+  `models/found/`, and the GPU memory estimate.
 - `transcription/service`: bounded host-audio admission, hostile WAV validation,
   normalization, cancellation, and inference. In the app, clips up to 30 s run
   on the dictation engine's model when it is the one requested; otherwise the
@@ -266,12 +275,19 @@ substitute for source inspection or a second roadmap.
   `$XDG_RUNTIME_DIR/wayland-*` socket the user owns. `linux/rune_hud`'s
   `limitation()` names the HUD's failure: no display, no layer-shell, or
   Rune's overlay error.
+- `linux/gnome_shortcuts`: on GNOME without a GlobalShortcuts portal
+  (GNOME 46, #781), Hex's own custom keybindings under
+  `…/media-keys/custom-keybindings/hex-*/` via `gsettings`
+  (`linux/gsettings`): `hex dictation toggle`, `hex paste-last`,
+  `hex annotate toggle`. Opt-in (`gnome_keyboard_shortcuts`), written while Hex
+  listens and removed when it's disabled; an existing entry keeps the key the
+  user set in GNOME, and other custom shortcuts are never touched.
 - `linux/clipboard`: the clipboard a Linux paste restores: every format of the
   CLIPBOARD selection read within a size cap and deadline, then served again
   from Hex (ext-data-control, else wlr-data-control on Wayland, its own selection owner with INCR on
   X11) until another client takes it.
 - `linux/input`: the one shortcut state machine (hold, double-tap lock, toggle,
-  double-tap only, Escape, Paste Last, and `hex` commands) and the
+  double-tap only, Paste Last, and `hex` commands) and the
   monitor that feeds it from X11 key grabs, the Wayland GlobalShortcuts portal,
   or, without the portal, the `hex` commands alone.
 - `linux/portal`: Hex's Linux app id `anomaly.hex` (reverse-DNS, #579; the
@@ -280,7 +296,7 @@ substitute for source inspection or a second roadmap.
   name, the portal bus (a private zbus connection, `Register("anomaly.hex")`
   after writing a managed fallback entry for a loose binary, requests and
   sessions) and the GlobalShortcuts client on it: one session binding all of
-  Hex's shortcuts once, Cancel dictation included, granted-trigger descriptions, ShortcutsChanged, ConfigureShortcuts, and
+  Hex's shortcuts once, granted-trigger descriptions, ShortcutsChanged, ConfigureShortcuts, and
   session-closed reporting.
 - `linux/remote_desktop`: the RemoteDesktop portal client Wayland paste uses
   without the virtual keyboard protocol: a keyboard-only session with a
@@ -536,8 +552,7 @@ substitute for source inspection or a second roadmap.
   destructors (such as ggml's Metal device) never run
   under live threads. A restart
   schedules its relaunch first; the new copy waits for the old pid to exit.
-- `feedback`: bounded volume-controlled capture, cancellation, and
-  failure tones.
+- `feedback`: bounded volume-controlled capture and failure tones.
 
 Keep modules deep. Callers should not coordinate
 CoreAudio formats, AppleScript details, or event serialization.
@@ -578,7 +593,7 @@ CoreAudio formats, AppleScript details, or event serialization.
   modifiers are pressed alone.
 - Windows accepts one modifier alone (Right Alt, Right Ctrl) as a dictation
   shortcut. Any key or mouse button joining a held modifier-only shortcut
-  ends it as a chord (Cancel only while it records). Releasing Alt or Windows
+  ends it as a chord (Cancel only while it records); Escape never does. Releasing Alt or Windows
   after a modifier-only shortcut held them is swallowed and replayed after a
   tap of unassigned VK 0xE8, so the menu bar and Start stay closed (not with
   Share shortcut). Hex marks every event it injects with `HEX_INJECTED` and its
@@ -631,10 +646,22 @@ CoreAudio formats, AppleScript details, or event serialization.
   fences remain required. Never strip Fn globally from shortcut matching.
 - Hold the shortcut to dictate and release to transcribe. Captures shorter than
   300 ms discard. A 450 ms hotkey pre-roll
-  protects speech onset. Capture has no automatic duration limit; release,
-  explicit stop, or Escape ends it.
+  protects speech onset. Capture has no automatic duration limit; release or
+  an explicit stop ends it.
+- Dictation has no cancel (#786): Escape ends no capture and no job on any
+  OS, not even as a chord with a held modifier-only shortcut, and Hex never
+  takes Escape from the app for dictation. Every intentional dictation
+  finishes and pastes. Only short taps, chords, and silent captures discard;
+  Hex itself ends a capture only when its input or microphone is lost.
+  `hex dictation cancel` from an older client gets a `removed` reply.
+- A dictation discarded for silence (level under the silence threshold, or no
+  speech the detector hears) is never silent, on every OS (#782): the error
+  tone, a short note beside the HUD ("too quiet, check your mic level"), the
+  measured level and peak against the thresholds in the log, and a "Last
+  dictation discarded" line in Settings' status until a dictation goes through
+  (`dictation::silence`).
 - When enabled, a second shortcut tap within 300 ms locks dictation. Press the
-  shortcut again to finish or Escape to cancel.
+  shortcut again to finish.
 - Recording audio behavior and idle-sleep prevention begin only after the
   intentional-hold threshold. Ordinary shortcut chords must not mute output,
   pause media, or prevent sleep.
@@ -647,8 +674,8 @@ CoreAudio formats, AppleScript details, or event serialization.
   taps and chords never get one,
   and it never reaches Hex's state machines.
 - The start tone confirms the shortcut press itself, not the hold threshold: it
-  is provisional, sounds after a 40 ms chord grace, and a chord, short tap, or
-  cancel retracts it (silently inside the grace, else
+  is provisional, sounds after a 40 ms chord grace, and a chord or short tap
+  retracts it (silently inside the grace, else
   a 20 ms fade). With the microphone released while idle, the tone waits for
   the open microphone and the hold.
 - When `Release microphone while idle` is
@@ -673,15 +700,13 @@ CoreAudio formats, AppleScript details, or event serialization.
   never moved; the hold threshold uses it alone. The audio owner waits at most
   the tail plus 100 ms for that audio, and a stream stall, failure, or gap in
   the tail finishes with the audio already delivered instead of failing the
-  capture. Escape, short taps, programmatic stops, and meetings
-  get no tail. A press during the tail is handled after the old clip finishes.
+  capture. Short taps, programmatic stops, and meetings get no tail. A press during the tail is handled after the old clip finishes.
 - Active dictation capture is lossless with respect to event, UI,
   context, and worker stalls.
 - The dictation shortcut has a persisted `shortcut_mode`: `hold` (default)
   or `toggle`. Toggle reuses the lock state on every platform: each press acts
   as the second tap of a double-tap, so release locks and the next shortcut
-  press finishes. Only Escape cancels, and a modifier pressed alone never ends a
-  key-chord capture. Double-tap settings apply to Hold only.
+  press finishes. A modifier pressed alone never ends a key-chord capture. Double-tap settings apply to Hold only.
 - Streaming dictation is speculative on every OS: a hotkey capture's stream
   receives the capture's 16 kHz audio with each pause cut to its first 2.5 s
   and last 0.3 s (Parakeet drops words after pauses past its left context),
@@ -698,18 +723,28 @@ CoreAudio formats, AppleScript details, or event serialization.
 - Completing or pasting an older job must not reconcile or finish a newer
   capture. Shortcut boundaries come from delivered CGEvent timestamps; do not
   fabricate a release timestamp from later physical state.
-- Escape cancels the active capture first, then the newest unfinished dictation.
-  Cancelled jobs never paste, update the last result, or block later output.
-- Escape never cancels a programmatic dictation; its owner cancels through the
-  API, and the lease ends an abandoned one. While one records, Hex claims no
-  Escape at all, even with other jobs queued.
+- A programmatic dictation's owner cancels it through the API, and the lease
+  ends an abandoned one. While one records, Hex claims no Escape at all.
 - Model switches activate only after the pinned artifact is checksum-verified,
   loaded on strict Metal, and prewarmed. A failed switch preserves the active
-  model and persisted selection. An import (Labs › Use your own speech model)
-  is checked from its GGUF header before anything loads and verified against
-  the receipt Hex wrote when it copied the file; that digest is not a
-  publisher's. A saved import that is missing, changed, or off stays saved
-  while the listener runs the default model; never rewrite it away.
+  model and persisted selection. An import is checked from its GGUF header
+  before anything loads and verified against the receipt Hex wrote when it
+  copied the file; that digest is not a publisher's. A saved import that is
+  missing or changed stays saved while the listener runs the default model;
+  never rewrite it away.
+- Models found in the Hugging Face cache are scanned only when the picker or
+  onboarding opens (or `hex model list` runs), never in the background, and
+  only their headers are read. A found file is used in place and is
+  read-only: Hex never writes, moves, or deletes anything in the cache, keeps
+  its receipts in its own models folder, hashes a file in full once when it is
+  chosen (against the pin or the blob name), and removing one only forgets it.
+- Onboarding shows its model list only when the scan found a compatible
+  model; otherwise the flow is unchanged. The list is one card of radio rows
+  with no buttons or file details: Hex's recommended model first and
+  selected (its exact copy on this computer is that same row), then the found
+  files. Picking a row starts it, and Continue starts the selected row. The
+  tour's own download is held while the scan runs and until a pick, and only
+  through setup. A found model is never picked for the person.
 - The menu-bar model picker lists only downloaded, available models and remembers
   each model's last selected language. It works without a
   Settings window. Settings and the menu bar share one preparation owner; a newer
@@ -787,7 +822,7 @@ CoreAudio formats, AppleScript details, or event serialization.
 - Dictate without processing (`raw_dictation_hotkey`, Output pane) is
   unbound by default and registers, grabs, or reserves nothing until bound
   (on Linux a portal entry and X11 grab exist only while bound). It follows
-  hold, toggle, double-tap lock, Escape, and queueing as dictation does; the
+  hold, toggle, double-tap lock, and queueing as dictation does; the
   shortcut that started a capture owns it. It pastes the trimmed transcript
   with no Output step, records History kind Raw, and updates Paste Last.
   `hex dictation start|toggle --raw` does the same; a printing stop of a raw
@@ -1141,11 +1176,16 @@ CoreAudio formats, AppleScript details, or event serialization.
   the managed entries it or the installer wrote (#652). The PNGs carry an
   `X-Hex-Managed=true` text chunk: Hex replaces and the installer removes only
   marked regular files, never a user's own icon or a symlink. Launch at login is
-  `~/.config/autostart/anomaly.hex.desktop`. At startup Hex renames its own
+  `~/.config/autostart/anomaly.hex.desktop`; where the Background portal exists
+  (`linux/background`, #812) Hex asks it at startup to run in the background
+  and Launch at login goes through it (the portal writes or removes that file,
+  `X-XDP-Autostart=anomaly.hex`). Every RequestBackground rewrites or removes
+  the file, so Hex asks only while it is absent or Hex's (managed or the
+  portal's); the installer treats the portal's entry as Hex's too. At startup Hex renames its own
   managed `hex.desktop` entries (the names before #579) and never touches
   unmanaged ones. Only a loose binary without any entry writes its own
   managed one so the portal can identify it, NoDisplay beside an older
-  package's `hex.desktop`, and removed once a package ships the entry. Every portal shortcut, Cancel dictation included, is bound
+  package's `hex.desktop`, and removed once a package ships the entry. Every portal shortcut is bound
   in one session with one BindShortcuts call, and that set never changes
   while Hex runs: desktops keep one set per app, and KDE replaces it with
   each call (a second session once wiped Hex's shortcuts,
@@ -1165,10 +1205,10 @@ CoreAudio formats, AppleScript details, or event serialization.
   `org.gnome.settings-daemon.global-shortcuts` settings through `gsettings`,
   since the portal can no longer reach that id; it touches no other app. A portal shortcut
   is held for as long as it is bound and consumed before the focused app
-  sees it, so the portal never binds Escape: Cancel dictation has no
-  suggested trigger, the user assigns one in the desktop, and it acts only
-  while something records or Annotate draws. Modifier-only shortcuts stay
-  unsupported on Linux.
+  sees it, so the portal never binds Escape. On KDE, Hex removes the
+  Cancel dictation entries older builds bound (`cancel`, `cancel-dictation`),
+  which could hold Escape or another key from every app. Modifier-only
+  shortcuts stay unsupported on Linux.
 - Every Linux shortcut source (X11 grabs, portal presses, `hex` commands) feeds
   the same `linux/input` state machine and emits the same events. Commands are
   idempotent: starting while recording or stopping while idle does nothing.
@@ -1413,6 +1453,23 @@ Pass the actual installed Rust host path to `lsregister` if it was renamed.
 Verify both registration and unregistration with `sfltool dumpbtm`, and restore
 the user's original login-item state after the test. Do not add release test
 hooks or persist a second launch-at-login flag.
+
+Onboarding gates every stable release. Before any stable release, run
+`scripts/check-onboarding.sh` on the release candidate commit and include its
+result, with the scene images it writes, in the go/no-go given to Dax. It
+renders every onboarding scene (fresh install, permissions, the model step with
+nothing found, with found models, with the recommended model already present,
+download in progress, practice, done) in both appearances against the approved
+goldens, and walks a first run through the real tour in a clean temporary data
+folder until a model is downloaded and the tour reaches Done. Any unexpected
+visual or flow change blocks the release; an intentional change refreshes the
+goldens in its own PR. It runs on Linux, like every golden; the macOS and
+Windows scenes are fixtures of the same window and render there too, but
+nothing renders on a real Mac or Windows GPU. Release's `onboarding` job runs
+the same script and requires the candidate's Check Linux, Check macOS, and
+Check Windows to have passed (`gh workflow run <check> --ref production`
+for a commit their paths skip); a stable run publishes nothing until it
+passes.
 
 Every platform is built, signed, and published by one run of
 `.github/workflows/release.yml` ("Release"; see `docs/releasing.md`).

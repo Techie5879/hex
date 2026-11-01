@@ -18,6 +18,10 @@ fn runtime(scene: &str, dark: bool, size: (f32, f32)) -> Runtime<Ui> {
         .find(|(name, _)| *name == scene)
         .unwrap_or_else(|| panic!("no scene {scene}"));
     apply(&mut state);
+    runtime_for(state, dark, size)
+}
+
+fn runtime_for(state: Ui, dark: bool, size: (f32, f32)) -> Runtime<Ui> {
     let env = Env {
         system_dark: dark,
         scale: GOLDEN_SCALE,
@@ -226,18 +230,9 @@ fn a_refused_note_sits_with_the_shortcut_the_desktop_kept() {
 #[test]
 fn each_panes_advanced_fold_starts_closed_and_stays_its_own() {
     let mut rt = runtime("portal", true, TALL_SIZE);
-    rt.state.settings.release_microphone_while_idle = true;
-    rt.invalidate();
-    settle(&mut rt);
-    assert!(rt.find("microphone-mode").is_none(), "closed even in use");
-    rt.state.settings.release_microphone_while_idle = false;
+    assert!(rt.find("double-tap-only").is_none(), "closed at first");
     tap(&mut rt, "advanced-toggle");
-    pick(&mut rt, "microphone-mode", 1);
-    assert!(rt.state.confirm_release);
     tap(&mut rt, "advanced-toggle");
-    assert!(!rt.state.confirm_release, "collapsing drops the question");
-    assert!(rt.find("microphone-mode").is_none());
-
     tap(&mut rt, "advanced-toggle");
     rt.state.settings.double_tap_lock = true;
     rt.state.settings.double_tap_only = true;
@@ -388,6 +383,13 @@ fn quit_hex_in_the_sidebar_asks_the_host_to_quit() {
 }
 
 #[test]
+fn ctrl_q_quits_hex() {
+    let mut rt = runtime("portal", true, PANE_SIZE);
+    key(&mut rt, Key::Command('q'), Mods::default());
+    assert!(rt.state.quit_requested);
+}
+
+#[test]
 fn enabling_sends_the_listener_action() {
     let mut rt = runtime("disabled", true, GOLDEN_SIZE);
     tap(&mut rt, "toggle-listening");
@@ -398,15 +400,20 @@ fn enabling_sends_the_listener_action() {
 }
 
 #[test]
-fn releasing_the_microphone_asks_first() {
+fn the_microphone_switch_sits_beside_the_picker_and_needs_no_confirmation() {
     let mut rt = runtime("portal", true, GOLDEN_SIZE);
-    tap(&mut rt, "advanced-toggle");
-    pick(&mut rt, "microphone-mode", 1);
-    assert!(rt.state.confirm_release);
-    assert!(!rt.state.settings.release_microphone_while_idle);
-    tap(&mut rt, "confirm-release/actions/confirm-release");
+    assert!(
+        rt.find("basics/microphone-mode").is_some(),
+        "in General, not Advanced"
+    );
+    let ready = "The mic stays ready so dictation starts instantly; your system shows it in use";
+    let released = "The mic opens only while you dictate; the first moment can be clipped";
+    assert!(texts(&rt).iter().any(|text| text == ready));
+    tap(&mut rt, "microphone-mode");
     assert!(rt.state.settings.release_microphone_while_idle);
-    assert!(!rt.state.confirm_release);
+    assert!(texts(&rt).iter().any(|text| text == released));
+    tap(&mut rt, "microphone-mode");
+    assert!(!rt.state.settings.release_microphone_while_idle);
 }
 
 #[test]
@@ -1452,15 +1459,15 @@ fn a_model_without_the_saved_language_falls_back_to_its_own_visibly() {
     let mut rt = runtime("picker", true, PANE_SIZE);
     rt.state.settings.transcription = TranscriptionSelection {
         model: TranscriptionModelId::WhisperLargeV3Turbo,
-        language: "ja".into(),
+        language: "he".into(),
     };
     rt.state.picker.installed = Some(Vec::new());
     rt.invalidate();
     settle(&mut rt);
-    let card = picker_card("ja", TranscriptionModelId::ParakeetUnifiedEnglish);
+    let card = picker_card("he", TranscriptionModelId::ParakeetUnifiedEnglish);
     let shown = texts(&rt);
     assert!(
-        shown.contains(&"Doesn't support Japanese; switches the language to English".to_owned()),
+        shown.contains(&"Doesn't support Hebrew; switches the language to English".to_owned()),
         "{shown:?}"
     );
     tap(&mut rt, &format!("{card}/top/actions/choose-model"));
@@ -1482,7 +1489,7 @@ fn a_model_without_the_saved_language_falls_back_to_its_own_visibly() {
     let shown = texts(&rt);
     assert!(
         shown.contains(
-            &"Parakeet Unified English doesn't support Japanese, so the language changed to English"
+            &"Parakeet Unified English doesn't support Hebrew, so the language changed to English"
                 .to_owned()
         ),
         "{shown:?}"
@@ -1822,6 +1829,59 @@ fn onboarding_downloads_the_model_through_the_service() {
 }
 
 #[test]
+fn with_no_model_found_onboarding_downloads_the_recommended_model_with_no_list() {
+    for scene in ["onboarding", "mac-onboarding"] {
+        let mut rt = runtime(scene, false, PANE_SIZE);
+        assert!(rt.state.found.models.is_empty());
+        // The download starts on its own, before any step or pick.
+        assert!(
+            matches!(
+                sent(&rt),
+                [Request::ChooseModel {
+                    model: TranscriptionModelId::ParakeetUnifiedEnglish,
+                    ..
+                }]
+            ),
+            "{scene}: {:?}",
+            sent(&rt)
+        );
+        tap(&mut rt, "tour-continue");
+        let shown = texts(&rt);
+        assert!(rt.find("model-list").is_none(), "{scene}: no model list");
+        assert!(
+            !shown.contains(&"Choose a speech model".to_owned()),
+            "{scene}: {shown:?}"
+        );
+    }
+}
+
+#[test]
+fn the_onboarding_model_list_starts_the_row_picked_or_the_recommended_one() {
+    // Continue with no pick starts the selected, recommended model.
+    let mut rt = runtime("onboarding-model-found", false, PANE_SIZE);
+    assert!(sent(&rt).is_empty(), "nothing starts before a pick");
+    tap(&mut rt, "tour-continue");
+    assert!(matches!(
+        sent(&rt),
+        [Request::ChooseModel {
+            model: TranscriptionModelId::ParakeetUnifiedEnglish,
+            ..
+        }]
+    ));
+    // Picking a found catalog model uses it, with no download of ours.
+    let mut rt = runtime("onboarding-model-found", false, PANE_SIZE);
+    tap(&mut rt, "model1");
+    assert!(matches!(
+        sent(&rt),
+        [Request::ChooseModel {
+            model: TranscriptionModelId::ParakeetV3,
+            ..
+        }]
+    ));
+    assert_eq!(rt.state.found.picked, Some(1));
+}
+
+#[test]
 fn the_microphone_field_names_the_input_in_use() {
     let field = |rt: &Runtime<Ui>| element(rt, "microphone-control").label;
     let rt = runtime("mac-settings", true, PANE_SIZE);
@@ -1905,7 +1965,9 @@ fn annotate_pane_snapshots() {
 
 // ---------------------------------------------------------------------------
 // Goldens: offscreen GPU renders compared with checked-in PNGs. Set
-// HEX_UPDATE_GOLDENS=1 to rewrite them. Without a GPU adapter they skip.
+// HEX_UPDATE_GOLDENS=1 to rewrite them. Without a GPU adapter they skip,
+// unless HEX_REQUIRE_GPU is set (scripts/check-onboarding.sh).
+// HEX_GOLDEN_RENDERS=<folder> also writes every render there.
 
 /// One device for every golden, used one render at a time: creating Vulkan
 /// devices from parallel test threads crashed Mesa's RADV on Linux.
@@ -1941,20 +2003,23 @@ fn render(scene: &str, dark: bool, size: (f32, f32)) -> Option<(u32, u32, Vec<u8
     );
     renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    renderer.draw(&mut encoder, &target.view, rt.clear_color());
-    // The window compositor's own pass: the Sounds sheet's HUD.
-    super::sound_sets::Preview::default().render(&mut rune::compose::Frame {
-        device: &gpu.device,
-        queue: &gpu.queue,
-        encoder: &mut encoder,
-        target: &target.view,
-        format: crate::rune_ui::offscreen::format(),
-        size: (width, height),
-        dt: 0.0,
-        update_ms: 0.0,
-        rt: &mut rt,
-        ui: &mut renderer,
-    });
+    // The window's own compositor: the UI, the welcome hero over its stage,
+    // and the Sounds sheet's HUD.
+    rune::compose::Compositor::render(
+        &mut super::WindowCompositor::default(),
+        &mut rune::compose::Frame {
+            device: &gpu.device,
+            queue: &gpu.queue,
+            encoder: &mut encoder,
+            target: &target.view,
+            format: crate::rune_ui::offscreen::format(),
+            size: (width, height),
+            dt: 0.0,
+            update_ms: 0.0,
+            rt: &mut rt,
+            ui: &mut renderer,
+        },
+    );
     target.copy(&mut encoder);
     renderer.submit(&gpu.queue, encoder);
     Some((width, height, target.read(&gpu.device)))
@@ -1978,9 +2043,19 @@ fn read_png(path: &std::path::Path) -> (u32, u32, Vec<u8>) {
 fn check_golden(scene: &str, dark: bool, size: (f32, f32)) {
     let name = format!("{scene}-{}", if dark { "dark" } else { "light" });
     let Some((width, height, pixels)) = render(scene, dark, size) else {
+        assert!(
+            std::env::var_os("HEX_REQUIRE_GPU").is_none(),
+            "golden {name}: no GPU adapter, and HEX_REQUIRE_GPU is set"
+        );
         eprintln!("skipping golden {name}: no GPU adapter");
         return;
     };
+    if let Some(folder) = std::env::var_os("HEX_GOLDEN_RENDERS") {
+        let folder = std::path::PathBuf::from(folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        rune::render::write_png(&folder.join(format!("{name}.png")), width, height, &pixels)
+            .unwrap();
+    }
     let path = golden_path(&name);
     if std::env::var_os("HEX_UPDATE_GOLDENS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2079,18 +2154,20 @@ fn goldens() {
             "modes",
             "modes-picker",
             "picker-downloading",
-            "onboarding-setup",
         ] {
             check_golden(scene, dark, PANE_SIZE);
         }
     }
     check_golden("commands", true, GOLDEN_SIZE);
     check_golden("menus", false, GOLDEN_SIZE);
+    // A list longer than the window fades at its scrolling edge (#840).
+    check_golden("language-menu", false, GOLDEN_SIZE);
     check_golden("modes-opencode-not-running", false, PANE_SIZE);
-    check_golden("onboarding", true, PANE_SIZE);
     check_golden("picker-custom-models", false, PANE_SIZE);
+    check_golden("picker-found", false, PANE_SIZE);
 }
 
+mod onboarding_check;
 mod panes;
 
 /// Rune hands focus back to a menu's trigger when it closes. A key the

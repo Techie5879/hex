@@ -16,6 +16,8 @@ mod controls;
 #[cfg(target_os = "macos")]
 pub(crate) mod deep_link;
 mod explainer;
+mod found;
+mod found_choice;
 mod fun;
 mod general;
 mod hero;
@@ -190,6 +192,7 @@ pub(crate) fn run_app(
                         });
                     }
                     Control::Quit => {
+                        self::host::close_before_quit(&window);
                         quit.quit();
                         break;
                     }
@@ -770,7 +773,6 @@ pub(crate) struct Ui {
     /// properties, which can block, so it runs off the UI thread.
     microphones_listing:
         Option<std::sync::mpsc::Receiver<Result<crate::audio::InputDevices, String>>>,
-    confirm_release: bool,
     mic_level: general::MicLevel,
     /// The panes whose Advanced fold is open.
     advanced: Vec<Pane>,
@@ -792,6 +794,8 @@ pub(crate) struct Ui {
     modes: modes::ModesPane,
     output: output::OutputPane,
     picker: picker::Picker,
+    /// Speech models already on this computer, and choosing one.
+    found: found::FoundState,
     explainer: explainer::Explainer,
     sound_sets: sound_sets::SoundSets,
     tour: Option<onboarding::Tour>,
@@ -874,7 +878,6 @@ impl Ui {
             microphones_listed_at: 0.0,
             input_sources_listed_at: f64::NEG_INFINITY,
             microphones_listing: None,
-            confirm_release: false,
             mic_level: general::MicLevel::default(),
             advanced: Vec::new(),
             labs_open: false,
@@ -890,6 +893,7 @@ impl Ui {
             modes,
             output: output::OutputPane::default(),
             picker: picker::Picker::default(),
+            found: found::FoundState::default(),
             explainer: explainer::Explainer::default(),
             sound_sets: sound_sets::SoundSets::default(),
             tour: None,
@@ -1211,6 +1215,13 @@ fn on_key(ui: &mut Ui, event: &rune::KeyEvent, tx: &mut Tx) -> bool {
         tx.toggle_playground();
         return true;
     }
+    // Ctrl+Q quits Hex on Linux, as Quit Hex in the sidebar does (#808).
+    // macOS's menu bar owns ⌘Q; Windows quits from its tray.
+    #[cfg(target_os = "linux")]
+    if event.key == rune::Key::Command('q') && !event.mods.shift && !event.mods.alt {
+        ui.quit();
+        return true;
+    }
     if let rune::Key::Command(digit @ '1'..='9') = event.key
         && !event.mods.alt
         && !ui.picker.open
@@ -1333,6 +1344,7 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     changed |= ui.modes.poll(ui.live());
     changed |= modes::poll_chooser(ui);
     changed |= model_import::poll(ui);
+    changed |= found::poll(ui);
     let login_unknown = ui.platform.login_item.is_none();
     changed |= settings::poll_microphones(ui);
     // General names the input in use; list again when the OS reports an
@@ -1940,7 +1952,6 @@ const SCENES: &[Scene] = &[
             default_is_hex_microphone: false,
             ..Default::default()
         });
-        ui.confirm_release = true;
     }),
     ("history", |ui| {
         *ui = portal_fixture();
@@ -2014,10 +2025,15 @@ const SCENES: &[Scene] = &[
         *ui = portal_fixture();
         picker::parakeet_ultra_fixture(ui);
     }),
-    // Labs › Use your own speech model: the picker's Add model file….
+    // The picker's Add model file….
     ("picker-custom-models", |ui| {
         *ui = portal_fixture();
-        ui.settings.labs.custom_models = true;
+        picker::fixture(ui, None);
+    }),
+    // Found on this computer: Parakeet v3's exact file and an untested Whisper.
+    ("picker-found", |ui| {
+        *ui = portal_fixture();
+        ui.found.models = found::fixture();
         picker::fixture(ui, None);
     }),
     // Japanese saved: the English-only models say they switch the language.
@@ -2106,6 +2122,10 @@ const SCENES: &[Scene] = &[
         *ui = portal_fixture();
         onboarding::fixture(ui, crate::desktop::onboarding::Step::Setup, true);
     }),
+    // Onboarding's model list with models found here (`found` scenes).
+    ("onboarding-model-found", found::listed),
+    ("onboarding-model-found-downloading", found::loading),
+    ("onboarding-model-found-recommended", found::present),
     // macOS and Windows surfaces, from preview data (see `platform`).
     ("mac-settings", |ui| *ui = mac_fixture()),
     // The microphone row following a recorded voice (`--video`), and with
