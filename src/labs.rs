@@ -473,6 +473,7 @@ const CUSTOM_MODELS: u32 = 1 << 16;
 const PARAKEET_ULTRA: u32 = 1 << 17;
 /// Unload-idle minutes (at most 1,440, 11 bits) sit above the switches.
 const MINUTES_SHIFT: u32 = 18;
+const MINUTES_MASK: u32 = (1 << 11) - 1;
 const LOCAL_POLISH: u32 = 1 << 29;
 
 /// Local dictation cleanup instead of OpenCode rewriting.
@@ -598,9 +599,13 @@ pub fn parakeet_ultra() -> bool {
 /// How long the speech model may sit unused before the engine unloads it,
 /// while Labs › Unload model when idle is on.
 pub fn unload_idle() -> Option<std::time::Duration> {
-    let state = state();
-    (state & UNLOAD_IDLE != 0)
-        .then(|| std::time::Duration::from_secs(u64::from(state >> MINUTES_SHIFT) * 60))
+    unload_idle_from(state())
+}
+
+fn unload_idle_from(state: u32) -> Option<std::time::Duration> {
+    (state & UNLOAD_IDLE != 0).then(|| {
+        std::time::Duration::from_secs(u64::from((state >> MINUTES_SHIFT) & MINUTES_MASK) * 60)
+    })
 }
 
 /// Records the switches the loaded or saved settings hold.
@@ -813,6 +818,22 @@ pub fn run_retired_experiments() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_polish_does_not_change_speech_model_idle_minutes() {
+        let settings = crate::app_settings::LabsSettings {
+            local_polish: true,
+            unload_idle: true,
+            unload_idle_minutes: 5,
+            ..Default::default()
+        };
+        let bits = super::encode_where(&settings, |_| true);
+        assert_ne!(bits & super::LOCAL_POLISH, 0);
+        assert_eq!(
+            super::unload_idle_from(bits),
+            Some(std::time::Duration::from_secs(300))
+        );
+    }
+
     use super::*;
 
     #[test]
