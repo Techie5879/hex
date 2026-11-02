@@ -1,5 +1,8 @@
 package anomaly.hex.android.core.models
 
+import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.sqrt
@@ -25,5 +28,17 @@ object AudioLevels {
         }
         val rms = sqrt(sum / (end - start))
         return if (rms <= 0.0) -120f else (20 * log10(rms)).toFloat()
+    }
+
+    /** Whether little-endian PCM16 stays below the silence threshold, read a window at a time. */
+    fun isSilent(pcm: InputStream): Boolean {
+        val bytes = ByteArray(WINDOW_SAMPLES * 2)
+        val shorts = ShortArray(WINDOW_SAMPLES)
+        while (true) {
+            val read = pcm.readNBytes(bytes, 0, bytes.size)
+            if (read <= 0) return true
+            ByteBuffer.wrap(bytes, 0, read).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts, 0, read / 2)
+            if (rmsDbfs(shorts, 0, read / 2) >= SILENCE_THRESHOLD_DBFS) return false
+        }
     }
 }

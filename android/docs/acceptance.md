@@ -59,6 +59,18 @@ Repeat a dictation in Gmail, Messages, and a Compose app such as Google Keep.
 | Drag | Moves to the nearest edge. The microphone indicator never lights, and it never triggers Back |
 | Dictate, then lock the screen | Stops, nothing is lost, History has it |
 
+With TalkBack on (Settings › Accessibility):
+
+| Do | Expect |
+|---|---|
+| Focus a text field, then explore to the button | It announces "Hex dictation" and how to use it |
+| Double-tap the button | Hands-free recording starts, without a hold |
+| Find and double-tap Finish, then repeat with Cancel | Each is named, and acts |
+| Reach Copy and Insert on a "Text ready" result | Each is named, and acts |
+| Use the button's actions menu | "Move to the other edge" works |
+
+Turn TalkBack off when you're done, as Hex's overlays behave differently with it on.
+
 ## 6. Sync with your Mac
 
 1. On the companion machine: enable HTTPS on your tailnet once (the Tailscale admin console, under DNS), then follow

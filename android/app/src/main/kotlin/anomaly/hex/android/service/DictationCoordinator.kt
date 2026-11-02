@@ -33,8 +33,6 @@ import anomaly.hex.android.data.HistoryEntry
 import anomaly.hex.android.engine.EngineDeadlineException
 import anomaly.hex.android.engine.EngineDiedException
 import java.io.File
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.Executors
 
 sealed interface InsertOutcome {
@@ -297,7 +295,7 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
                 session.pcm.delete()
                 return finish(session) { apply(machine.onFailure(ErrorKind.TooQuiet, "That was too short to transcribe.", false)) }
             }
-            if (isSilent(session.pcm)) {
+            if (session.pcm.inputStream().buffered().use(AudioLevels::isSilent)) {
                 session.pcm.delete()
                 return finish(session) { apply(machine.onFailure(ErrorKind.TooQuiet, "Too quiet. Check your mic.", false)) }
             }
@@ -425,19 +423,6 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
             }
             val created = file.name.substringBefore('-').toLongOrNull() ?: file.lastModified()
             runCatching { addPending(file, created) }
-        }
-    }
-
-    private fun isSilent(pcm: File): Boolean {
-        val bytes = ByteArray(AudioLevels.WINDOW_SAMPLES * 2)
-        val shorts = ShortArray(AudioLevels.WINDOW_SAMPLES)
-        pcm.inputStream().buffered().use { input ->
-            while (true) {
-                val read = input.readNBytes(bytes, 0, bytes.size)
-                if (read <= 0) return true
-                ByteBuffer.wrap(bytes, 0, read).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts, 0, read / 2)
-                if (AudioLevels.rmsDbfs(shorts, 0, read / 2) >= AudioLevels.SILENCE_THRESHOLD_DBFS) return false
-            }
         }
     }
 

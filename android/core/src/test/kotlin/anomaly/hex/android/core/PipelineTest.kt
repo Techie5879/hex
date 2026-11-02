@@ -1,5 +1,6 @@
 package anomaly.hex.android.core
 
+import anomaly.hex.android.core.models.AudioLevels
 import anomaly.hex.android.core.pipeline.CancelToken
 import anomaly.hex.android.core.pipeline.CancelledException
 import anomaly.hex.android.core.pipeline.CleanupGuard
@@ -286,6 +287,19 @@ class PipelineTest {
         assertEquals("Hello there.", FillerWords.apply("Um, hello there."))
         assertEquals("First line\nSecond line", FillerWords.apply("First line\nUm second line").replace("second", "Second").replace("Second line", "Second line"))
         assertEquals("damn right", FillerWords.apply("damn uh right"))
+    }
+
+    @Test
+    fun silenceIsJudgedByTheLoudestWindow() {
+        fun pcm(vararg levels: Short) = java.io.ByteArrayInputStream(
+            java.nio.ByteBuffer.allocate(levels.size * 2 * AudioLevels.WINDOW_SAMPLES).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+                for (level in levels) repeat(AudioLevels.WINDOW_SAMPLES) { putShort(level) }
+            }.array(),
+        )
+        assertTrue(AudioLevels.isSilent(pcm(0, 0, 0)))
+        assertTrue(AudioLevels.isSilent(pcm(50, 50)))
+        assertFalse("One loud window is enough", AudioLevels.isSilent(pcm(0, 5000, 0)))
+        assertTrue(AudioLevels.isSilent(java.io.ByteArrayInputStream(ByteArray(0))))
     }
 
     @Test

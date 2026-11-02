@@ -1,6 +1,7 @@
 package anomaly.hex.android.ui
 
 import anomaly.hex.android.HexApp
+import anomaly.hex.android.core.models.AudioLevels
 import anomaly.hex.android.core.pipeline.CancelToken
 import anomaly.hex.android.core.pipeline.CleanupPipeline
 import anomaly.hex.android.core.pipeline.Vocabulary
@@ -26,6 +27,8 @@ object PendingTranscriber {
         return try {
             val cancel = CancelToken()
             val terms = app.profile.current.liveTerms
+            if (pcm.length() / 2 < AudioLevels.MIN_DICTATION_SAMPLES) return Outcome.Failed("This recording is too short to transcribe.")
+            if (pcm.inputStream().buffered().use(AudioLevels::isSilent)) return Outcome.Failed("This recording is too quiet to transcribe.")
             if (app.engine.hasSpeech(app.models.speechDetector().path, pcm.path) == false) return Outcome.Failed("No speech heard in this recording.")
             val prompt = Vocabulary.transcriptionPrompt(terms)
             val raw = app.engine.transcribe(
