@@ -16,13 +16,13 @@ on the phone.
   built-in benchmark. Local cleanup is rule-based, or uses SpeakoFlow if you download it.
 - **Optional polish** for long dictations, sent directly to ChatGPT with the phone's own sign-in, at
   the same thresholds as desktop Hex.
-- **Your dictionary and prompts** on phone and computer, synced free through a server you run.
+- **Your dictionary and prompts** on phone and computer, synced free through desktop Hex while your Mac is awake.
 - **Recordings and history** kept on the phone for as long as you choose, separately.
 
 ## Install
 
 See [docs/acceptance.md](docs/acceptance.md) for installing on a phone, and
-[companion/README.md](companion/README.md) to set up sync.
+[docs/sync.md](docs/sync.md) to set up sync.
 
 Android restricts Accessibility for apps installed outside an app store. If the switch is greyed
 out, open Hex's App info, tap ⋮, and choose **Allow restricted settings**.

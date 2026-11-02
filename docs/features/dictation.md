@@ -2,8 +2,9 @@
 
 Hold the configured shortcut, speak, and release. Hex transcribes locally and
 inserts the result at the current focus. New captures do not cancel accepted
-work, and dictation has no cancel: every intentional dictation finishes and
-pastes (#786).
+work. Only Toggle mode has a cancel: its cancel shortcut, Escape by default,
+discards the recording (#786, #1022); every other intentional dictation
+finishes and pastes.
 
 This map covers the macOS release path. Linux shares the basic journey, not
 every timing, input, or recovery guarantee; see the
@@ -71,6 +72,16 @@ recorder refuses them, and a saved shortcut on one goes back to its default
 when settings load or the toggle turns off. Limit: Rune doesn't report these
 keys to the window's recorder, so set them with `hex settings`. Details and
 checks in [labs.md](labs.md).
+
+Linux with Labs › Section key alone on (`labs.section_key_alone`, off by
+default; issue 1050): the ISO § key, left of 1, may be a shortcut with no
+modifier. The window's recorder takes § pressed alone and shows §, and
+`hex settings set dictation_hotkey §` (or `section`) saves it. It reaches X11
+grabs as keysym 0xa7 and the portal as `section`. Off, the recorder answers
+"Add a modifier" as before, `hex settings` refuses it, and a saved § shortcut
+without a modifier goes back to its default when settings load or the toggle
+turns off. While bound, § is Hex's in every app. Details and checks in
+[labs.md](labs.md).
 
 Checks: `mouse_buttons_record_with_or_without_modifiers`,
 `mouse_bindings_persist_and_conflict_only_with_the_same_trigger`,
@@ -252,6 +263,24 @@ Menu bar > Copy Recent Dictation (under Paste Last Dictation)  // dictate.copy-r
 
 Details and checks in [labs.md](labs.md).
 
+### Skip Long Pauses (Labs, Linux and Windows)
+
+A dictation transcribed as a whole clip (no stream on this model or device,
+or the fallback after a failed or late stream) sends every second of silence
+through the model. With Labs › Skip long pauses on (`labs.skip_pauses`, off
+by default, issue 899):
+
+```ts
+Whole-clip run starts -> labs::skip_pauses()        // dictate.skip-pauses
+├── Off -> The clip, untouched (as before)
+├── On -> Each pause at the noise floor keeps its first 2.5 s and last 0.3 s,
+│   a trailing pause its first 2.5 s; shorter pauses pass whole (the stream's PauseCap)
+├── Nothing heard above the floor -> The clip, untouched (#841)
+└── Job deadline, History duration, silence discard -> The full clip
+```
+
+Details and checks in [labs.md](labs.md).
+
 ### Vocabulary Quality Checks
 
 `hex benchmark-transcription` accepts a scoring vocabulary and expected terms,
@@ -338,6 +367,15 @@ read as held, and pastes. Checks:
 [linux/paste.rs](../../src/linux/paste.rs) (constructed state; not run on a
 desktop).
 
+**Fixed November 2, 2026 (issue 978):** a Windows paste refused to run when
+the clipboard held only a format Hex can't snapshot (an app's private
+format), failing every dictation with "the current clipboard format cannot be
+preserved safely". The transcript now pastes anyway; that clipboard just isn't
+restored afterwards, and `process.log` says why. Check:
+`an_unreadable_clipboard_still_pastes_and_restores_nothing` in
+[windows/paste.rs](../../src/windows/paste.rs) (constructed state; not run on
+a Windows PC).
+
 **Changed October 22, 2026:** Kit holds Option a little past 300 ms before
 pressing the digit, which 2.3.0 and the Swift app both ignored after the
 threshold. Any non-modifier key pressed while a modifier-only shortcut is still
@@ -406,13 +444,16 @@ breaker reaches the app.
 ### Shortcut Mode
 
 ```ts
-General > Shortcut mode = Hold (default)             // dictate.shortcut-mode
-  -> Hold and lock behave as described above
-General > Shortcut mode = Toggle
+General > Shortcut mode (under Shortcut)               // dictate.shortcut-mode
+  -> Names the choice; opens the Shortcut mode modal
+  Hold or double-tap (default) -> Hold, plus double-tap to lock
+  Hold                         -> Hold only
+  Tap                          -> Toggle, below
+  Double-tap                   -> Double-tap only; needs a key binding
+Tap
   Press -> Start (pre-roll as usual) -> Release keeps recording
   -> Fresh shortcut press -> Finish (with the release tail)
-  -> Escape -> Nothing: it reaches the app (#786)
-  // Double-tap to lock and Double-tap only are hidden and ignored
+  -> Cancel shortcut (Escape by default) -> Cancelled, see Toggle Cancel below
   // Shortcut chords during the first 300 ms still discard
   macOS, Labs › Tap or hold on (labs.tap_or_hold, off by default, #711):
   ├── Release 300 ms or more after the press -> Finish (with the release tail)
@@ -422,7 +463,15 @@ General > Shortcut mode = Toggle
   └── Sooner -> Ignored as a key repeat (KWin repeats held shortcuts)
 ```
 
-Toggle reuses the lock state on every platform: each press behaves as the
+The one choice is stored in the three settings it replaced
+(`shortcut_mode`, `double_tap_lock`, `double_tap_only`); of their eight
+combinations only four behave differently, and `Trigger::of` in
+[shortcut_mode.rs](../../src/rune_ui/shortcut_mode.rs) folds the rest onto
+them (`redundant_and_invalid_combinations_fold_away`). `hex settings` still
+sets each one. Linux with only `hex` commands shows no row: the commands
+ignore it.
+
+Tap (`toggle`) reuses the lock state on every platform: each press behaves as the
 second tap of a double-tap. Persisted as `shortcut_mode` (`hold`/`toggle`) in
 each platform's settings; files without it load as Hold. Checks:
 `toggle_mode_starts_on_a_press_and_finishes_on_the_next` and
@@ -442,22 +491,21 @@ CI. The Linux state machine and X11 grab tests ran on 2026-10-22 (the grabs on
 an isolated Xwayland display). No physical keyboard check yet.
 
 ```ts
-General > Shortcut mode > How it works                // dictate.shortcut-explainer
-  -> Modal: Hold and Toggle cards, each the shortcut's keycaps (one per key,
-     pressing together) beside two lanes (key above, recording below) on a
-     chart-recorder tape: a still pen at the right, the tape scrolling left
-     without end and fading out at its left edge; opening it ends a shortcut
-     recording and closes the model picker
-  ├── Opens centred at its Hold height in either mode; a window resize
-  │   centres it again
-  ├── Long chord -> The panel widens (up to the window) so each card's lanes
-  │   keep at least 64 pt beside the keycaps
-  ├── Pick a card (click, Enter, Space) -> Saves Shortcut mode
-  ├── Hold -> Double-tap to lock row: switch + striped hands-free lane
-  ├── Toggle -> No lock row; it folds inside its own slot and the panel's
-  │   bottom edge rises with it (the top stays put)
-  ├── Tab -> Hold, Toggle, lock switch, Close; focus stays inside
-  ├── Close, Escape, or a press outside -> Closes; focus returns to the link
+General > Shortcut mode                               // dictate.shortcut-explainer
+  -> Modal: the four choices, each its name and one line beside the
+     shortcut's keycaps (one per key, pressing together) and two lanes (key
+     above, recording below) on a chart-recorder tape: a still pen at the
+     right, the tape scrolling left without end and fading out at its left
+     edge; opening it ends a shortcut recording and closes the model picker
+  ├── The current choice has a focus-coloured border
+  ├── Double-tap with a lone modifier -> Dimmed, takes no focus or press,
+  │   says "Needs a shortcut with a key, like ⌥Space"
+  ├── Long chord -> The panel widens (up to the window) so each option's
+  │   lanes keep at least 64 pt beside the keycaps
+  ├── Pick an option (click, Space) -> Saves the choice
+  ├── Tab -> each available option, Done; focus stays inside
+  ├── Done, Return, Escape, or a press outside -> Closes; focus returns to
+  │   the row
   ├── Change pane, menu bar, or `hex window show` -> Closes
   └── Reduce Motion -> One whole take, still, no wakes; turned off while
       open, the tape starts again when the window regains focus
@@ -465,28 +513,25 @@ General > Shortcut mode > How it works                // dictate.shortcut-explai
 
 The lanes are Rune shapes drawn at their laid-out width and redrawn from the
 window's poll clock while the modal is open (`src/rune_ui/explainer.rs`).
-Checks: `how_it_works_opens_the_shortcut_explainer_and_keeps_focus_inside`,
-`explainer_cards_pick_the_shortcut_mode`,
+Checks: `the_shortcut_mode_row_names_the_choice`,
+`shortcut_mode_opens_from_its_row_and_keeps_focus_inside`,
+`each_option_picks_its_trigger`,
 `the_explainer_loops_on_the_poll_clock`,
 `reduce_motion_shows_the_finished_explainer_without_waking`,
 `the_explainer_restarts_when_reduce_motion_turns_off`,
-`the_explainer_centres_at_its_hold_height_in_either_mode`,
-`a_long_chord_widens_the_explainer` (five keys),
-the tape's own `nothing_draws_past_the_pen`, `the_tape_scrolls_without_steps`,
-`the_still_frame_shows_a_whole_take`, `narrow_lanes_draw_nothing` and
-`the_past_leaves_the_tape` in `explainer.rs`,
-`the_explainer_draws_a_keycap_per_key_and_lines_up_the_lanes`, and
+`a_long_chord_widens_shortcut_mode` (five keys),
+`shortcut_mode_draws_a_keycap_per_key_and_lines_up_the_lanes`, and
 `the_explainer_picker_and_shortcut_recording_never_share_the_window` in
-[tests/panes.rs](../../src/rune_ui/tests/panes.rs), plus the
-`shortcut-explainer`, `shortcut-explainer-toggle`, and
-`shortcut-explainer-chord` (Ctrl+Alt+Space) goldens (frozen at 1.8 s into the
-tape). The animation itself has been seen only in headless
-frames, not on a real window; a headless trace of Hold, Toggle and rapid
-switching on 2026-10-25 kept every element inside the panel and clear of
-Close on every frame (no automated check yet).
+[tests/panes.rs](../../src/rune_ui/tests/panes.rs), the tape's own
+`nothing_draws_past_the_pen`, `the_tape_scrolls_without_steps`,
+`the_still_frame_shows_a_whole_take`, `narrow_lanes_draw_nothing` and
+`the_past_leaves_the_tape` in `explainer.rs`, plus the `shortcut-mode`
+(Option, Double-tap unavailable), `shortcut-mode-key` (Option-Space,
+Double-tap chosen), and `shortcut-mode-chord` (Ctrl+Alt+Space) goldens
+(frozen at 1.8 s into the tape). The animation itself has been seen only in
+headless frames, not on a real window.
 
-On Linux, `hex dictation start` and `stop` bypass Hold, Toggle, and the
-double-tap rules: start records unless something already records, stop
+On Linux, `hex dictation start` and `stop` bypass every Shortcut mode: start records unless something already records, stop
 finishes, and `toggle` does whichever applies. Bound to a key's press and
 release they give hold-to-dictate; a shortcut press still finishes a capture a
 command started.
@@ -497,13 +542,13 @@ and explicit programmatic capture have different intentional-start rules.
 ### Lock, With Or Without Hold
 
 ```ts
-General > Double-tap to lock                          // dictate.lock; Hold only
+Shortcut mode = Hold or double-tap or Double-tap     // dictate.lock
   Hold -> Ordinary hold path remains available
   Tap -> Tap
     ├── Second press AND release <300 ms after first release -> LOCKED
     └── Slow second release -> No lock
 
-General > Advanced > Double-tap only                  // dictate.double-tap-only
+Shortcut mode = Double-tap                           // dictate.double-tap-only
   Requires a key binding AND locking enabled
   Single press/hold -> No capture                     // disables hold, not a toggle
   Same two qualifying complete taps -> LOCKED         // same lock, not a third mode
@@ -544,7 +589,8 @@ Release that will transcribe                          // dictate.stop-tone
      still captured; a muted output (macOS, Linux) unmutes first, then the tone
      ├── Short tap or chord -> No stop tone; the start tone is retracted
      ├── Clip later near-silent or without speech -> Tone already played;
-     │   discard, nothing pasted
+     │   discard quietly, nothing pasted, no error tone or note; the log has
+     │   the measured level and peak against the thresholds
      └── Escape after the release -> Nothing; the clip still transcribes
   -> macOS: the audio owner announces it before draining the tail; HUD
      Transcribing and submission still follow the tail
@@ -666,6 +712,9 @@ Model advertises streaming, GPU device             // dictate.streaming
   ├── he: ivrit.ai Whisper large-v3-turbo Recommended (Hebrew only, always with
   │   the `he` hint; 18.45% WER on FLEURS Hebrew test against stock turbo's
   │   29.69%, Hex's run), then Whisper turbo for Vocabulary (#752)
+  ├── ru: GigaAM v3 Recommended (ai-sage's e2e RNN-T, Russian only, 274 MB, no
+  │   hint; 5.37% WER on FLEURS Russian test against Parakeet v3's 6.52% and
+  │   Whisper turbo's 5.36%, Hex's run), then Whisper turbo for Vocabulary (#952)
   └── Every other available model follows without a badge, selectable and
       deletable; never auto-switched or auto-downloaded (setup.language-select)
 ```
@@ -1034,29 +1083,45 @@ Source: `control_chord` in [windows/paste.rs](../../src/windows/paste.rs).
 Check: `paste_chords_press_shift_inside_control_and_leave_a_held_control_alone`
 (the synthesized key sequence only; no paste into a real Windows app).
 
-### No Cancel
+### Toggle Cancel
 
 ```ts
-Escape                                               // dictate.no-cancel
-  ├── Recording (held, locked, toggled) -> Nothing; the key reaches the app
-  │   -> Not a chord either, even beside a held modifier-only shortcut
-  ├── Accepted jobs -> Nothing; they finish and paste in order
-  ├── Annotate drawing -> Stops drawing only (Annotate's own Escape)
-  └── Programmatic dictation (local API) -> Its owner cancels through /cancel
-     -> The lease ends an abandoned one
-hex dictation cancel -> Removed; an older `hex` gets `removed`
-Linux portal -> No Cancel dictation shortcut; Escape never bound
+Settings › General, Shortcut mode = Tap (Toggle)     // dictate.toggle-cancel
+  -> Cancel row: the shortcut (`cancel_hotkey`), Escape by default
+     ├── Recorder -> any chord the OS's rules allow (Escape ends the recorder)
+     ├── Restore -> back to Escape
+     └── Wayland -> no recorder: bind `hex dictation cancel` in the desktop
+  Hold modes -> no row, no cancel
+Toggled recording (held or locked) -> Cancel shortcut
+  -> Recording discarded: nothing transcribed, pasted, or kept in History
+  -> Cancel tone; the HUD shows it cancelled
+  -> The key is kept from the app (press, repeats, release)
+  -> Jobs already transcribing -> finish and paste in order
+Idle, or any Hold mode -> Cancel shortcut -> Nothing: it reaches the app
+hex dictation cancel -> Discards whatever records, any mode; idle -> unchanged
+Annotate drawing -> Escape stops drawing first
+Programmatic dictation (local API) -> Its owner cancels through /cancel
 ```
 
-Until #786, Escape cancelled the active capture, then the newest unfinished
-job, and an accidental Escape wiped a 5-minute dictation. Short taps, chords,
-and silent captures still discard; Hex itself ends a capture only when its
-input or microphone is lost. Checks: `escape_never_ends_a_held_capture` and
-`toggle_mode_escape_leaves_a_locked_capture_recording` in
+Until #786, Escape cancelled the active capture in every mode, then the newest
+unfinished job, and an accidental Escape wiped a 5-minute dictation. #795
+removed cancel; the people who asked for it back use Toggle, so it returned
+there only, and never reaches past the recording. Hex takes the key only while
+a toggled recording runs: macOS's session tap suppresses it only while the
+listener arms it, Windows' hook only while its capture records, and X11
+grabs it only for the recording. A shortcuts portal would hold the key from
+every app for as long as Hex runs, so Wayland binds nothing for it. Checks:
+`the_cancel_shortcut_discards_only_a_toggled_recording` and
+`the_cancel_key_is_suppressed_only_while_armed` in
 [suppression.rs](../../src/suppression.rs) (macOS, not compiled on Linux),
-`escape_never_ends_a_dictation` in [linux/input.rs](../../src/linux/input.rs),
-`only_a_capture_claims_escape` in [recognition.rs](../../src/recognition.rs),
-and `an_older_cancel_gets_removed` in [control.rs](../../src/control.rs).
+`cancel_discards_a_toggled_recording`, `cancel_is_ignored_in_hold_mode`, and
+`cancel_is_not_taken_while_idle` in [linux/input.rs](../../src/linux/input.rs),
+`cancel_is_wanted_only_while_a_toggled_capture_records` in
+[windows/input.rs](../../src/windows/input.rs),
+`the_cancel_shortcut_shows_in_toggle_and_restores_escape` and the
+`toggle-cancel` goldens in [tests/panes.rs](../../src/rune_ui/tests/panes.rs),
+and `cancel_parses_and_takes_no_flags` in [control.rs](../../src/control.rs).
+The X11 grab and the hooks' suppression have no automated end-to-end check.
 
 ### Feedback
 
@@ -1137,8 +1202,7 @@ Hex signature (2026-10-27) is one kalimba-like FM voice playing one motif,
 D-B-A-D (a sixth, since "hex" is six): start D5 to B5 (116 ms), stop B5 to A5
 (230 ms), done D6 over A5 (330 ms), error D4
 then a minor D4+Bb4 (280 ms), and onboarding success, the whole motif landing
-on a D sixth chord (1.1 s), played when the first-run tour reaches its last
-step. Click is mechanical key clicks, Soft tone warm sine blips in A major,
+on a D sixth chord (1.1 s), played when the first run reaches Hex is ready. Click is mechanical key clicks, Soft tone warm sine blips in A major,
 Wood a soft-mallet marimba with hollow wood blocks for error, and
 Warm synth two detuned saws through a closing low-pass filter, and Thock one
 mechanical keyboard key, from the team's vote on the start sound (its winner,
@@ -1162,7 +1226,7 @@ audible sample. Every sound is normalized to one loudness per kind (start
 -25.5 LUFS max momentary, stop and done -27, error -26.5, success
 -25), so a volume sounds the same in every set. Classic's start and stop come
 up 2.5 and 3 dB (a soft limiter touches 0.1% of the start's samples). There
-is no cancel sound since #786. Every OS plays the
+is a cancel sound for Toggle's cancel shortcut. Every OS plays the
 error sound for a failed dictation or paste (`fail` in `linux/dictation.rs`
 and `windows/dictation.rs`), including an empty transcript, which macOS
 treats as nothing pasted. Checks:

@@ -57,7 +57,11 @@ Launch -> read settings.json
 
 Loading repaired settings does not itself rewrite the file. A later settings
 save (including a migration save) takes the backup before replacing it.
-Backups are never automatically removed. Unchosen `meetings.retention` is
+Backups are never automatically removed. On Linux, the running Hex checks
+`settings.json` every two seconds and adopts an edit made outside the window
+(by hand or by an agent), so its modes reach the listener and the next save
+keeps it (#970); macOS and Windows still read it only at launch or through
+`hex settings set`. Unchosen `meetings.retention` is
 written as an absent key, so older builds with a non-optional retention still
 read the file; existing `null` values also load in the current build.
 
@@ -129,6 +133,14 @@ Command-Tab -> Tab still tracked (IDLE, DIRTY, or LOCKED)
               └── older delayed release of the key -> ignored
   -> any check fails -> press ignored (logged with reason + key_codes)
                      -> 100 ms poll as before
+tracked key down in combined-session state but up in HID state  // #612
+  -> reads as up for both the press check and the poll   // a latched Tab or Q
+     no longer blocks every press until Hex restarts
+tracked keyboard key reads down in both states but sent no key event,  // #1008
+not even a key repeat, for 5 s (TRACKED_KEY_REPEAT_TIMEOUT)
+  -> the press check treats it as released               // logged; mouse buttons excluded
+     a Tab really held keeps repeating and still blocks the press
+     (with key repeat turned off, a key held past 5 s no longer blocks it)
 LOCKED + Escape -> Nothing, stale keys or not (#786)
 fenced edges, edges before a disabled tap, suspension -> no neutral evidence
 ```
@@ -142,7 +154,10 @@ Checks in [suppression.rs](../../src/suppression.rs):
 `stale_press_waits_for_recovery_while_anything_else_is_held`,
 `stale_press_requires_a_neutral_keyboard_after_the_tracked_keys`,
 `stale_press_finishes_a_lock_and_leaves_escape_unchanged`,
-`toggle_mode_finishes_after_command_tab_while_recording`. Unit tests read a keyboard
+`toggle_mode_finishes_after_command_tab_while_recording`,
+`a_latched_key_without_key_repeats_stops_blocking_the_shortcut`,
+`a_key_latched_only_in_session_state_reads_as_released` (the state rule only;
+no real latched key has been observed by a test). Unit tests read a keyboard
 that is all up unless a test sets one, so every shortcut test can take this
 path.
 A binding press ignored while stale or DIRTY logs `shortcut press ignored` to
@@ -218,9 +233,16 @@ initial open fails OR stream interrupts
   -> bounded backoff -> reopen the resolved input     // warm microphone retries
   -> replacement delivers new audio
   -> fresh capture -> release -> expected output
+device refuses a stream in its own default format     // #988, Intel Smart Sound on Windows
+  -> log the refused format (channels, Hz, sample format) // audio/input_format
+  -> try the other formats it lists (F32, I16, U16, I32), at most 12
+  -> none opens -> the default format's error, with its format, goes to recovery
 no input device at all (macOS)
   -> devices whose name can't be read are skipped     // audio::device_name, never Display
   -> bounded recovery; `hex status` listener: "No microphone"
+no input opens, at startup or after an interruption (Linux) // #937
+  -> one "could not open the microphone: …" failure per outage // take_failure
+  -> last failure filled in while it keeps retrying; reset once one opens
 listener worker returns an error or panics (macOS)
   -> status: running false, "Stopped", capture unknown // never "Enabled"
 saved microphone missing or will not open
@@ -253,6 +275,7 @@ programmatic dictation (local API) when the stream interrupts or gaps
 ```
 Checks in [audio.rs](../../src/audio.rs):
 `an_unreadable_device_name_is_skipped_instead_of_panicking`,
+`a_microphone_that_cannot_open_is_reported_once_per_outage`,
 `microphone_recovery_retries_with_bounded_backoff_and_resets`,
 `startup_retry_recovers_metadata_and_audio_without_restarting`,
 `a_missing_selection_uses_the_default_until_it_returns`,
@@ -398,6 +421,7 @@ ordinary dictation -> corrections -> optional rewrite -> transformations -> past
                                       v                  v
                              rewrite fails       chain fails
                              -> corrected text   -> chain's input // discard partial results
+                             // the log says why: rewrite off for the mode, or the failure reason
 
 later request -> expected output                       // recovery still needs observation
 ```
@@ -623,14 +647,20 @@ failure causes; a current hold-to-result sequence is still needed.
 ### Runaway Script
 
 ```ts
-handler or transformation runs past 1 s -> interrupted -> that call fails
+transformation runs past its timeout -> interrupted -> that call fails
+  // 1 s, or 30 s when the config uses fetch or node:child_process; 60 s cap
+  -> its requests abandoned, its process trees killed
   -> transformation chain -> its input is kept           // ordered processing goes on
   -> later call on the same config -> succeeds
+fetch or exec before the person allows the config -> throws -> input kept
 config load past 2 s or past 64 MiB -> rejected -> previous config stays active
 ```
 Sources: [script.rs](../../src/personal_commands/script.rs),
 [personal_commands.rs](../../src/personal_commands.rs);
-check `runaway_scripts_stop_at_the_time_limit_and_the_config_keeps_working`.
+check `runaway_scripts_stop_at_the_time_limit_and_the_config_keeps_working`,
+`the_transformation_timeout_ends_the_whole_process_tree` (Linux), and
+`a_throwing_or_slow_transformation_pastes_the_text_unchanged` in
+[tests/host_apis.rs](../../src/personal_commands/tests/host_apis.rs).
 Handlers return actions instead of awaiting native results, so the old late
 native tool reply ([#20](https://github.com/anomalyco/hex/issues/20)) cannot
 occur.

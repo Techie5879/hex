@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use transcribe_cpp::{Backend, Device, DeviceType};
@@ -25,6 +26,9 @@ pub(crate) struct Failure {
     pub(crate) reason: String,
     /// Seconds since the Unix epoch.
     pub(crate) at: u64,
+    /// It worked, but slower than the CPU (#484), rather than failing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) slow: bool,
 }
 
 /// The failures on disk, read once.
@@ -86,6 +90,16 @@ pub(crate) fn failed(device: &Device) -> bool {
 
 /// Remembers that `device` failed under the driver installed now.
 pub(crate) fn record(device: &Device, reason: &str) {
+    remember(device, reason, false);
+}
+
+/// Remembers that `device` ran the model slower than the CPU under the
+/// driver installed now (#484).
+pub(crate) fn record_slow(device: &Device, reason: &str) {
+    remember(device, reason, true);
+}
+
+fn remember(device: &Device, reason: &str, slow: bool) {
     let failure = Failure {
         device: device_key(device),
         driver: driver(),
@@ -93,13 +107,23 @@ pub(crate) fn record(device: &Device, reason: &str) {
         at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs()),
+        slow,
     };
-    tracing::warn!(
-        device = failure.device,
-        driver = failure.driver,
-        reason = failure.reason,
-        "the GPU failed while transcribing; Auto transcribes on the CPU on it until its driver changes"
-    );
+    if slow {
+        tracing::info!(
+            device = failure.device,
+            driver = failure.driver,
+            reason = failure.reason,
+            "the CPU runs the model faster than this GPU; Auto uses the CPU on it until its driver changes"
+        );
+    } else {
+        tracing::warn!(
+            device = failure.device,
+            driver = failure.driver,
+            reason = failure.reason,
+            "the GPU failed while transcribing; Auto transcribes on the CPU on it until its driver changes"
+        );
+    }
     with_failures(|failures| {
         failures.retain(|old| old.device != failure.device || old.driver != failure.driver);
         failures.push(failure);
@@ -123,8 +147,22 @@ pub(crate) fn forget(device: &Device) {
     });
 }
 
-/// The newest failure that keeps a GPU off now, for Settings.
+/// Whether the last model Auto loaded runs on the CPU. Another healthy GPU
+/// can run it while a failed one stays off, so a remembered failure alone
+/// doesn't mean Auto uses the CPU (#966).
+static AUTO_ON_CPU: AtomicBool = AtomicBool::new(false);
+
+/// Records where the last model loaded: on the CPU under Auto, or not.
+pub(crate) fn set_auto_on_cpu(on_cpu: bool) {
+    AUTO_ON_CPU.store(on_cpu, Ordering::Relaxed);
+}
+
+/// The newest failure that keeps a GPU off now, for Settings, only while
+/// Auto actually runs the model on the CPU.
 pub(crate) fn current() -> Option<Failure> {
+    if !AUTO_ON_CPU.load(Ordering::Relaxed) {
+        return None;
+    }
     let driver = driver();
     with_failures(|failures| {
         failures
@@ -256,6 +294,14 @@ mod tests {
             Err(transcribe_cpp::Error::InputTooShort("x".into())).wrap_err("transcription failed");
         assert!(!device_error(&short.unwrap_err()));
         assert!(!device_error(&color_eyre::eyre::eyre!("cancelled")));
+    }
+
+    #[test]
+    fn no_note_while_auto_runs_on_a_gpu() {
+        // A healthy GPU runs the model while another one's failure is
+        // remembered (#966): Settings names no failure.
+        set_auto_on_cpu(false);
+        assert_eq!(current(), None);
     }
 
     #[cfg(target_os = "linux")]

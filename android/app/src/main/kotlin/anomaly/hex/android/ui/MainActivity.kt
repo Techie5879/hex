@@ -39,8 +39,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        HexApp.get(this).sync.runNow()
         setContent { HexTheme { HexRoot() } }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        HexApp.get(this).sync.runNow()
     }
 
     companion object {

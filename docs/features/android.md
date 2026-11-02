@@ -45,11 +45,12 @@ Keep                                      // android.retention
 ├── Text history: the same choices, independent (default forever)
 └── Fields that ask keyboards not to learn -> neither is kept
 
-Sync                                      // android.sync; android/companion, src/profile_sync
+Sync                                      // android.sync; src/profile_sync
 ├── Opt-in. Dictionary, prompts, and cleanup policy only
 ├── Offline edits stay; tombstones for deletes; prompt conflicts ask a person
-├── Mac companion: `anomaly.hex.companion` LaunchAgent, `hex-companion` launcher
-└── Desktop: Labs › Profile sync, then `hex profile connect` and `hex profile sync`
+├── Mac: profile-only loopback listener inside Hex while running, Labs on, and a device paired
+├── Phone: sync after edits, on opening, manually, and approximately hourly; offline edits retry later
+└── Pair: `hex profile device add`; migration and optional WebDAV: android/docs/sync.md
 ```
 
 ## Observed

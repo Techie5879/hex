@@ -42,8 +42,12 @@ pub(super) fn generate_cancellable_with_fallback(
     cancelled: &AtomicBool,
 ) -> Result<String> {
     let started = Instant::now();
-    let service = crate::desktop::opencode_service::find()
-        .ok_or_else(|| eyre!(crate::desktop::opencode_service::NOT_RUNNING))?;
+    let lock = crate::policy::Lock::OpenCodeProcessing;
+    if crate::policy::Policy::current().locks(lock) {
+        return Err(eyre!(lock.refusal()));
+    }
+    let service =
+        crate::desktop::opencode_service::find().map_err(|missing| eyre!(missing.message()))?;
     if let (Some(model), Some(provider)) = (model, fallback_provider) {
         return generate_with_quota_fallback(
             prompt,

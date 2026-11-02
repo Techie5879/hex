@@ -226,6 +226,12 @@ const KEYS: &[Key] = &[
         Kind::Shortcut(HotkeySlot::PasteLast),
         "The paste-last-dictation shortcut; none turns it off",
     ),
+    key(
+        "cancel_hotkey",
+        Kind::Shortcut(HotkeySlot::Cancel),
+        "Toggle mode's cancel shortcut, Escape by default: discards the recording, \
+         nothing pasted or saved. Hex takes the key only while a toggled recording runs",
+    ),
     optional(
         "raw_dictation_hotkey",
         Kind::Shortcut(HotkeySlot::RawDictation),
@@ -393,6 +399,11 @@ const KEYS: &[Key] = &[
         "Labs: shortcuts may use Menu, Pause, or Scroll Lock, alone or with modifiers (Linux); off puts such a shortcut back to its default",
     ),
     key(
+        "labs.section_key_alone",
+        Kind::Bool,
+        "Labs: a shortcut may be the § key, left of 1 on ISO keyboards, with no modifier (Linux); off puts such a shortcut back to its default",
+    ),
+    key(
         "labs.history_stats",
         Kind::Bool,
         "Labs: a summary of retained dictations at the top of History, and hex history stats",
@@ -401,6 +412,36 @@ const KEYS: &[Key] = &[
         "labs.recent_dictations",
         Kind::Bool,
         "Labs: a Copy Recent Dictation submenu in the menu bar that copies one of the last five dictations (macOS)",
+    ),
+    key(
+        "labs.skip_pauses",
+        Kind::Bool,
+        "Labs: a dictation transcribed as a whole clip hears only the start and end of each long pause, so slow computers paste sooner (Linux and Windows)",
+    ),
+    key(
+        "labs.stop_when_call_ends",
+        Kind::Bool,
+        "Labs: a meeting recording Hex started on its own stops 30 s after its call app leaves the microphone and goes quiet, unless you keep recording (macOS)",
+    ),
+    key(
+        "labs.output_fixes",
+        Kind::Bool,
+        "Labs: Output's Try card offers Vocabulary and Fix this, which copies an agent prompt naming the wrong result",
+    ),
+    key(
+        "labs.picker_active_first",
+        Kind::Bool,
+        "Labs: the speech model picker lists the model in use first",
+    ),
+    key(
+        "labs.model_in_place",
+        Kind::Bool,
+        "Labs: the speech model picker's Use model file where it is… adds a GGUF file without copying it, so several accounts can share one file",
+    ),
+    key(
+        "labs.picker_downloaded",
+        Kind::Bool,
+        "Labs: the speech model picker's All speech models view offers Only downloaded models, with the space they take",
     ),
     key(
         "meetings.enabled",
@@ -515,7 +556,9 @@ const KEYS: &[Key] = &[
     ),
     optional(
         "ui_language",
-        Kind::Choice(&["en", "pl", "zh", "ja", "de", "es", "uk", "pt"]),
+        Kind::Choice(&[
+            "en", "pl", "zh", "zh-Hant", "ja", "de", "es", "uk", "pt", "fr",
+        ]),
         "Interface language; none follows the system",
     ),
     key(
@@ -598,6 +641,7 @@ const NEEDS: &[(&str, &str)] = &[
     ("meetings.", "meetings"),
     ("labs.live_chapters", "meetings"),
     ("labs.subtitle_export", "meetings"),
+    ("labs.stop_when_call_ends", "meetings"),
     ("experimental.hex_microphone", "fun"),
     ("show_dock_icon", "dock_icon"),
     ("keyboard_model_switching.", "keyboard_model_switching"),
@@ -615,6 +659,13 @@ fn needs(key: &str) -> Option<&'static str> {
 
 /// Why `hex settings set` refuses `name` on this OS, if it does.
 pub fn unavailable(name: &str) -> Option<ControlError> {
+    unavailable_under(name, crate::policy::Policy::current())
+}
+
+fn unavailable_under(name: &str, policy: crate::policy::Policy) -> Option<ControlError> {
+    if let Some(lock) = policy.setting_lock(name) {
+        return Some(managed(name, lock));
+    }
     if let Some(feature) = crate::labs::Feature::for_settings_key(name)
         && !feature.shipped()
     {
@@ -630,6 +681,13 @@ pub fn unavailable(name: &str) -> Option<ControlError> {
             "`{name}` does nothing on this OS: it needs {capability}, which Hex has only elsewhere"
         ),
     ))
+}
+
+fn managed(name: &str, lock: crate::policy::Lock) -> ControlError {
+    ControlError::new(
+        "managed",
+        format!("`{name}` can't be changed: {}", lock.refusal()),
+    )
 }
 
 /// Every key, in registry order.
@@ -760,7 +818,10 @@ fn value_of(key: &Key, json: &Value) -> SettingValue {
             Kind::Choice(choices) => choices.iter().map(|&choice| choice.into()).collect(),
             _ => Vec::new(),
         },
-        writable: key.read_only.is_none(),
+        writable: key.read_only.is_none()
+            && crate::policy::Policy::current()
+                .setting_lock(key.key)
+                .is_none(),
         about: key.about.into(),
         available: needs(key.key).is_none_or(crate::rune_ui::capability),
     }
@@ -831,6 +892,7 @@ pub fn apply(
         | "paste_last_hotkey"
         | "raw_dictation_hotkey"
         | "second_dictation_hotkey"
+        | "cancel_hotkey"
         | "capture.hotkey" => {
             let Kind::Shortcut(slot) = key.kind else {
                 unreachable!("shortcut keys have the shortcut kind");
@@ -840,6 +902,7 @@ pub fn apply(
                 HotkeySlot::PasteLast => candidate.paste_last_hotkey.as_ref(),
                 HotkeySlot::RawDictation => candidate.raw_dictation_hotkey.as_ref(),
                 HotkeySlot::SecondDictation => candidate.second_dictation_hotkey.as_ref(),
+                HotkeySlot::Cancel => Some(&candidate.cancel_hotkey),
                 #[cfg(hex_capture)]
                 HotkeySlot::Capture => Some(&candidate.capture.hotkey),
             };
@@ -902,6 +965,7 @@ pub fn apply(
             ));
         }
         "labs.standalone_special_keys" => candidate.repair_special_keys(),
+        "labs.section_key_alone" => candidate.repair_section_key(),
         "labs.parakeet_ultra" if !candidate.labs.parakeet_ultra => {
             if let Some(why) = crate::labs::Feature::ParakeetUltra.off_refusal(settings) {
                 return Err(invalid(name, why));
@@ -1049,7 +1113,7 @@ fn parse(key: &Key, raw: &str, shortcuts: &ShortcutRules) -> Result<Value, Contr
             let normalized = trimmed.to_ascii_lowercase().replace('-', "_");
             let choice = choices
                 .iter()
-                .find(|choice| **choice == normalized)
+                .find(|choice| choice.to_ascii_lowercase().replace('-', "_") == normalized)
                 .ok_or_else(|| invalid(name, &format!("expected one of {}", choices.join(", "))))?;
             Ok(if name == "meetings.calendar.lead_minutes" {
                 let minutes: u8 = choice.parse().expect("lead choices are numbers");
@@ -1168,6 +1232,7 @@ pub fn parse_hotkey(
             && !key.is_mouse()
             && !HotkeyKey::special_name(&key.label)
             && !(cfg!(target_os = "windows") && HotkeyKey::navigation_name(&key.label))
+            && !(cfg!(target_os = "linux") && HotkeyKey::section_name(&key.label))
         {
             return Err("add a modifier, such as option+".to_string() + &key.label.to_lowercase());
         }
@@ -1182,6 +1247,11 @@ pub fn parse_hotkey(
 /// a navigation key alone needs the toggle there; elsewhere one alone still
 /// needs a modifier.
 fn special_key_refusal(settings: &AppSettings, binding: &HotkeyBinding) -> Option<String> {
+    // The § key alone needs Labs › Section key alone (Linux).
+    if cfg!(target_os = "linux") && binding.is_lone_section_key() && !settings.section_key_allowed()
+    {
+        return Some("section needs Labs › Section key alone: hex labs on section-key".into());
+    }
     if cfg!(target_os = "windows") {
         let key = binding.key.as_ref()?;
         return (binding.is_lone_navigation_key() && !settings.special_keys_allowed()).then(|| {
@@ -1244,6 +1314,32 @@ pub fn format_hotkey(binding: &HotkeyBinding) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_managed_setting_is_refused() {
+        use crate::policy::{Lock, Policy};
+        let policy = Policy::default()
+            .with(Lock::Meetings)
+            .with(Lock::Annotate)
+            .with(Lock::OpenCodeProcessing);
+        for name in [
+            "meetings.enabled",
+            "capture.enabled",
+            "meetings.summarize_with_opencode",
+        ] {
+            let error = unavailable_under(name, policy).expect(name);
+            assert_eq!(error.code, "managed");
+            assert!(error.message.contains("managed by your organization"));
+        }
+        assert!(unavailable_under("sound_effects", policy).is_none());
+        assert!(unavailable_under("labs.live_text", policy).is_none());
+        let labs = Policy::default().with(Lock::Labs);
+        assert_eq!(
+            unavailable_under("labs.live_text", labs).map(|error| error.code),
+            Some("managed")
+        );
+        assert!(unavailable_under("labs.live_text", Policy::default()).is_none());
+    }
 
     fn rules() -> ShortcutRules {
         ShortcutRules {
@@ -1333,6 +1429,18 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), keys().count(), "a key is listed twice");
+    }
+
+    #[test]
+    fn ui_language_accepts_traditional_chinese_in_any_case() {
+        for raw in ["zh-Hant", "zh-hant", "ZH_HANT"] {
+            let change = apply(&AppSettings::default(), "ui_language", raw, &rules()).unwrap();
+            let shown = get(&change.settings, "ui_language").unwrap();
+            assert_eq!(shown[0].value, Value::String("zh-Hant".into()), "{raw}");
+        }
+        let change = apply(&AppSettings::default(), "ui_language", "zh", &rules()).unwrap();
+        let shown = get(&change.settings, "ui_language").unwrap();
+        assert_eq!(shown[0].value, Value::String("zh".into()));
     }
 
     #[test]
@@ -1554,6 +1662,41 @@ mod tests {
         } else {
             assert!(change.is_err(), "only Linux has the toggle");
         }
+    }
+
+    /// Issue 1050: § alone is a Linux shortcut only with Labs › Section key
+    /// alone on, and turning the toggle off puts it back to the default.
+    #[test]
+    fn section_alone_needs_its_labs_toggle() {
+        let settings = AppSettings::default();
+        let without_toggle = apply(&settings, "dictation_hotkey", "§", &rules());
+        assert_eq!(without_toggle.unwrap_err().code, "invalid-value");
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let on = apply(&settings, "labs.section_key_alone", "on", &rules())
+            .unwrap()
+            .settings;
+        let change = apply(&on, "dictation_hotkey", "§", &rules()).unwrap();
+        assert!(change.settings.dictation_hotkey.is_lone_section_key());
+        assert_eq!(format_hotkey(&change.settings.dictation_hotkey), "§");
+        let off = apply(&change.settings, "labs.section_key_alone", "off", &rules()).unwrap();
+        assert_eq!(off.settings.dictation_hotkey, HotkeyBinding::default());
+    }
+
+    #[test]
+    fn interface_language_offers_every_translation() {
+        let key = keys().find(|key| key.key == "ui_language").unwrap();
+        let Kind::Choice(choices) = key.kind else {
+            panic!("ui_language is a choice");
+        };
+        let languages: Vec<&str> = crate::desktop::i18n::LANGUAGE_CHOICES
+            .iter()
+            .filter_map(|(code, _)| *code)
+            .collect();
+        assert_eq!(languages, choices);
+        let change = apply(&AppSettings::default(), "ui_language", "fr", &rules()).unwrap();
+        assert_eq!(change.settings.ui_language.as_deref(), Some("fr"));
     }
 
     #[test]

@@ -67,6 +67,16 @@ Draw                                     // capture.draw (capture_host::drawing)
 │   physical for the hold on a portal desktop ("Annotate pen" is logged)
 ├── Ink holds 650 ms, then fades over 650 ms on screen; every stroke stays in
 │   the bundle (keyframes, contact sheet, scrawl.json)
+├── Linux: strokes are placed on the recorded screen in its logical points,
+│   from the ScreenCast portal's stream size when it reports one smaller
+│   than the frames, so a fractional scale (1.5, 1.33), which reaches the
+│   overlay rounded up to 2, no longer pins strokes to a top-left part of
+│   the screen; without that size it divides the pixels by the overlay's
+│   scale. Check: scrawl-capture capture::platform::tests
+│   a_fractionally_scaled_screen_keeps_its_logical_size; not observed on a
+│   fractionally scaled monitor. Known gap: the overlay starts below a
+│   desktop bar's reserved area, so saved ink sits that bar's height off
+│   the live ink
 └── Linux recordings show the overlay itself (Wayland can't leave it out)
 
 On Linux                                 // capture.linux
@@ -532,16 +542,24 @@ Hex's own windows                        // capture.own-windows
 │   ├── Other recorders -> the capsule, picker, and ink are left out
 │   │   (sharingType none) while shown; the dictation HUD and meeting
 │   │   capsules show
-│   │   └── Hidden (prewarmed, alpha zero on every Space) -> sharingType
-│   │       readOnly once the hide finishes, so Mission Control's Space
-│   │       thumbnails stay drawn (Rune's prewarmed panels do this)
+│   │   └── Hidden -> ordered out of every Space once the hide finishes,
+│   │       before sharingType returns to readOnly; prewarming keeps the
+│   │       surface ready but leaves no invisible panel ordered in. This
+│   │       avoids relying on macOS restoring sharing after exclusion
 │   ├── Show in screen recordings on -> every recorder, Hex's captures
 │   │   included, shows all of it (sharingType readOnly, no SCK exclusions);
 │   │   still never in the window log or the target. Rune's
 │   │   OverlayHandle::set_exclude_from_capture flips open windows, and the
 │   │   sampler rebuilds its filter mid-recording (OwnWindows::recorded) and
 │   │   the recording's (capture-core's Recording::set_exclusions)
-│   └── Not proven natively end to end yet
+│   └── Rune's presence tests check ordering and sharing together, including
+│       stale fade completions and setting changes. Its native `spaces_probe`
+│       checks this process's WindowServer ordering. A native Hex smoke on
+│       2026-11-02 failed before the pin bump and passed after it: capsule,
+│       Screen/Area picker, ink, dictation HUD and meeting capsule show and
+│       leave no onscreen window after hiding. This used isolated test state,
+│       without recording. Mission Control's actual thumbnail report and
+│       third-party recording exclusion remain unverified
 │   └── Click-through chrome (the full-screen ink overlay, the capsule's
 │       640×424 panel outside its pill) -> clicks there count for the app
 │       beneath; only the pill's (capture_host::set_capsule_pill) are Hex's
@@ -618,6 +636,11 @@ hex capture stop                         // capture.stop
     ├── Keyframes decoded from recording.mp4 by scrawl-helper (beside `hex`: in
     │   Hex.app's Contents/MacOS or target/<profile>; or $SCRAWL_HELPER); helper
     │   missing -> the 480 px sampled frames
+    ├── Spoken cues (look, now, here, this…) pick the keyframe the screen
+    │   changes to; they also count in Spanish (mira, ahora, aquí, esto…),
+    │   French, German, Portuguese, and Italian, whatever the dictation
+    │   language. Check: scrawl-capture keyframes
+    │   spoken_cues_count_in_other_languages
     ├── Transcription fails -> logged; the bundle has no words, and the outcome says why
     ├── Written -> image and text copied to the clipboard (Scrawl's handoff)
     └── Sent -> the capture-route thread (capture.route)

@@ -1,11 +1,13 @@
 //! The portable profile shared with Hex on Android: dictionary, cleanup prompts, and
 //! cleanup policy, versioned and merged per field. Off by default (Labs › Profile sync);
-//! nothing here runs until `hex profile` is called. No credentials, audio, or history.
+//! the running Mac app hosts paired devices only while enabled. No audio or history.
 //!
 //! `merge` mirrors `android/core`'s `ProfileMerge`; both run the vectors in
 //! `tests/fixtures/profile-sync`, so either device reaches the same document.
 pub(crate) mod adapter;
 pub(crate) mod cli;
+pub(crate) mod host;
+pub(crate) mod listener;
 pub(crate) mod transport;
 
 use serde_json::{Map, Value, json};

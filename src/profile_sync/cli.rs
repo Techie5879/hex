@@ -19,6 +19,17 @@ const MAX_ATTEMPTS: usize = 5;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum ProfileCommand {
+    /// Pair or revoke a phone for sync hosted by the running Mac app.
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
+    /// Import the old companion's profile and token hashes without deleting its files.
+    MigrateCompanion {
+        directory: PathBuf,
+        #[command(flatten)]
+        output: Output,
+    },
     /// Save the sync server's URL, and read its token from a file or stdin.
     Connect {
         url: String,
@@ -35,6 +46,29 @@ pub enum ProfileCommand {
     },
     /// Show the server, the last sync, and open conflicts.
     Status {
+        #[command(flatten)]
+        output: Output,
+    },
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum DeviceCommand {
+    /// Write a new device token to a new private file. Never print it in shell history.
+    Add {
+        name: String,
+        #[arg(long)]
+        token_file: PathBuf,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// Immediately revoke a device's access.
+    Revoke {
+        name: String,
+        #[command(flatten)]
+        output: Output,
+    },
+    /// List paired device names, never their tokens.
+    List {
         #[command(flatten)]
         output: Output,
     },
@@ -233,6 +267,23 @@ fn open_conflicts(profile: &Value) -> usize {
 
 pub fn run(command: ProfileCommand) -> u8 {
     let (result, output) = match command {
+        ProfileCommand::Device { command } => {
+            let (result, output) = match command {
+                DeviceCommand::Add { name, token_file, output } => (
+                    super::host::directory().and_then(|p| super::host::add_device(&p, &name, &token_file))
+                        .map(|()| ControlReply::done("Paired. Token saved to the private file. Turn on Labs › Profile sync in the Mac app.")), output),
+                DeviceCommand::Revoke { name, output } => (
+                    super::host::directory().and_then(|p| super::host::revoke(&p, &name))
+                        .map(|()| ControlReply::done("Device revoked.")), output),
+                DeviceCommand::List { output } => (
+                    super::host::directory().and_then(|p| super::host::devices(&p))
+                        .map(|list| ControlReply::unchanged(list.into_iter().map(|d| d.name).collect::<Vec<_>>().join("\n"))), output),
+            };
+            (result, output)
+        }
+        ProfileCommand::MigrateCompanion { directory, output } => (
+            super::host::directory().and_then(|p| super::host::import_companion(&p, &directory))
+                .map(|()| ControlReply::done("Imported the companion profile and paired devices. Old files are preserved.")), output),
         ProfileCommand::Connect {
             url,
             token_file,
@@ -289,6 +340,13 @@ pub fn run(command: ProfileCommand) -> u8 {
                     ),
                     changed: false,
                 })
+            }).or_else(|_| {
+                let devices = super::host::devices(&super::host::directory()?)?;
+                Ok(ControlReply::unchanged(format!(
+                    "Desktop-hosted sync: {}. {} paired devices. Listener port: {} while Hex is running.",
+                    if crate::labs::profile_sync() { "enabled" } else { "off" },
+                    devices.len(), super::listener::PORT
+                )))
             });
             (result, output)
         }

@@ -74,7 +74,7 @@ Turn TalkBack off when you're done, as Hex's overlays behave differently with it
 ## 6. Sync with your Mac
 
 1. On the Mac: enable HTTPS on your tailnet once (the Tailscale admin console, under DNS), then follow
-   `companion/README.md`.
+   `docs/sync.md`.
 2. Tailscale connected on the phone. Settings › Dictionary sync: enter the URL and the token.
 3. Turn on Sync. Your private dictionary and prompts appear.
 4. On the Mac: Labs › Profile sync on, then `hex profile connect <url> --token-file <file>` and

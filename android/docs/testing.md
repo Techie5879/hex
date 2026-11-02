@@ -6,7 +6,7 @@
 |---|---|---|
 | Pure logic | `core` unit tests | Thresholds, typed quota vs timeout, merges, tombstones, eligibility, gestures, Unicode insertion, retention |
 | Merge parity | `tests/fixtures/profile-sync` | Kotlin and Rust reach the same document |
-| Companion | `companion/*.test.ts` | Auth, compare-and-swap |
+| Desktop profile host | `cargo test --locked --bin hex profile_sync` | Auth, conditional writes, local edits, partial apply, migration, listener shutdown |
 | Polish client | `core/.../CodexTest.kt` | Real sockets against a local server: renewal and rotation, sign-out, usage limits, deadlines, cancel, cut-off replies, device sign-in |
 | Real editors | `testapp` on an emulator | Button visibility, selection replacement, Unicode, line flattening, Compose, lock screen |
 | Whole pipeline | `scripts/e2e-dictation.sh` | Tap the real button, speech reaches the mic path, text lands in a field |

@@ -7,25 +7,27 @@ use serde::Serialize;
 
 use super::{HEADER_DEADLINE, MAX_HEADER_BYTES, MAX_HEADERS, MAX_PATH_BYTES};
 
-pub(super) struct HttpRequest {
-    pub(super) method: String,
-    pub(super) path: String,
-    pub(super) authorization: Option<String>,
-    pub(super) dictation_token: Option<String>,
-    pub(super) stream_token: Option<String>,
-    pub(super) content_type: Option<String>,
-    pub(super) content_length: Option<usize>,
-    pub(super) body_prefix: Vec<u8>,
+pub(crate) struct HttpRequest {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    pub(crate) authorization: Option<String>,
+    pub(crate) if_match: Option<String>,
+    pub(crate) if_none_match: Option<String>,
+    pub(crate) dictation_token: Option<String>,
+    pub(crate) stream_token: Option<String>,
+    pub(crate) content_type: Option<String>,
+    pub(crate) content_length: Option<usize>,
+    pub(crate) body_prefix: Vec<u8>,
 }
 
-pub(super) struct HttpResponse {
-    pub(super) status: u16,
-    pub(super) reason: &'static str,
-    pub(super) content_type: Option<&'static str>,
-    pub(super) body: Vec<u8>,
+pub(crate) struct HttpResponse {
+    pub(crate) status: u16,
+    pub(crate) reason: &'static str,
+    pub(crate) content_type: Option<&'static str>,
+    pub(crate) body: Vec<u8>,
 }
 
-pub(super) fn body_read_response(error: BodyReadError) -> HttpResponse {
+pub(crate) fn body_read_response(error: BodyReadError) -> HttpResponse {
     match error {
         BodyReadError::ResourceExhausted => HttpResponse::code(413, "resource-exhausted"),
         BodyReadError::Invalid => HttpResponse::code(400, "invalid-body"),
@@ -38,7 +40,7 @@ pub(super) fn body_read_response(error: BodyReadError) -> HttpResponse {
     }
 }
 
-pub(super) enum BodyReadError {
+pub(crate) enum BodyReadError {
     ResourceExhausted,
     Invalid,
     Deadline,
@@ -46,7 +48,7 @@ pub(super) enum BodyReadError {
     Io(std::io::Error),
 }
 
-pub(super) fn read_body_bounded(
+pub(crate) fn read_body_bounded(
     stream: &mut TcpStream,
     content_length: usize,
     body: &mut Vec<u8>,
@@ -96,11 +98,11 @@ pub(super) fn read_body_bounded(
     Ok(())
 }
 
-pub(super) fn write_sse_headers(stream: &mut TcpStream) -> std::io::Result<()> {
+pub(crate) fn write_sse_headers(stream: &mut TcpStream) -> std::io::Result<()> {
     write_stream_headers(stream, "text/event-stream")
 }
 
-pub(super) fn write_stream_headers(
+pub(crate) fn write_stream_headers(
     stream: &mut TcpStream,
     content_type: &str,
 ) -> std::io::Result<()> {
@@ -111,7 +113,7 @@ pub(super) fn write_stream_headers(
     stream.flush()
 }
 
-pub(super) fn write_sse(stream: &mut TcpStream, value: &impl Serialize) -> std::io::Result<()> {
+pub(crate) fn write_sse(stream: &mut TcpStream, value: &impl Serialize) -> std::io::Result<()> {
     stream.write_all(b"data: ")?;
     serde_json::to_writer(&mut *stream, value)?;
     stream.write_all(b"\n\n")?;
@@ -119,7 +121,7 @@ pub(super) fn write_sse(stream: &mut TcpStream, value: &impl Serialize) -> std::
 }
 
 impl HttpResponse {
-    pub(super) fn empty(status: u16) -> Self {
+    pub(crate) fn empty(status: u16) -> Self {
         Self {
             status,
             reason: reason(status),
@@ -128,7 +130,7 @@ impl HttpResponse {
         }
     }
 
-    pub(super) fn json<T: Serialize>(status: u16, value: &T) -> Self {
+    pub(crate) fn json<T: Serialize>(status: u16, value: &T) -> Self {
         match serde_json::to_vec(value) {
             Ok(body) => Self {
                 status,
@@ -143,12 +145,12 @@ impl HttpResponse {
         }
     }
 
-    pub(super) fn code(status: u16, code: &str) -> Self {
+    pub(crate) fn code(status: u16, code: &str) -> Self {
         Self::json(status, &serde_json::json!({ "code": code }))
     }
 }
 
-pub(super) fn reason(status: u16) -> &'static str {
+pub(crate) fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         201 => "Created",
@@ -171,7 +173,7 @@ pub(super) fn reason(status: u16) -> &'static str {
 }
 
 impl HttpRequest {
-    pub(super) fn has_content_type(&self, mime: &str) -> bool {
+    pub(crate) fn has_content_type(&self, mime: &str) -> bool {
         self.content_type
             .as_deref()
             .and_then(|value| value.split(';').next())
@@ -180,7 +182,7 @@ impl HttpRequest {
 }
 
 #[derive(Debug)]
-pub(super) enum RequestReadError {
+pub(crate) enum RequestReadError {
     TooLarge,
     Invalid,
     Deadline,
@@ -188,14 +190,14 @@ pub(super) enum RequestReadError {
     Io(std::io::Error),
 }
 
-pub(super) fn read_request(
+pub(crate) fn read_request(
     stream: &mut TcpStream,
     shutdown: &AtomicBool,
 ) -> std::result::Result<HttpRequest, RequestReadError> {
     read_request_until(stream, shutdown, Instant::now() + HEADER_DEADLINE)
 }
 
-pub(super) fn read_request_until(
+pub(crate) fn read_request_until(
     stream: &mut TcpStream,
     shutdown: &AtomicBool,
     deadline: Instant,
@@ -252,6 +254,8 @@ pub(super) fn read_request_until(
         return Err(RequestReadError::Invalid);
     }
     let mut authorization = None;
+    let mut if_match = None;
+    let mut if_none_match = None;
     let mut dictation_token = None;
     let mut stream_token = None;
     let mut content_type = None;
@@ -262,7 +266,20 @@ pub(super) fn read_request_until(
         }
         let (name, value) = line.split_once(':').ok_or(RequestReadError::Invalid)?;
         if name.eq_ignore_ascii_case("authorization") {
+            if authorization.is_some() {
+                return Err(RequestReadError::Invalid);
+            }
             authorization = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("if-match") {
+            if if_match.is_some() {
+                return Err(RequestReadError::Invalid);
+            }
+            if_match = Some(value.trim().to_owned());
+        } else if name.eq_ignore_ascii_case("if-none-match") {
+            if if_none_match.is_some() {
+                return Err(RequestReadError::Invalid);
+            }
+            if_none_match = Some(value.trim().to_owned());
         } else if name.eq_ignore_ascii_case("x-hex-dictation-token") {
             if dictation_token.is_some() {
                 return Err(RequestReadError::Invalid);
@@ -297,6 +314,8 @@ pub(super) fn read_request_until(
         method: method.into(),
         path: path.into(),
         authorization,
+        if_match,
+        if_none_match,
         dictation_token,
         stream_token,
         content_type,
@@ -305,7 +324,7 @@ pub(super) fn read_request_until(
     })
 }
 
-pub(super) fn write_response(
+pub(crate) fn write_response(
     stream: &mut TcpStream,
     response: HttpResponse,
 ) -> std::io::Result<()> {

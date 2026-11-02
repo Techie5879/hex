@@ -15,6 +15,9 @@ use crate::app_settings::{HOTKEY_MODIFIERS_MASK, RuntimeHotkey, RuntimeHotkeys};
 use crate::audio::CaptureInstant;
 use crate::dictation::{BOTH_SIDES_WINDOW, MINIMUM_HOLD_DURATION};
 
+mod tap;
+use tap::*;
+
 const DOUBLE_TAP_WINDOW: Duration = MINIMUM_HOLD_DURATION;
 const ESCAPE_KEY_CODE: u16 = 53;
 /// The key code the Globe (Fn) key reports in its own key events.
@@ -59,6 +62,10 @@ const LISTEN_ONLY_EVENT_TAP: u32 = 1;
 const HID_SYSTEM_STATE: u32 = 1;
 const COMBINED_SESSION_STATE: u32 = 0;
 const STALE_KEY_NEUTRAL_DURATION: Duration = Duration::from_millis(100);
+/// A held key repeats well within this (macOS's slowest repeat setting is
+/// under 2 s), so a tracked key with no key event for this long is not held,
+/// even when both system key states still read it down (#1008).
+const TRACKED_KEY_REPEAT_TIMEOUT: Duration = Duration::from_secs(5);
 const PHYSICAL_KEY_DOWN_HISTORY: usize = 8;
 
 type EventRef = *mut c_void;
@@ -269,6 +276,7 @@ pub struct InputMonitor {
     pub activity: InputActivity,
     pending: PendingInputEvents,
     takes_escape: Arc<AtomicBool>,
+    takes_cancel: Arc<AtomicBool>,
     run_loop: Arc<AtomicPtr<c_void>>,
     worker: Option<JoinHandle<()>>,
 }
@@ -318,6 +326,8 @@ impl InputMonitor {
         let tap_run_loop = run_loop.clone();
         let takes_escape = Arc::new(AtomicBool::new(false));
         let tap_takes_escape = takes_escape.clone();
+        let takes_cancel = Arc::new(AtomicBool::new(false));
+        let tap_takes_cancel = takes_cancel.clone();
         let pending = PendingInputEvents::default();
         let tap_pending = pending.clone();
         let worker = thread::spawn(move || {
@@ -325,6 +335,7 @@ impl InputMonitor {
                 sender,
                 tap_activity,
                 tap_takes_escape,
+                tap_takes_cancel,
                 tap_pending,
                 tap_run_loop,
                 ready_sender,
@@ -338,6 +349,7 @@ impl InputMonitor {
             activity,
             pending,
             takes_escape,
+            takes_cancel,
             run_loop,
             worker: Some(worker),
         })
@@ -345,6 +357,12 @@ impl InputMonitor {
 
     pub fn set_takes_escape(&self, enabled: bool) {
         self.takes_escape.store(enabled, Ordering::Release);
+    }
+
+    /// Whether the tap keeps Toggle's cancel shortcut from the app in front:
+    /// only while a toggled recording runs.
+    pub fn set_takes_cancel(&self, enabled: bool) {
+        self.takes_cancel.store(enabled, Ordering::Release);
     }
 
     pub fn pending_events(&self) -> PendingInputEvents {
@@ -376,456 +394,13 @@ struct EventTapContext {
     sender: Sender<ObservedInputEvent>,
     activity: InputActivity,
     takes_escape: Arc<AtomicBool>,
+    takes_cancel: Arc<AtomicBool>,
     key_tap: AtomicPtr<c_void>,
     observation_tap: AtomicPtr<c_void>,
     physical_tap: AtomicPtr<c_void>,
     shortcut_suppression: Mutex<ShortcutSuppression>,
     pending: PendingInputEvents,
     next_sequence: AtomicU64,
-}
-
-struct AttachedTap {
-    tap: *mut c_void,
-    source: *mut c_void,
-    run_loop: *mut c_void,
-}
-
-impl AttachedTap {
-    /// # Safety
-    /// `context` and `run_loop` must outlive the returned `AttachedTap`.
-    unsafe fn create(
-        location: u32,
-        options: u32,
-        mask: u64,
-        callback: EventTapCallback,
-        context: *mut EventTapContext,
-        run_loop: *mut c_void,
-        slot: &AtomicPtr<c_void>,
-    ) -> Result<Self, &'static str> {
-        let tap = unsafe {
-            CGEventTapCreate(
-                location,
-                HEAD_INSERT_EVENT_TAP,
-                options,
-                mask,
-                callback,
-                context.cast(),
-            )
-        };
-        if tap.is_null() {
-            return Err("could not create event tap");
-        }
-        let source = unsafe { CFMachPortCreateRunLoopSource(ptr::null(), tap, 0) };
-        if source.is_null() {
-            unsafe { CFRelease(tap.cast_const()) };
-            return Err("could not create input run-loop sources");
-        }
-        slot.store(tap, Ordering::Release);
-        unsafe {
-            CFRunLoopAddSource(run_loop, source, kCFRunLoopCommonModes);
-            CGEventTapEnable(tap, true);
-        }
-        Ok(Self {
-            tap,
-            source,
-            run_loop,
-        })
-    }
-}
-
-impl Drop for AttachedTap {
-    fn drop(&mut self) {
-        unsafe {
-            CGEventTapEnable(self.tap, false);
-            CFRunLoopRemoveSource(self.run_loop, self.source, kCFRunLoopCommonModes);
-            CFRelease(self.source.cast_const());
-            CFRelease(self.tap.cast_const());
-        }
-    }
-}
-
-const KEY_MASK: u64 = (1_u64 << EVENT_KEY_DOWN)
-    | (1_u64 << EVENT_KEY_UP)
-    | (1_u64 << EVENT_LEFT_MOUSE_DOWN)
-    | (1_u64 << EVENT_LEFT_MOUSE_UP)
-    | (1_u64 << EVENT_RIGHT_MOUSE_DOWN)
-    | (1_u64 << EVENT_RIGHT_MOUSE_UP)
-    | (1_u64 << EVENT_OTHER_MOUSE_DOWN)
-    | (1_u64 << EVENT_OTHER_MOUSE_UP)
-    | (1_u64 << EVENT_LEFT_MOUSE_DRAGGED)
-    | (1_u64 << EVENT_RIGHT_MOUSE_DRAGGED)
-    | (1_u64 << EVENT_OTHER_MOUSE_DRAGGED);
-const OBSERVATION_MASK: u64 = 1_u64 << EVENT_FLAGS_CHANGED;
-
-/// Translate only configured mouse triggers into the shared shortcut reducer.
-/// Ordinary clicks retain their cancellation/activity semantics.
-fn mouse_input(button: u16, down: bool, flags: u64, hotkeys: RuntimeHotkeys) -> Option<InputEvent> {
-    let code = crate::app_settings::HotkeyKey::mouse_code(button)?;
-    let bound = [
-        Some(hotkeys.dictation),
-        hotkeys.raw_dictation,
-        hotkeys.second_dictation,
-        hotkeys.paste_last,
-        hotkeys.paste_meeting,
-    ]
-    .iter()
-    .flatten()
-    .any(|binding| binding.key_code == Some(code));
-    if bound {
-        Some(InputEvent::Key { code, down, flags })
-    } else {
-        down.then_some(InputEvent::MouseDown)
-    }
-}
-
-fn input_is_down(state: u32, code: u16) -> bool {
-    // SAFETY: both functions are read-only CoreGraphics state queries; mouse
-    // codes are decoded before crossing the native keyboard API boundary.
-    unsafe {
-        match crate::app_settings::HotkeyKey::mouse_button(code) {
-            Some(button) => CGEventSourceButtonState(state, u32::from(button)),
-            None => CGEventSourceKeyState(state, code),
-        }
-    }
-}
-
-/// What the observation tap adds in builds with captures, while the
-/// `capture` experiment is on: the pointer moving and scrolling. Clicks and
-/// drags already reach the key tap, for mouse shortcuts. The callback drops
-/// them at once unless a capture records (`capture_host::wants_input`); they
-/// never reach the listener.
-#[cfg(hex_capture)]
-const CAPTURE_POINTER_MASK: u64 = (1_u64 << EVENT_MOUSE_MOVED) | (1_u64 << EVENT_SCROLL_WHEEL);
-
-fn observation_mask() -> u64 {
-    #[cfg(hex_capture)]
-    return OBSERVATION_MASK | CAPTURE_POINTER_MASK;
-    #[cfg(not(hex_capture))]
-    OBSERVATION_MASK
-}
-
-fn run_event_tap(
-    sender: Sender<ObservedInputEvent>,
-    activity: InputActivity,
-    takes_escape: Arc<AtomicBool>,
-    pending: PendingInputEvents,
-    run_loop: Arc<AtomicPtr<c_void>>,
-    ready: SyncSender<Result<()>>,
-) {
-    let mut context = Box::new(EventTapContext {
-        sender,
-        activity,
-        takes_escape,
-        key_tap: AtomicPtr::new(ptr::null_mut()),
-        observation_tap: AtomicPtr::new(ptr::null_mut()),
-        physical_tap: AtomicPtr::new(ptr::null_mut()),
-        shortcut_suppression: Mutex::new(ShortcutSuppression::default()),
-        pending,
-        next_sequence: AtomicU64::new(0),
-    });
-    let context_ptr = &raw mut *context;
-    // SAFETY: This is the dedicated event-tap thread's current run loop.
-    let current_run_loop = unsafe { CFRunLoopGetCurrent() };
-    let mut taps = Box::new(TapSet {
-        context: context_ptr,
-        run_loop: current_run_loop,
-        taps: TapKind::ALL.map(|kind| ManagedTap {
-            kind,
-            attached: None,
-            failing: false,
-        }),
-    });
-    for tap in &mut taps.taps {
-        // SAFETY: `context` outlives `taps`, which is declared after it.
-        if let Err(message) = unsafe { tap.attach(context_ptr, current_run_loop) } {
-            match tap.kind {
-                TapKind::Key => {
-                    let _ = ready.send(Err(eyre!(
-                        "could not create keyboard event tap; grant Accessibility permission"
-                    )));
-                    return;
-                }
-                TapKind::Observation => {
-                    let _ = ready.send(Err(eyre!(message)));
-                    return;
-                }
-                TapKind::Physical => {
-                    tap.failing = true;
-                    tracing::warn!(
-                        "could not observe HID key presses; global-shortcut chords cannot cancel"
-                    );
-                }
-            }
-        }
-    }
-    // SAFETY: `taps` outlives the timer, which is declared after it and
-    // invalidated on drop, and both live on this run loop's thread.
-    let _health = unsafe { HealthTimer::start(&raw mut *taps, current_run_loop) };
-    let _app_nap = AppNapOptOut::begin();
-    run_loop.store(current_run_loop, Ordering::Release);
-    let _ = ready.send(Ok(()));
-    // SAFETY: This dedicated thread exists solely to dispatch the event tap.
-    unsafe { CFRunLoopRun() };
-    run_loop.store(ptr::null_mut(), Ordering::Release);
-}
-
-/// How often the tap thread confirms its taps still run. macOS can disable
-/// or invalidate a tap without delivering a disable event (after sleep,
-/// secure input, or an Accessibility change), which leaves the shortcut dead.
-const TAP_HEALTH_INTERVAL_SECONDS: f64 = 5.0;
-
-#[derive(Clone, Copy, Debug)]
-enum TapKind {
-    Key,
-    Observation,
-    Physical,
-}
-
-impl TapKind {
-    const ALL: [Self; 3] = [Self::Key, Self::Observation, Self::Physical];
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Key => "key",
-            Self::Observation => "modifier",
-            Self::Physical => "hid",
-        }
-    }
-
-    fn slot(self, context: &EventTapContext) -> &AtomicPtr<c_void> {
-        match self {
-            Self::Key => &context.key_tap,
-            Self::Observation => &context.observation_tap,
-            Self::Physical => &context.physical_tap,
-        }
-    }
-
-    /// The key and modifier taps carry shortcut state; a gap in them makes
-    /// the input history untrustworthy. The HID tap only adds chord evidence.
-    fn tracks_shortcuts(self) -> bool {
-        !matches!(self, Self::Physical)
-    }
-}
-
-struct ManagedTap {
-    kind: TapKind,
-    attached: Option<AttachedTap>,
-    /// Creation failed and was logged; log again only once it recovers.
-    failing: bool,
-}
-
-impl ManagedTap {
-    /// # Safety
-    /// `context` and `run_loop` must outlive the attached tap.
-    unsafe fn attach(
-        &mut self,
-        context: *mut EventTapContext,
-        run_loop: *mut c_void,
-    ) -> Result<(), &'static str> {
-        // SAFETY: the caller keeps `context` alive; the slot lives in it.
-        let slot = self.kind.slot(unsafe { &*context });
-        let (location, options, mask, callback): (u32, u32, u64, EventTapCallback) = match self.kind
-        {
-            TapKind::Key => (
-                ANNOTATED_SESSION_EVENT_TAP,
-                DEFAULT_EVENT_TAP,
-                KEY_MASK,
-                event_callback,
-            ),
-            // A modifying tap disrupts Finder's Option-driven alternate menu items even
-            // when it returns flagsChanged events unchanged. Observe modifiers with a
-            // passive tap; bound mouse clicks use the filtering tap.
-            TapKind::Observation => (
-                ANNOTATED_SESSION_EVENT_TAP,
-                LISTEN_ONLY_EVENT_TAP,
-                observation_mask(),
-                event_callback,
-            ),
-            // Listens for key presses at the HID level, where shortcuts that other apps
-            // register globally are still visible. Without it those chords are invisible
-            // to the session taps; dictation still works.
-            TapKind::Physical => (
-                HID_EVENT_TAP,
-                LISTEN_ONLY_EVENT_TAP,
-                1_u64 << EVENT_KEY_DOWN,
-                physical_event_callback,
-            ),
-        };
-        // SAFETY: forwarded from the caller.
-        let attached = unsafe {
-            AttachedTap::create(location, options, mask, callback, context, run_loop, slot)
-        }?;
-        self.attached = Some(attached);
-        Ok(())
-    }
-}
-
-/// The taps on the event-tap thread, checked by its health timer.
-struct TapSet {
-    context: *mut EventTapContext,
-    run_loop: *mut c_void,
-    taps: [ManagedTap; 3],
-}
-
-impl TapSet {
-    /// Re-enables a disabled tap and recreates an invalidated or missing one.
-    fn check(&mut self) {
-        // SAFETY: `context` outlives this set (see `run_event_tap`).
-        let context = unsafe { &*self.context };
-        let mut interrupted = false;
-        for tap in &mut self.taps {
-            let kind = tap.kind.as_str();
-            let recreate = match &tap.attached {
-                None => true,
-                // SAFETY: `tap.tap` is a live CFMachPort owned by `AttachedTap`.
-                Some(attached) if unsafe { CFMachPortIsValid(attached.tap) } == 0 => {
-                    tracing::warn!(tap = kind, "event tap was invalidated; recreating it");
-                    true
-                }
-                // SAFETY: as above.
-                Some(attached) if !unsafe { CGEventTapIsEnabled(attached.tap) } => {
-                    // SAFETY: as above.
-                    unsafe { CGEventTapEnable(attached.tap, true) };
-                    // SAFETY: as above.
-                    let enabled = unsafe { CGEventTapIsEnabled(attached.tap) };
-                    tracing::warn!(
-                        tap = kind,
-                        reenabled = enabled,
-                        "event tap was disabled without notice; re-enabled it"
-                    );
-                    interrupted |= tap.kind.tracks_shortcuts();
-                    !enabled
-                }
-                Some(_) => false,
-            };
-            if !recreate {
-                continue;
-            }
-            tap.kind
-                .slot(context)
-                .store(ptr::null_mut(), Ordering::Release);
-            let was_attached = tap.attached.take().is_some();
-            // SAFETY: `context` and the run loop outlive this set.
-            match unsafe { tap.attach(self.context, self.run_loop) } {
-                Ok(()) => {
-                    if was_attached || tap.failing {
-                        tracing::warn!(tap = kind, "recreated event tap");
-                    }
-                    tap.failing = false;
-                    interrupted |= was_attached && tap.kind.tracks_shortcuts();
-                }
-                Err(message) => {
-                    if !tap.failing {
-                        tracing::error!(
-                            tap = kind,
-                            error = message,
-                            "could not recreate event tap"
-                        );
-                    }
-                    tap.failing = true;
-                    interrupted |= was_attached && tap.kind.tracks_shortcuts();
-                }
-            }
-        }
-        if interrupted {
-            send_input(context, InputEvent::TapDisabled, CaptureInstant::ZERO);
-        }
-    }
-}
-
-/// The repeating run-loop timer that runs `TapSet::check`.
-struct HealthTimer(*mut c_void);
-
-impl HealthTimer {
-    /// # Safety
-    /// `taps` must outlive the returned timer, and `run_loop` must be the
-    /// current thread's run loop.
-    unsafe fn start(taps: *mut TapSet, run_loop: *mut c_void) -> Option<Self> {
-        let mut context = RunLoopTimerContext {
-            version: 0,
-            info: taps.cast(),
-            retain: ptr::null(),
-            release: ptr::null(),
-            copy_description: ptr::null(),
-        };
-        // SAFETY: CoreFoundation copies the context; `info` outlives the timer.
-        let timer = unsafe {
-            CFRunLoopTimerCreate(
-                ptr::null(),
-                CFAbsoluteTimeGetCurrent() + TAP_HEALTH_INTERVAL_SECONDS,
-                TAP_HEALTH_INTERVAL_SECONDS,
-                0,
-                0,
-                check_tap_health,
-                &raw mut context,
-            )
-        };
-        if timer.is_null() {
-            tracing::warn!("could not schedule event tap health checks");
-            return None;
-        }
-        // SAFETY: `timer` is a valid CFRunLoopTimer for this thread's run loop.
-        unsafe { CFRunLoopAddTimer(run_loop, timer, kCFRunLoopCommonModes) };
-        Some(Self(timer))
-    }
-}
-
-impl Drop for HealthTimer {
-    fn drop(&mut self) {
-        // SAFETY: the timer was created by `HealthTimer::start` and is owned here.
-        unsafe {
-            CFRunLoopTimerInvalidate(self.0);
-            CFRelease(self.0.cast_const());
-        }
-    }
-}
-
-unsafe extern "C" fn check_tap_health(_timer: *mut c_void, info: *mut c_void) {
-    // SAFETY: `info` is the `TapSet` that outlives this timer, used only on
-    // the event-tap thread, so no other reference is live during the call.
-    unsafe { &mut *info.cast::<TapSet>() }.check();
-}
-
-/// Keeps App Nap from throttling the event-tap thread while Hex sits idle in
-/// the background: a napped callback can miss its deadline, and its health
-/// timer would stretch. Idle system sleep stays allowed.
-struct AppNapOptOut(
-    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2::runtime::NSObjectProtocol>>,
-);
-
-impl AppNapOptOut {
-    fn begin() -> Self {
-        use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-        let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
-            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
-            &NSString::from_str("Hex listens for its dictation shortcut"),
-        );
-        Self(activity)
-    }
-}
-
-impl Drop for AppNapOptOut {
-    fn drop(&mut self) {
-        // SAFETY: the activity came from `beginActivityWithOptions:reason:`.
-        unsafe { objc2_foundation::NSProcessInfo::processInfo().endActivity(&self.0) };
-    }
-}
-
-/// Re-enables every tap after macOS disables one and records why.
-fn reenable_disabled_taps(context: &EventTapContext, event_type: u32, tap: &'static str) {
-    let reason = if event_type == EVENT_TAP_DISABLED_BY_TIMEOUT {
-        "timeout"
-    } else {
-        "user input"
-    };
-    for kind in TapKind::ALL {
-        let tap = kind.slot(context).load(Ordering::Acquire);
-        if !tap.is_null() {
-            // SAFETY: `tap` is a CFMachPort returned by `CGEventTapCreate`.
-            unsafe { CGEventTapEnable(tap, true) };
-        }
-    }
-    tracing::warn!(tap, reason, "macOS disabled the event tap; re-enabled it");
 }
 
 unsafe extern "C" fn physical_event_callback(
@@ -1078,9 +653,13 @@ unsafe extern "C" fn event_callback(
         .shortcut_suppression
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let mut hotkeys = crate::app_settings::runtime_hotkeys();
+    if !context.takes_cancel.load(Ordering::Acquire) {
+        hotkeys.cancel = None;
+    }
     let suppress = suppression.process_all(
         input,
-        crate::app_settings::runtime_hotkeys(),
+        hotkeys,
         delivered,
         context.takes_escape.load(Ordering::Acquire),
     );
@@ -1360,6 +939,9 @@ impl ShortcutSuppression {
         self.key_presses.clear();
     }
 
+    /// Whether the tap keeps `input` from the app in front: Hex's shortcuts,
+    /// Escape while Hex takes it, and `hotkeys.cancel`, which the caller
+    /// leaves set only while a toggled recording runs.
     fn process_all(
         &mut self,
         input: InputEvent,
@@ -1379,6 +961,7 @@ impl ShortcutSuppression {
                         || bindings
                             .iter()
                             .flatten()
+                            .chain(hotkeys.cancel.iter())
                             .any(|hotkey| hotkey.matches_key_press(code, flags)))
             }),
             InputEvent::Key {
@@ -1409,6 +992,7 @@ impl ShortcutSuppression {
                 capture: None,
                 raw_dictation: None,
                 second_dictation: None,
+                cancel: None,
             },
             delivered,
             false,
@@ -1460,7 +1044,10 @@ pub enum HotkeyAction {
     Start,
     Finish,
     Discard(DiscardCause),
+    /// Hex ended the recording: its input was lost or suspended.
     Cancel,
+    /// Toggle's cancel shortcut discarded the recording.
+    CancelShortcut,
     PasteLast,
     PasteMeeting,
 }
@@ -1551,7 +1138,7 @@ impl PhysicalKeyboard {
         Self {
             // SAFETY: Read-only queries of a documented event-source state.
             flags: || unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) },
-            key_down: |code| unsafe { CGEventSourceKeyState(COMBINED_SESSION_STATE, code) },
+            key_down: input_is_held,
         }
     };
 }
@@ -1575,6 +1162,8 @@ pub struct DictationHotkey {
     /// the hold threshold finishes on release instead of locking.
     tap_or_hold: fn() -> bool,
     binding: RuntimeHotkey,
+    /// Toggle's cancel shortcut; `None` in Hold mode.
+    cancel: Option<RuntimeHotkey>,
     ignore_before: Option<CaptureInstant>,
     stale_keys_neutral_since: Option<CaptureInstant>,
     recovery_ignore_through: Option<CaptureInstant>,
@@ -1626,6 +1215,7 @@ impl DictationHotkey {
             toggle: false,
             tap_or_hold: TAP_OR_HOLD,
             binding,
+            cancel: None,
             ignore_before: None,
             stale_keys_neutral_since: None,
             recovery_ignore_through: None,
@@ -1680,6 +1270,11 @@ impl DictationHotkey {
     /// Takes effect from the next press; an active capture keeps its gesture.
     pub fn set_toggle(&mut self, enabled: bool) {
         self.toggle = enabled;
+    }
+
+    /// Toggle's cancel shortcut, or `None` for no cancel.
+    pub fn set_cancel(&mut self, cancel: Option<RuntimeHotkey>) {
+        self.cancel = cancel;
     }
 
     pub fn set_binding(&mut self, binding: RuntimeHotkey) {
@@ -1740,7 +1335,7 @@ impl DictationHotkey {
             CaptureInstant::now,
             // Match the annotated-session tap, including assistive keyboard input.
             || unsafe { CGEventSourceFlagsState(COMBINED_SESSION_STATE) },
-            |code| input_is_down(COMBINED_SESSION_STATE, code),
+            input_is_held,
         );
     }
 
@@ -2052,6 +1647,23 @@ impl DictationHotkey {
             self.state = State::Dirty;
             return Some(action);
         }
+        // Toggle's cancel shortcut discards the recording; the tap kept the
+        // key from the app in front. Hold mode has no cancel.
+        if fresh_key_down
+            && self.toggle
+            && self.is_recording()
+            && let InputEvent::Key {
+                code,
+                down: true,
+                flags,
+            } = event
+            && self
+                .cancel
+                .is_some_and(|cancel| cancel.matches_key_press(code, flags))
+        {
+            self.state = State::Dirty;
+            return Some(HotkeyAction::CancelShortcut);
+        }
 
         let ignored_because = binding_press
             .then(|| self.resync_stale_press(now))
@@ -2332,13 +1944,25 @@ impl DictationHotkey {
         if history.since_neutral & !binding_mask != 0 {
             return Some("another modifier went down since the keyboard was neutral");
         }
-        if self
+        // Key repeats refresh `key_down_at`, so a silent keyboard key is latched.
+        let silent = |code: &u16| {
+            crate::app_settings::HotkeyKey::mouse_button(*code).is_none()
+                && self.key_down_at.get(code).is_some_and(|down| {
+                    now.checked_duration_since(*down)
+                        .is_some_and(|age| age >= TRACKED_KEY_REPEAT_TIMEOUT)
+                })
+        };
+        let held: Vec<u16> = self
             .pressed_keys
             .iter()
             .filter(|code| stale(code))
-            .any(|&code| (self.physical.key_down)(code))
-        {
+            .filter(|&&code| (self.physical.key_down)(code))
+            .copied()
+            .collect();
+        if !held.iter().all(silent) {
             return Some("a tracked key is physically down");
+        } else if !held.is_empty() {
+            tracing::info!(key_codes = ?held, "tracked keys sent no key repeat; released");
         }
         // As in recovery, arrow keys can leave SecondaryFn set after release.
         let mut others = HOTKEY_MODIFIERS_MASK & !binding_mask;
@@ -2497,6 +2121,7 @@ mod tests {
             sender,
             activity: InputActivity::default(),
             takes_escape: Arc::new(AtomicBool::new(takes_escape)),
+            takes_cancel: Arc::new(AtomicBool::new(false)),
             key_tap: AtomicPtr::new(ptr::null_mut()),
             observation_tap: AtomicPtr::new(ptr::null_mut()),
             physical_tap: AtomicPtr::new(ptr::null_mut()),
@@ -2594,6 +2219,25 @@ mod tests {
             ),
             "{tapped:?}"
         );
+    }
+
+    #[test]
+    fn a_key_latched_only_in_session_state_reads_as_released() {
+        const TAB: u16 = 48;
+        let state = |session: bool, hid: bool| {
+            move |source: u32, _: u16| {
+                if source == COMBINED_SESSION_STATE {
+                    session
+                } else {
+                    hid
+                }
+            }
+        };
+        // Command-Tab swallowed Tab's release: the session still says down,
+        // the physical keyboard says up (#612).
+        assert!(!reads_held(TAB, state(true, false)));
+        assert!(reads_held(TAB, state(true, true)));
+        assert!(!reads_held(TAB, state(false, true)));
     }
 
     #[test]
@@ -2907,6 +2551,7 @@ mod tests {
             capture: None,
             raw_dictation: None,
             second_dictation: None,
+            cancel: None,
         }
     }
 
@@ -3600,6 +3245,56 @@ mod tests {
             let next = release + Duration::from_secs(1);
             assert_eq!(hotkey.process(option, next), Some(HotkeyAction::Start));
         }
+    }
+
+    #[test]
+    fn a_latched_key_without_key_repeats_stops_blocking_the_shortcut() {
+        let now = capture_time();
+        let fn_down = InputEvent::Flags(FUNCTION_KEY_MASK);
+        let neutral = InputEvent::Flags(NO_FLAGS);
+        // Both system key states keep reading Tab down after its release was
+        // missed, and no key repeat ever arrives (#1008).
+        let latched_tab = PhysicalKeyboard {
+            flags: || NO_FLAGS,
+            key_down: |code| code == 48,
+        };
+        let mut hotkey = DictationHotkey::with_binding(false, now, true, function_binding());
+        hotkey.physical = latched_tab;
+        let released = command_tab(&mut hotkey, now);
+        let soon = released + Duration::from_secs(1);
+        assert_eq!(hotkey.process(fn_down, soon), None);
+        assert_eq!(
+            hotkey.process(neutral, soon + Duration::from_millis(100)),
+            None
+        );
+        let later = released + TRACKED_KEY_REPEAT_TIMEOUT;
+        assert_eq!(hotkey.process(fn_down, later), Some(HotkeyAction::Start));
+        assert!(hotkey.pressed_keys.is_empty());
+        assert_eq!(
+            hotkey.process(neutral, later + Duration::from_secs(1)),
+            Some(HotkeyAction::Finish)
+        );
+
+        // A Tab really held keeps repeating, so it still blocks the press.
+        let mut hotkey = DictationHotkey::with_binding(false, now, true, function_binding());
+        hotkey.physical = latched_tab;
+        let released = command_tab(&mut hotkey, now);
+        let repeat = InputEvent::Key {
+            code: 48,
+            down: true,
+            flags: NO_FLAGS,
+        };
+        let repeated = released + Duration::from_secs(4);
+        assert_eq!(hotkey.process(repeat, repeated), None);
+        assert_eq!(
+            hotkey.process(neutral, repeated + Duration::from_millis(100)),
+            None
+        );
+        assert_eq!(
+            hotkey.process(fn_down, released + TRACKED_KEY_REPEAT_TIMEOUT),
+            None
+        );
+        assert!(hotkey.pressed_keys.contains(&48));
     }
 
     #[test]
@@ -4709,6 +4404,85 @@ mod tests {
             None
         );
         assert!(hotkey.is_recording());
+    }
+
+    /// Toggle's cancel shortcut discards a toggled recording, held or
+    /// locked; Hold mode has none, and idle it does nothing.
+    #[test]
+    fn the_cancel_shortcut_discards_only_a_toggled_recording() {
+        let now = capture_time();
+        let escape = |down| InputEvent::Key {
+            code: ESCAPE_KEY_CODE,
+            down,
+            flags: 0,
+        };
+        let cancel = Some(HotkeyBinding::cancel_default().runtime());
+        let ms = |ms| now + Duration::from_millis(ms);
+        let toggled = || {
+            let mut hotkey = DictationHotkey::with_binding(false, now, true, shift_space_binding());
+            hotkey.set_toggle(true);
+            hotkey.set_cancel(cancel);
+            hotkey
+        };
+
+        // Idle: the key is the app's.
+        let mut hotkey = toggled();
+        assert_eq!(hotkey.process(escape(true), now), None);
+        assert_eq!(hotkey.process(escape(false), ms(20)), None);
+
+        // Locked after the toggle press: cancelled, and the next press starts.
+        assert_eq!(
+            hotkey.process(shift_space_event(true), ms(100)),
+            Some(HotkeyAction::Start)
+        );
+        assert_eq!(hotkey.process(shift_space_event(false), ms(160)), None);
+        assert!(hotkey.is_locked());
+        assert_eq!(
+            hotkey.process(escape(true), ms(1_000)),
+            Some(HotkeyAction::CancelShortcut)
+        );
+        assert!(!hotkey.is_recording());
+        assert_eq!(hotkey.process(escape(false), ms(1_050)), None);
+        assert_eq!(hotkey.process(InputEvent::Flags(NO_FLAGS), ms(1_060)), None);
+        assert_eq!(
+            hotkey.process(shift_space_event(true), ms(2_000)),
+            Some(HotkeyAction::Start)
+        );
+
+        // Held, before the release locks it.
+        let mut hotkey = toggled();
+        hotkey.process(shift_space_event(true), now);
+        assert_eq!(
+            hotkey.process(escape(true), ms(500)),
+            Some(HotkeyAction::CancelShortcut)
+        );
+
+        // Hold mode: no cancel, even with a binding.
+        let mut hotkey = test_hotkey(true, now);
+        hotkey.set_cancel(cancel);
+        assert_eq!(hotkey.process(escape(true), ms(500)), None);
+        assert!(hotkey.is_recording());
+    }
+
+    /// The tap keeps the cancel key from the app only while the listener
+    /// arms it (a toggled recording runs).
+    #[test]
+    fn the_cancel_key_is_suppressed_only_while_armed() {
+        let mut suppression = ShortcutSuppression::default();
+        let escape = |down| InputEvent::Key {
+            code: ESCAPE_KEY_CODE,
+            down,
+            flags: NO_FLAGS,
+        };
+        let idle = RuntimeHotkeys::default();
+        assert!(!suppression.process_all(escape(true), idle, true, false));
+        assert!(!suppression.process_all(escape(false), idle, true, false));
+        let armed = RuntimeHotkeys {
+            cancel: Some(HotkeyBinding::cancel_default().runtime()),
+            ..RuntimeHotkeys::default()
+        };
+        assert!(suppression.process_all(escape(true), armed, true, false));
+        assert!(suppression.process_all(escape(false), armed, true, false));
     }
 
     #[test]

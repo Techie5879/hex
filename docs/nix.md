@@ -1,6 +1,8 @@
 # Nix
 
-The flake packages Hex for `x86_64-linux`. It supports the Linux X11 beta
+The flake packages Hex for `x86_64-linux` and `aarch64-linux`. Both build
+from source; `aarch64-linux` evaluates but has not been built or run on real
+ARM64 hardware yet. It supports the Linux X11 beta
 and native Wayland on compatible wlroots compositors. Wayland requires
 layer-shell for the recording overlay, the clipboard protocol used by
 `wl-copy`, and the virtual-keyboard protocol used by `wtype`. Global shortcuts
@@ -19,9 +21,13 @@ nix run . -- app
 ```
 
 Or add `hex.url = "github:anomalyco/hex"` to your configuration's flake inputs
-and install `hex.packages.x86_64-linux.default`. The package supplies the
-`hex` command and desktop launcher, native libraries, and the `curl`,
-`wl-copy`, and `wtype` runtime dependencies. Your system still needs a
+and install `hex.packages.${system}.default` (`x86_64-linux` or
+`aarch64-linux`). The package supplies the
+`hex` command and desktop launcher, native libraries (including PipeWire and
+libva for Annotate), and the `curl`, `wl-copy`, `wtype`, and `ffmpeg`/`ffprobe`
+runtime dependencies. Annotate's hardware encoder uses whatever VA-API driver
+your system provides (NixOS: `hardware.graphics`, through `/run/opengl-driver`);
+without one it falls back to ffmpeg's libx264. Your system still needs a
 working audio session and a Vulkan driver for Settings, even when inference
 falls back to the CPU. On non-NixOS hosts, Nix GUI
 applications may require the host's usual Nix graphics integration.

@@ -20,7 +20,7 @@ macOS rules don't apply here. Its privacy and product rules do.
 - `native-asr/`, `native-llm/`: JNI over transcribe.cpp and llama.cpp. Each is its own module
   because each brings its own ggml, and both load in one process.
 - `testapp/`: Editors to dictate into, plus on-device tests. Never shipped.
-- `companion/`: Profile sync server for a private machine. One Bun file, no dependencies.
+- `../src/profile_sync/`: Portable profile and in-app desktop host. `docs/sync.md` covers pairing and migration.
 
 ## Rules that keep it correct
 
@@ -42,7 +42,7 @@ cd android
 ./gradlew :core:test
 ./gradlew :app:assembleDebug -PhexAbis=x86_64     # for the emulator
 ./gradlew :app:assembleRelease -PhexAbis=arm64-v8a # for the phone
-cd companion && bun test
+cd .. && cargo test --locked --bin hex profile_sync
 ```
 
 `docs/testing.md` covers the emulator, its limits, and on-device tests.

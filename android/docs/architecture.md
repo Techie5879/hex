@@ -17,7 +17,7 @@ DictationCoordinator       // one dictation, gesture to text
 └── CleanupPipeline        // core: local, then size gate, then polish
     └── CodexPolisher ──HTTPS──> ChatGPT Codex API, with this phone's own sign-in
 
-ProfileRepository ←→ ProfileSync ──HTTPS, ETag/If-Match──> companion or WebDAV
+ProfileRepository ←→ ProfileSync ──HTTPS, ETag/If-Match──> desktop Hex or WebDAV
 ```
 
 ## Decisions
@@ -56,8 +56,7 @@ excludes its own rectangle, or dragging it would leave the app.
 the button, as do number, phone, and date fields. Payment forms often use plain text inputs, so
 identifiers are checked as a further reason to hide, and a person can exclude any app.
 
-**Sync.** Devices merge, and the server only compares and swaps one document, so a small companion
-and any WebDAV server work alike. See `companion/README.md` for what was rejected and why.
+**Sync.** Desktop Hex hosts a profile-only loopback listener while the app runs and Labs > Profile sync is on. Devices use conditional writes; the host absorbs local settings before each exchange and applies received profile fields through the app settings owner. Existing WebDAV files remain supported. See `docs/sync.md` for pairing, timing, and migration.
 
 **Merging.** Three-way against the last agreed document. Concurrent spelling edits union, deletes
 leave tombstones and win or lose by stamp, and a concurrent prompt edit keeps the newest and records

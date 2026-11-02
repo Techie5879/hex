@@ -5,7 +5,7 @@
 
 `dev` and `production` take changes only through pull requests (Dax's
 ruleset; `.github/` changes also need Dax). Branch from `dev`, open a PR to
-`dev`, and merge it yourself once its checks pass; merge any open PR without
+`dev`, and merge it yourself once it compiles (don't wait on CI); merge any open PR without
 asking. After merging, update the installed copy. See
 `~/code/control/AGENTS.md`. `production` holds what was released and moves
 only by a fast-forward from `dev` when Kit releases; never commit to it.
@@ -196,8 +196,10 @@ substitute for source inspection or a second roadmap.
   app serves it on every OS, as does `hex service [--embedded]`; the discovery
   file is `local-api.json` in the data folder (mode 0600 on Unix, the per-user
   `%APPDATA%` ACL on Windows). `/dictations` (`local_api::dictation`) runs on
-  the macOS recognition loop only; elsewhere it answers
-  `service-capture-unavailable` at runtime, and `/profile/vitals` answers 503.
+  the macOS recognition loop and the Linux listener, sharing the protocol,
+  owner tokens, lease, and levels in `dictation::service`; on Windows and
+  `hex service` it answers `service-capture-unavailable`, and off macOS
+  `/profile/vitals` answers 503.
   `/control` carries the `hex` control commands on every OS (`control`).
 - `control`: the release `hex` control surface on every OS: the versioned
   `ControlRequest`/`ControlReply` protocol, the settings registry behind
@@ -224,9 +226,17 @@ substitute for source inspection or a second roadmap.
   `~/.config/hex`, run in-process by embedded QuickJS (`rquickjs`) on one
   worker thread: TypeScript erased to same-position JavaScript by
   `personal_commands/typescript` (oxc's parser), the `@hex/commands` module
-  and managed `hex.d.ts` typings, watch-reloaded deterministic transformation
-  calls, per-call time and runtime memory limits, status snapshots, and
-  `hex commands init|check`. macOS, Windows, and Linux share it.
+  and managed `hex.d.ts` typings, watch-reloaded transformation calls with
+  per-transformation timeouts and a runtime memory limit, status snapshots,
+  and `hex commands init|check`. Its host APIs are thin native bindings:
+  `fetch` through `net` (`personal_commands/fetch`),
+  `node:child_process` `exec`/`execFile` over `std::process` with a process
+  group or job object per run (`personal_commands/process`), and timers,
+  settled through QuickJS's job queue by `personal_commands/io`. They work
+  only once the person allows the config's content hash (`personal_commands/trust`,
+  the Output pane's trust prompt). Public API docs:
+  `site/public/docs/transforms.md` (https://anoma.ly/hex/docs/transforms).
+  macOS, Windows, and Linux share it.
 - `desktop/background_process`: the one constructor for child processes Hex starts for
   its own work (OpenCode CLI, curl, PowerShell); on Windows they
   never open a console window.
@@ -252,6 +262,11 @@ substitute for source inspection or a second roadmap.
 - `desktop/login_item`: the native `SMAppService.mainAppService` adapter and its worker
   thread. macOS owns registration state; it is deliberately not duplicated in
   `settings.json`.
+- `policy`: macOS managed-preference feature locks in `anomaly.hex`
+  (`DisableMeetings`, `DisableAnnotate`, `DisableOpenCodeProcessing`,
+  `DisableTransforms`, `DisableLabs`, `RestrictTransformsToLoopback`), forced
+  values only. Locked switches read off at load and keep their saved values on
+  save; list-driven work checks the policy where it starts.
 - `app_paths`: the Application Support owner (`hex` on every OS) for runtime
   logs and shared state.
 - `desktop/onboarding`, `desktop/permission_guide`: required permission health, the native
@@ -342,11 +357,17 @@ substitute for source inspection or a second roadmap.
   lists too. Each tray maps a `TrayCommand` onto its own runtime.
 - `linux/login_item`: Launch at login on Linux, the managed XDG autostart
   entry the installer also writes; the file is the only state.
+- `net`: Hex's own HTTPS (model downloads, update checks, transformation
+  `fetch`): ureq over the platform's TLS and trusted roots, the proxy the
+  computer uses (environment variables everywhere, then Windows' WinHTTP
+  settings with PAC/WPAD or macOS' CFNetwork settings), bounded resumable
+  ranged downloads, and failures named for a person (`docs/downloads.md`).
+  Use it for any new outbound request; don't shell out to curl.
 - `updater`: the in-app updater on every OS, a client of the Anomaly release
   service (`docs/plans/release-service.md`). `updater/protocol` is the
   protocol's strict SemVer, lenient manifest parsing, and client rules (the
   service's shared test vectors in `tests/fixtures/release-protocol`);
-  `updater/transport` is curl with `If-None-Match` and resumable,
+  `updater/transport` is `net` with `If-None-Match` and resumable,
   size- and SHA-256-checked downloads; `updater/{linux,macos,windows}` detect
   the install method, verify (OS code signature on macOS and Windows), stage,
   and restart into an update.
@@ -394,7 +415,7 @@ substitute for source inspection or a second roadmap.
   the Labs switch and the opt-ins) Annotate and the Voice Filter, plus in
   Playground (`⇧⌘D`) HUD Lab's live Dot scope sliders (`hud_stories`), the transcription
   picker, the Sounds sheet (its stage replays `rune_hud`'s HUD, drawn by the
-  window's compositor with `rune_hud.wgsl`), the onboarding tour, the macOS
+  window's compositor with `rune_hud.wgsl`), the onboarding pages, the macOS
   meeting capsules, the `--snap`
   fixture scenes, and the macOS `hex://story/…` playground links
   (`story_link`, `hex-test://` in test builds). `platform::Capabilities` decides which panes and rows exist (and, through `rune_ui::capabilities`, which `hex settings` keys act and what `hex status` reports); every difference between the OSes names a reason in `platform::DIFFERENCES` (an OS pattern, impossible, or pending), which `parity_tests` enforce;
@@ -593,14 +614,19 @@ CoreAudio formats, AppleScript details, or event serialization.
   modifiers are pressed alone.
 - Windows accepts one modifier alone (Right Alt, Right Ctrl) as a dictation
   shortcut. Any key or mouse button joining a held modifier-only shortcut
-  ends it as a chord (Cancel only while it records); Escape never does. Releasing Alt or Windows
+  ends it as a chord (Cancel only while it records); Escape never does, except
+  as Toggle's cancel shortcut. Releasing Alt or Windows
   after a modifier-only shortcut held them is swallowed and replayed after a
   tap of unassigned VK 0xE8, so the menu bar and Start stay closed (not with
   Share shortcut). Hex marks every event it injects with `HEX_INJECTED` and its
   hook skips them, so a paste's Ctrl never presses a Ctrl-alone shortcut.
-- Windows onboarding adds a Microphone row only while Settings' microphone
-  switch (device, user, or "Let desktop apps access your microphone") is off;
-  Allow opens `ms-settings:privacy-microphone`, and setup waits for it.
+- Windows onboarding shows its permissions page, with one Microphone row,
+  only while Settings' microphone switch (device, user, or "Let desktop apps
+  access your microphone") is off; Open Settings opens
+  `ms-settings:privacy-microphone`, and setup waits for it. Linux has no
+  permissions page. The practice game on every OS follows Hex's own
+  dictation of the saved shortcut (the listener's event log on Linux and
+  Windows), and Done always skips it.
 - GUI startup must successfully call `keyboard::initialize_layout` on the OS
   main thread before settings, keyboard-using workers, or Rune start. That
   snapshot is fixed until restart; cached misses must not re-enter TIS/TSM.
@@ -648,18 +674,26 @@ CoreAudio formats, AppleScript details, or event serialization.
   300 ms discard. A 450 ms hotkey pre-roll
   protects speech onset. Capture has no automatic duration limit; release or
   an explicit stop ends it.
-- Dictation has no cancel (#786): Escape ends no capture and no job on any
-  OS, not even as a chord with a held modifier-only shortcut, and Hex never
-  takes Escape from the app for dictation. Every intentional dictation
-  finishes and pastes. Only short taps, chords, and silent captures discard;
-  Hex itself ends a capture only when its input or microphone is lost.
-  `hex dictation cancel` from an older client gets a `removed` reply.
+- Only Toggle mode has a cancel (#786, #1022): its cancel shortcut
+  (`cancel_hotkey`, Escape by default, rebindable in General under Shortcut
+  mode) discards the active recording with the cancel tone: nothing is
+  transcribed, pasted, or saved to History, and jobs already transcribing
+  always finish. Hex takes the key only while a toggled recording runs, and
+  then keeps it (repeats and release included) from the app in front; idle,
+  and always in Hold mode, it stays with every app. macOS suppresses it in
+  the session tap only while the listener arms it (`set_takes_cancel`),
+  Windows' hook only while its capture records, and X11 grabs it only for
+  the recording. A shortcuts portal holds a key for as long as Hex runs, so
+  on Wayland Hex binds nothing for it and Settings says to bind
+  `hex dictation cancel` in the desktop. `hex dictation cancel` discards
+  whatever records, in any mode. Hold mode has no cancel: Escape ends no
+  capture there, not even as a chord. Every other intentional dictation
+  finishes and pastes; only short taps, chords, and silent captures discard,
+  and Hex itself ends a capture only when its input or microphone is lost.
 - A dictation discarded for silence (level under the silence threshold, or no
-  speech the detector hears) is never silent, on every OS (#782): the error
-  tone, a short note beside the HUD ("too quiet, check your mic level"), the
-  measured level and peak against the thresholds in the log, and a "Last
-  dictation discarded" line in Settings' status until a dictation goes through
-  (`dictation::silence`).
+  speech the detector hears) is discarded quietly on every OS: no error tone,
+  no note, nothing in Settings. The log keeps the measured level and peak
+  against the thresholds.
 - When enabled, a second shortcut tap within 300 ms locks dictation. Press the
   shortcut again to finish.
 - Recording audio behavior and idle-sleep prevention begin only after the
@@ -738,13 +772,33 @@ CoreAudio formats, AppleScript details, or event serialization.
   read-only: Hex never writes, moves, or deletes anything in the cache, keeps
   its receipts in its own models folder, hashes a file in full once when it is
   chosen (against the pin or the blob name), and removing one only forgets it.
-- Onboarding shows its model list only when the scan found a compatible
-  model; otherwise the flow is unchanged. The list is one card of radio rows
-  with no buttons or file details: Hex's recommended model first and
-  selected (its exact copy on this computer is that same row), then the found
-  files. Picking a row starts it, and Continue starts the selected row. The
-  tour's own download is held while the scan runs and until a pick, and only
-  through setup. A found model is never picked for the person.
+- Hex has one onboarding, on every build and OS, stable and dev alike: the
+  first-run story (`rune_ui/onboarding_kit/live.rs`) over the tour state
+  machine (`rune_ui/onboarding.rs`, `desktop::onboarding::Flow`). No flag,
+  experiment, or build type chooses another. `Ui::new` opens it whenever
+  `Tour::start` says this run needs it: a new install, a run quit part-way
+  (resumed at its saved step), or an upgrader from 2.3.1 or earlier whose
+  setup isn't ready (#475). Run setup again (Labs) and `hex onboarding reset`
+  replay it from the start on every build. Start using Hex records completion
+  only once setup is ready. A quiet Skip shows only on the optional pages,
+  the demo and the practice: it passes over that part to the next step setup
+  still needs (permissions, then the model), else Hex is ready, and never
+  records completion. Permissions, the model step and download, and the paste
+  permission have no Skip. The one way past a model that can't be had (#894)
+  is Continue without a model, shown on the download step only once every
+  permission is ready and the download failed or stalled (30 s without
+  bytes); it records completion, and Settings › General then says no model
+  is installed, with Download and Add model file….
+- Onboarding shows its model step only when the scan found a compatible
+  model; otherwise Setting up Hex is unchanged and the recommended model
+  downloads by itself. The step is one card of radio rows with no buttons or
+  file details: Hex's recommended model first and selected (its exact copy on
+  this computer is that same row), then the found files. Picking a row starts
+  it, and Continue starts the selected row and moves on once the pick is
+  under way; a found pick shows no download page or pill. The tour's own
+  download is held while the scan runs and until a pick, and only through
+  setup. Back on the pages after the step returns to it. A found model is
+  never picked for the person.
 - The menu-bar model picker lists only downloaded, available models and remembers
   each model's last selected language. It works without a
   Settings window. Settings and the menu bar share one preparation owner; a newer
@@ -796,6 +850,14 @@ CoreAudio formats, AppleScript details, or event serialization.
   rewriting, then selected transformations. A failed stage preserves its input;
   the transformation chain is one stage, so failure discards its partial results.
   It applies to Paste, not meetings.
+- A config reaches `fetch` or `node:child_process` only after the person
+  allows its exact content hash; any file change asks again, and approval is
+  stored outside the config folder. Each transformation runs under its own
+  timeout (1 s, 30 s with host APIs, 60 s cap); when it settles or expires,
+  Hex abandons its requests and kills every process tree it started. Requests
+  and programs stay bounded (8 and 4 at once). Logs name hosts and programs
+  with status, duration, and byte counts, never text, bodies, arguments, or
+  environment values.
 - Hex never starts, probes, or searches for an OpenCode executable, and never
   starts the service: it only talks to an already running OpenCode service
   found through its registration file (`desktop/opencode_service`). Nothing touches
@@ -1193,7 +1255,8 @@ CoreAudio formats, AppleScript details, or event serialization.
   changes in its own settings arrive as ShortcutsChanged and work at once; Hex
   shows the granted trigger in Settings (row note and the Status hint) and in
   `hex status --json` (`listener.shortcuts`). On GNOME the Linux dictation
-  default is Ctrl+Alt+Space (GNOME keeps Alt+Space), Settings flags a shortcut
+  default is Ctrl+Alt+Space (GNOME keeps Alt+Space; so does KDE Plasma's
+  KRunner, #898), Settings flags a shortcut
   on a key GNOME keeps for itself, and Annotate's shortcut shows beside
   dictation's in General (#723). Enable and Disable
   (window, tray) also save `enable_on_launch`, so a disabled Hex stays disabled
@@ -1360,8 +1423,8 @@ render on lavapipe with `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
 A scene is a fixture, not native end-to-end proof; the meeting capsules and
 HUDs have no scene.
 
-The supported Linux beta host is x86_64 Arch Linux; releases build on Ubuntu
-24.04 (x64 and ARM64) for a glibc 2.39 floor. Install its
+The supported Linux beta host is x86_64 Arch Linux; releases build in a Debian 12
+image (x64 and ARM64, `scripts/build-linux-release.sh`) for a glibc 2.36 floor. Install its
 native build dependencies with:
 
 ```sh
@@ -1398,8 +1461,10 @@ target and file names and the direct-install receipt, and
 and old clients. The 2.3.1 feeds and appcast at `https://anoma.ly/hex/files`
 (and Kit's `downloads.hex.kitlangton.dev`/`.com`, which must keep redirecting
 there) stay frozen. GitHub app releases use `v<VERSION>` tags (`app-v…`
-through 2.3.1) with `--latest=false`, keeping them distinct from SDK
-releases. Never overwrite a published artifact with different bytes.
+through 2.3.1); each stable one is created as GitHub's Latest release
+(`--latest=true`, stable only), and SDK releases (`release-typescript.yml`)
+are created with `--latest=false` so they never take the badge. Nothing
+downloads through GitHub's `releases/latest` redirect. Never overwrite a published artifact with different bytes.
 `https://anoma.ly/hex` (in-repo `site/`) is the only Hex website. One
 `site/cloudflare.config.ts` defines the production Worker `hex-production-site` (anoma.ly/hex,
 bucket `hex-production-files`) and the dev Worker `hex-dev-site` (dev.anoma.ly/hex,
@@ -1431,8 +1496,9 @@ changed code. Macs on 2.3.1 or earlier (Sparkle, `com.kitlangton.hex2`) get
 one informational appcast item, `packaging/macos/legacy-appcast.xml`, that
 links to the new app; they never auto-update into it.
 There is no Swift migration: never import Swift preferences or data, adopt its
-bundle identifier, publish Rust artifacts to its S3 feed, or automatically quit,
-delete, or replace the Swift app. Prefer a website-only informational item in
+bundle identifier, publish Rust artifacts to its S3 feed, or automatically
+delete or replace the Swift app. The one automatic step: once setup is ready,
+Hex asks a running old Hex (2.3.1 or Swift) to quit, leaving it installed. Prefer a website-only informational item in
 the legacy Sparkle feed, with no enclosure, pointing to the new app for manual
 installation and fresh setup. Publish it only after the new artifact is live. See
 `docs/plans/swift-app-handoff.md`. The Rust data root remains unchanged, but the
@@ -1457,19 +1523,29 @@ hooks or persist a second launch-at-login flag.
 Onboarding gates every stable release. Before any stable release, run
 `scripts/check-onboarding.sh` on the release candidate commit and include its
 result, with the scene images it writes, in the go/no-go given to Dax. It
-renders every onboarding scene (fresh install, permissions, the model step with
-nothing found, with found models, with the recommended model already present,
-download in progress, practice, done) in both appearances against the approved
-goldens, and walks a first run through the real tour in a clean temporary data
-folder until a model is downloaded and the tour reaches Done. Any unexpected
+renders every onboarding scene (Setting up Hex with nothing found, a stopped
+download, the model step with found models, with the recommended model already
+present, ours downloading, and Back to it, the demo, the macOS permissions and
+Windows' microphone switch, Almost ready, the practice game, Hex is ready) in
+both appearances against the approved goldens, and walks a first run through
+the real onboarding in a clean temporary data folder until a model is
+downloaded and it reaches Hex is ready. Any unexpected
 visual or flow change blocks the release; an intentional change refreshes the
 goldens in its own PR. It runs on Linux, like every golden; the macOS and
 Windows scenes are fixtures of the same window and render there too, but
 nothing renders on a real Mac or Windows GPU. Release's `onboarding` job runs
-the same script and requires the candidate's Check Linux, Check macOS, and
-Check Windows to have passed (`gh workflow run <check> --ref production`
-for a commit their paths skip); a stable run publishes nothing until it
-passes.
+the same script, and Release's check and stable channels run the full Check
+Linux, Check macOS, and Check Windows suites on the candidate commit; a stable
+run publishes nothing until all four pass.
+
+CI is minimal (Dax): a pull request runs only `hex-agent-policy` and Compile
+(`compile.yml`: `cargo clippy --bin hex` on Linux, macOS, and Windows x64,
+for code changes). Merge as soon as it compiles locally, without waiting for
+CI; the CI failure pipeline fixes breakages on `dev` afterwards. A push to
+`dev` runs no checks: its Release dev build compiles every OS, and Test
+builds run beside it. The full suites (tests, goldens, Nix, Windows ARM64)
+run only in Release's check and stable channels and by hand
+(`gh workflow run check-<os>.yml`).
 
 Every platform is built, signed, and published by one run of
 `.github/workflows/release.yml` ("Release"; see `docs/releasing.md`).
@@ -1534,7 +1610,8 @@ are built around the signed bytes, and `sign-windows-installers` signs them
 builds never hold signing credentials; until the Azure values exist in
 `release`, dev and check runs have no Windows targets. See `docs/windows-signing.md`.
 
-Run `scripts/build-linux.sh` on x86_64 or aarch64 Linux (then
+Run `scripts/build-linux-release.sh` (Docker; `scripts/build-linux.sh` for a
+build against the host's glibc) on x86_64 or aarch64 Linux (then
 `scripts/package-linux.sh` for the `.deb` and `.rpm`) and `scripts/build-windows.sh`
 from Git Bash once per architecture with `HEX_WINDOWS_ARCH=x86_64` (the
 default; Vulkan SDK required) or `aarch64` (clang-cl and Ninja; best on an

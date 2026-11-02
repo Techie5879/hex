@@ -30,6 +30,8 @@ pub(super) struct FoundState {
     /// The onboarding list's row the person picked, which started; until
     /// then the recommended model's row is selected.
     pub(super) picked: Option<usize>,
+    /// The recommended model when the list first showed (`found_choice`).
+    pub(super) recommended: Option<TranscriptionSelection>,
 }
 
 impl FoundState {
@@ -208,8 +210,9 @@ pub(super) fn section(ui: &Ui, p: super::controls::Paint) -> Option<rune::El> {
     let mut section = col().key("found-models").gap(8.0).child(
         text(crate::desktop::i18n::tr("Found on this computer"))
             .key("found-heading")
-            .font(p.k.ty.body_medium)
-            .color(p.text()),
+            .font(p.k.ty.small_medium)
+            .color(p.faint())
+            .pt(4.0),
     );
     for (index, model) in found {
         let detail = format!(
@@ -332,7 +335,7 @@ pub(super) fn fixture_catalog(model: TranscriptionModelId) -> Found {
     }
 }
 
-/// Onboarding's model list over [`fixture`]: with the recommended model's
+/// Onboarding's model step over [`fixture`]: with the recommended model's
 /// exact file too, or with the recommended model picked and downloading.
 fn onboarding_scene(ui: &mut Ui, recommended_found: bool, downloading: bool) {
     *ui = super::portal_fixture();
@@ -347,6 +350,7 @@ fn onboarding_scene(ui: &mut Ui, recommended_found: bool, downloading: bool) {
         super::onboarding::set_downloaded(ui, 42);
         super::onboarding::poll(ui);
     }
+    super::onboarding_kit::live::fixture(ui, super::Page::Download);
 }
 
 /// The list as it opens.
@@ -362,4 +366,12 @@ pub(super) fn loading(ui: &mut Ui) {
 /// The recommended model's exact file found too.
 pub(super) fn present(ui: &mut Ui) {
     onboarding_scene(ui, true, false);
+}
+
+/// Continued from the list with ours downloading: the next page, with Back
+/// to the list.
+pub(super) fn chosen(ui: &mut Ui) {
+    onboarding_scene(ui, false, true);
+    super::onboarding_kit::live::continue_model(ui);
+    super::onboarding_kit::live::fixture_resume(ui, super::Page::Demo);
 }

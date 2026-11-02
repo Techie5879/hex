@@ -29,13 +29,14 @@ class MaintenanceJobService : JobService() {
 
     companion object {
         private const val JOB_ID = 41
+        private const val SYNC_INTERVAL_MS = 60 * 60 * 1000L
 
         fun schedule(context: Context) {
             val scheduler = context.getSystemService(JobScheduler::class.java)
-            if (scheduler.getPendingJob(JOB_ID) != null) return
+            if (scheduler.getPendingJob(JOB_ID)?.intervalMillis == SYNC_INTERVAL_MS) return
             scheduler.schedule(
                 JobInfo.Builder(JOB_ID, ComponentName(context, MaintenanceJobService::class.java))
-                    .setPeriodic(6 * 60 * 60 * 1000L)
+                    .setPeriodic(SYNC_INTERVAL_MS)
                     .setRequiresBatteryNotLow(true)
                     .build(),
             )

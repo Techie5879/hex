@@ -27,7 +27,9 @@ use rune::{
     Align, Anim, Cursor, Cx, Drag, El, OverlayHandle, OverlaySpec, Phase, ScreenEdge, Spring, Tx,
     col, row, text,
 };
-use rune_kit::{Badge, BadgeVariant, Button, ButtonVariant};
+use rune_kit::{
+    Badge, BadgeVariant, Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant,
+};
 
 use super::controls::{Paint, PushSize, pulsing_dot, status_dot};
 use crate::app_settings::{MeetingIndicatorCorner, MeetingPolicy, MeetingProviderChoice};
@@ -48,6 +50,9 @@ const ACTIONS_INSET: f32 = 8.0;
 const PILL_RADIUS: f32 = 999.0;
 /// The reminder: the meeting's title beside up to three buttons.
 const REMINDER_PANEL_WIDTH: f32 = 520.0;
+/// "Microsoft Teams left the call" beside Keep recording and Stop &
+/// transcribe (#835).
+const CALL_ENDED_PANEL_WIDTH: f32 = 520.0;
 /// How often an open reminder recounts "Starts in N min".
 const REMINDER_TICK: Duration = Duration::from_secs(5);
 /// The recording capsule's window, as wide as the open pill.
@@ -83,8 +88,11 @@ enum Kind {
         automatic: bool,
     },
     Offer(MeetingCandidate),
+    /// `auto_stop` when the recording stops on its own after a grace (Labs
+    /// › Stop when the call ends); Keep recording then cancels that.
     CallEnded {
         app: String,
+        auto_stop: bool,
     },
     Ready(Box<MeetingManifest>),
     /// An automatic recording while the recording indicator is off.
@@ -504,9 +512,15 @@ impl MeetingCapsules {
                     }
                 });
             }
-            ControllerEvent::CallEnded { app } => {
+            ControllerEvent::CallEnded { app, auto_stop } => {
                 self.close_recording();
-                self.show_panel(Kind::CallEnded { app: app.clone() }, None);
+                self.show_panel(
+                    Kind::CallEnded {
+                        app: app.clone(),
+                        auto_stop: *auto_stop,
+                    },
+                    None,
+                );
             }
             ControllerEvent::Finished(manifest) => {
                 self.close_recording();
@@ -532,14 +546,8 @@ impl MeetingCapsules {
     fn show_panel(&self, kind: Kind, timeout: Option<Duration>) {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let reminder = matches!(kind, Kind::Reminder { .. });
-        self.panel.resize((
-            if reminder {
-                REMINDER_PANEL_WIDTH
-            } else {
-                MEETING_PANEL_WIDTH
-            },
-            MEETING_PANEL_HEIGHT,
-        ));
+        self.panel
+            .resize((panel_width(&kind), MEETING_PANEL_HEIGHT));
         self.panel.update(move |capsule, tx| {
             capsule.kind = Some(kind);
             capsule.more_open = false;
@@ -664,6 +672,20 @@ fn button(
         .key(key)
 }
 
+static CLOSE: &rune::Icon = &rune_theme_opencode::icons::CLOSE;
+
+/// The ✕ that closes a capsule whose actions have no way to. It only hides
+/// the capsule: nothing is sent to the controller (#996).
+fn dismiss_button(p: Paint) -> El {
+    IconButton::new(CLOSE)
+        .variant(IconButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .label(tr("Close"))
+        .on_press(|c: &mut Capsule| c.close())
+        .build(p.k)
+        .key("dismiss")
+}
+
 fn view(capsule: &Capsule, cx: &mut Cx<Capsule>) -> El {
     view_body(capsule, cx).hover_motion_within(Anim::INSTANT, Anim::INSTANT)
 }
@@ -686,11 +708,16 @@ fn view_body(capsule: &Capsule, cx: &mut Cx<Capsule>) -> El {
             p.danger(),
             tr("Recording automatically").to_owned(),
             title.clone(),
-            vec![button(p, "stop", tr("Stop"), true, |c| {
-                if c.send(ControllerCommand::Stop) {
-                    c.close();
-                }
-            })],
+            // Dismissing leaves the recording going; the menu bar still
+            // shows it.
+            vec![
+                button(p, "stop", tr("Stop"), true, |c| {
+                    if c.send(ControllerCommand::Stop) {
+                        c.close();
+                    }
+                }),
+                dismiss_button(p),
+            ],
         ),
         Kind::Reminder { meeting, automatic } => {
             reminder(p, meeting, *automatic, crate::calendar::wall_clock_ms())
@@ -729,12 +756,26 @@ fn view_body(capsule: &Capsule, cx: &mut Cx<Capsule>) -> El {
             }));
             (p.muted(), candidate.offer_title(), String::new(), actions)
         }
-        Kind::CallEnded { app } => (
+        Kind::CallEnded { app, auto_stop } => (
             p.danger(),
             tr_fill("{} left the call", app),
-            tr("Hex is still recording.").to_owned(),
+            if *auto_stop {
+                tr("Hex stops recording in 30 s unless you keep recording.")
+            } else {
+                tr("Hex is still recording.")
+            }
+            .to_owned(),
             vec![
                 button(p, "keep-recording", tr("Keep recording"), false, |c| {
+                    if matches!(
+                        c.kind,
+                        Some(Kind::CallEnded {
+                            auto_stop: true,
+                            ..
+                        })
+                    ) {
+                        c.send(ControllerCommand::KeepRecording);
+                    }
                     c.close();
                 }),
                 button(p, "stop-meeting", tr("Stop & transcribe"), true, |c| {
@@ -747,6 +788,16 @@ fn view_body(capsule: &Capsule, cx: &mut Cx<Capsule>) -> El {
         Kind::Ready(manifest) => ready(p, manifest, capsule.copied),
     };
     pill(p, dot, &title, &subtitle, actions)
+}
+
+/// The panel capsule's width for `kind`, room for its title beside its
+/// buttons.
+fn panel_width(kind: &Kind) -> f32 {
+    match kind {
+        Kind::Reminder { .. } => REMINDER_PANEL_WIDTH,
+        Kind::CallEnded { .. } => CALL_ENDED_PANEL_WIDTH,
+        _ => MEETING_PANEL_WIDTH,
+    }
 }
 
 /// "Starts in 1 min", "Starting now", or "Started 2 min ago".
@@ -941,6 +992,7 @@ fn ready(
             c.close();
         }));
     }
+    actions.push(dismiss_button(p));
     (p.success(), title, subtitle, actions)
 }
 
@@ -1103,6 +1155,7 @@ mod tests {
     const MENU: (f32, f32) = (MEETING_MENU_WIDTH, MEETING_PANEL_HEIGHT);
     const RECORDING: (f32, f32) = (RECORDING_PANEL_WIDTH, RECORDING_PANEL_HEIGHT);
     const REMINDER: (f32, f32) = (REMINDER_PANEL_WIDTH, MEETING_PANEL_HEIGHT);
+    const CALL_ENDED: (f32, f32) = (CALL_ENDED_PANEL_WIDTH, MEETING_PANEL_HEIGHT);
 
     /// "Design sync" a minute from now, with a Zoom link or none.
     fn design_sync(link: bool) -> CalendarMeeting {
@@ -1580,6 +1633,103 @@ mod tests {
         );
     }
 
+    fn call_ended() -> Kind {
+        Kind::CallEnded {
+            app: MeetingSource::Teams.label().into(),
+            auto_stop: false,
+        }
+    }
+
+    fn ready_transcript() -> Kind {
+        Kind::Ready(Box::new(
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "id": "ready-snap",
+                "title": "Design sync",
+                "status": "complete",
+                "created_at_ms": 1_760_000_000_000_u64,
+                "ended_at_ms": null,
+                "duration_ms": 1_000,
+                "system": {"file": "system.wav", "samples": 0, "dropped_packets": 0},
+                "microphone": {"file": "microphone.wav", "samples": 0, "dropped_packets": 0},
+                "error": null,
+                "export_path": "/Users/kit/Documents/Hex Meetings/Design sync.md"
+            }))
+            .unwrap(),
+        ))
+    }
+
+    fn auto_started() -> Kind {
+        Kind::AutoStarted {
+            title: "Slack Huddle call — 2:30 PM".into(),
+        }
+    }
+
+    #[test]
+    fn dismissing_a_ready_transcript_only_closes_it() {
+        let (mut rt, commands, _) = runtime(ready_transcript(), false, true, PANEL);
+        assert!(rt.find("copy-transcript").is_some());
+        assert!(rt.find("reveal-transcript").is_some());
+        tap(&mut rt, "dismiss");
+        assert!(commands.try_recv().is_err());
+        assert!(rt.state.kind.is_none());
+    }
+
+    #[test]
+    fn dismissing_an_automatic_recording_never_stops_it() {
+        let (mut rt, commands, _) = runtime(auto_started(), false, true, PANEL);
+        tap(&mut rt, "dismiss");
+        assert!(commands.try_recv().is_err());
+        assert!(rt.state.kind.is_none());
+    }
+
+    #[test]
+    fn an_automatic_stop_says_so_and_keep_recording_cancels_it() {
+        let auto = Kind::CallEnded {
+            app: MeetingSource::WhatsApp.label().into(),
+            auto_stop: true,
+        };
+        let (mut rt, commands, _) = runtime(auto, false, true, CALL_ENDED);
+        assert!(
+            texts(&rt)
+                .contains(&"Hex stops recording in 30 s unless you keep recording.".to_string())
+        );
+        tap(&mut rt, "keep-recording");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ControllerCommand::KeepRecording)
+        ));
+        assert!(rt.state.kind.is_none());
+
+        // Without the lab, Keep recording only closes the capsule.
+        let (mut rt, commands, _) = runtime(call_ended(), false, true, CALL_ENDED);
+        assert!(texts(&rt).contains(&"Hex is still recording.".to_string()));
+        tap(&mut rt, "keep-recording");
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_call_ended_title_fits_beside_its_buttons() {
+        let kind = call_ended();
+        assert_eq!(panel_width(&kind), CALL_ENDED.0);
+        let (mut rt, _, _) = runtime(kind, false, false, CALL_ENDED);
+        rt.settle_all();
+        rt.frame(0.0);
+        let title = rt
+            .elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some("title"))
+            .unwrap();
+        assert_eq!(title.text.as_deref(), Some("Microsoft Teams left the call"));
+        let style = rune_theme_opencode::kit(false).ty.ui_medium;
+        let (width, _) = rt.text.measure("Microsoft Teams left the call", style, 2.0);
+        assert!(
+            width <= title.rect[2] + 0.5,
+            "title needs {width} pt, has {}",
+            title.rect[2]
+        );
+    }
+
     /// No `--snap` scene draws an overlay, so this renders the capsules to
     /// PNGs in `HEX_CAPSULE_SNAPS` for review; without it, or a GPU, it skips.
     #[test]
@@ -1606,6 +1756,7 @@ mod tests {
             ("reminder", reminder(true, false), false, REMINDER),
             ("reminder-no-link", reminder(false, false), false, REMINDER),
             ("reminder-automatic", reminder(true, true), false, REMINDER),
+            ("call-ended", call_ended(), false, CALL_ENDED),
             (
                 "recording-automatic",
                 Kind::Recording {
@@ -1617,14 +1768,8 @@ mod tests {
                 false,
                 RECORDING,
             ),
-            (
-                "auto-started",
-                Kind::AutoStarted {
-                    title: "Slack Huddle call — 2:30 PM".into(),
-                },
-                false,
-                PANEL,
-            ),
+            ("auto-started", auto_started(), false, PANEL),
+            ("ready", ready_transcript(), false, PANEL),
         ];
         type Setup = fn(&mut Capsule);
         let nothing: Setup = |_| {};
@@ -1695,27 +1840,87 @@ mod tests {
             for dark in [false, true] {
                 let (mut rt, _, _) = runtime(kind.clone(), more_open, dark, size);
                 rt.update(move |capsule, _| setup(capsule));
-                rt.settle_all();
-                rt.frame(0.0);
-                let (w, h) = ((size.0 * 2.0) as u32, (size.1 * 2.0) as u32);
-                let mut renderer = crate::rune_ui::offscreen::renderer(&gpu.device);
-                let target = crate::rune_ui::offscreen::target(&gpu.device, w, h);
-                renderer.prepare(
-                    &gpu.device,
-                    &gpu.queue,
-                    &mut rt.text.atlas,
-                    &rt.instances,
-                    (w, h),
-                );
-                let mut encoder = gpu.device.create_command_encoder(&Default::default());
-                renderer.draw(&mut encoder, &target.view, rt.clear_color());
-                target.copy(&mut encoder);
-                gpu.queue.submit([encoder.finish()]);
-                let pixels = target.read(&gpu.device);
+                let (w, h, pixels) = render(&gpu, &mut rt, size);
                 let theme = if dark { "dark" } else { "light" };
                 let path = folder.join(format!("capsule-{name}-{theme}.png"));
                 rune::render::write_png(&path, w, h, &pixels).unwrap();
             }
+        }
+    }
+
+    fn render(
+        gpu: &rune::render::Gpu,
+        rt: &mut Runtime<Capsule>,
+        size: (f32, f32),
+    ) -> (u32, u32, Vec<u8>) {
+        rt.settle_all();
+        rt.frame(0.0);
+        let (w, h) = ((size.0 * 2.0) as u32, (size.1 * 2.0) as u32);
+        let mut renderer = crate::rune_ui::offscreen::renderer(&gpu.device);
+        let target = crate::rune_ui::offscreen::target(&gpu.device, w, h);
+        renderer.prepare(
+            &gpu.device,
+            &gpu.queue,
+            &mut rt.text.atlas,
+            &rt.instances,
+            (w, h),
+        );
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        renderer.draw(&mut encoder, &target.view, rt.clear_color());
+        target.copy(&mut encoder);
+        gpu.queue.submit([encoder.finish()]);
+        (w, h, target.read(&gpu.device))
+    }
+
+    /// The call-ended, ready, and automatic-recording capsules against
+    /// `tests/golden/meeting-capsule-*.png`; `HEX_UPDATE_GOLDENS=1` rewrites
+    /// them. Without a GPU adapter it skips. Like every golden it is checked
+    /// on Linux only: glyph coverage on Metal differs past the tolerance.
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "goldens are checked on Linux")]
+    fn panel_goldens() {
+        let Ok(gpu) = rune::render::Gpu::try_new(rune::render::Gpu::instance(), None) else {
+            eprintln!("skipping meeting capsule golden: no GPU adapter");
+            return;
+        };
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden");
+        let states = [
+            ("call-ended", call_ended(), CALL_ENDED),
+            ("ready", ready_transcript(), PANEL),
+            ("auto-started", auto_started(), PANEL),
+        ];
+        for ((name, kind, size), dark) in states
+            .into_iter()
+            .flat_map(|state| [false, true].map(|dark| (state.clone(), dark)))
+        {
+            let theme = if dark { "dark" } else { "light" };
+            let path = folder.join(format!("meeting-capsule-{name}-{theme}.png"));
+            let (mut rt, _, _) = runtime(kind, false, dark, size);
+            let (w, h, pixels) = render(&gpu, &mut rt, size);
+            if std::env::var_os("HEX_UPDATE_GOLDENS").is_some() {
+                rune::render::write_png(&path, w, h, &pixels).unwrap();
+                continue;
+            }
+            let decoder =
+                png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+            let mut reader = decoder.read_info().unwrap();
+            let mut golden = vec![0; reader.output_buffer_size().unwrap()];
+            let info = reader.next_frame(&mut golden).unwrap();
+            assert_eq!(
+                (info.width, info.height),
+                (w, h),
+                "{name}-{theme} size changed"
+            );
+            // GPUs differ in the last bit of blending and glyph coverage.
+            let differing = pixels
+                .chunks(4)
+                .zip(golden.chunks(4))
+                .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 12))
+                .count();
+            assert!(
+                differing <= (w * h) as usize / 500,
+                "{name}-{theme}: {differing} pixels differ"
+            );
         }
     }
 }

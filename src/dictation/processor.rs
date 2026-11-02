@@ -15,7 +15,7 @@ mod generation;
 mod rewrite;
 use generation::*;
 
-const PROTOCOL_PROMPT: &str = "You transform dictated speech into replacement text. Return only the text that should be pasted. Do not add an explanation, label, alternative, or Markdown fence.";
+const PROTOCOL_PROMPT: &str = "You transform dictated speech into replacement text. Return only the text that should be pasted. Do not add an explanation, label, alternative, or Markdown fence.\n\nNumbers: keep every number the speaker said. Never drop, merge, reorder, round, or reinterpret a number, and never add thousands separators or other formatting to a number that the transcript already writes in digits.";
 const CATALOG_DEADLINE: Duration = Duration::from_secs(10);
 /// Newest one-shot generation route first; older OpenCode V2 builds only serve the later name.
 const GENERATE_ENDPOINTS: [&str; 2] = ["/api/experimental/generate", "/api/generate"];
@@ -34,6 +34,8 @@ pub struct Profile {
     min_chars: usize,
     replacements: ReplacementSet,
     transformations: Vec<String>,
+    /// The mode's own vocabulary, heard and spelled ahead of the shared list.
+    vocabulary: Vec<VocabularyEntry>,
 }
 
 impl Profile {
@@ -49,12 +51,24 @@ impl Profile {
             min_chars: 0,
             replacements: ReplacementSet::default(),
             transformations: Vec::new(),
+            vocabulary: Vec::new(),
         }
+    }
+
+    pub(crate) fn vocabulary(mut self, vocabulary: Vec<VocabularyEntry>) -> Self {
+        self.vocabulary = vocabulary;
+        self
     }
 
     pub fn ai_enabled(mut self, enabled: bool) -> Self {
         self.ai_enabled = enabled;
         self
+    }
+
+    /// Whether this profile runs the OpenCode rewrite.
+    #[cfg(test)]
+    pub(crate) fn rewrites(&self) -> bool {
+        self.ai_enabled
     }
 
     pub(crate) fn replacements(mut self, replacements: ReplacementSet) -> Self {
@@ -101,6 +115,7 @@ impl Profile {
             mode.transformations.clone(),
             &mode.post_processing,
         )
+        .vocabulary(mode.vocabulary.clone())
     }
 
     /// Builds a runtime profile from persisted settings. A malformed model key
@@ -111,8 +126,32 @@ impl Profile {
         transformations: Vec<String>,
         settings: &PostProcessingSettings,
     ) -> Self {
+        Self::configured_under(
+            name,
+            replacements,
+            transformations,
+            settings,
+            crate::policy::Policy::current(),
+        )
+    }
+
+    /// [`Self::configured`] under `policy`: a managed lock drops the
+    /// OpenCode rewrite or every transformation, leaving the mode saved as is.
+    fn configured_under(
+        name: impl Into<String>,
+        replacements: ReplacementSet,
+        transformations: Vec<String>,
+        settings: &PostProcessingSettings,
+        policy: crate::policy::Policy,
+    ) -> Self {
+        use crate::policy::Lock;
+        let transformations = if policy.locks(Lock::Transforms) {
+            Vec::new()
+        } else {
+            transformations
+        };
         let mut profile = Self::new(name, &settings.prompt)
-            .ai_enabled(settings.enabled)
+            .ai_enabled(settings.enabled && !policy.locks(Lock::OpenCodeProcessing))
             .replacements(replacements)
             .transformations(transformations);
         if let Some((provider, model)) = settings
@@ -223,6 +262,9 @@ struct ContextualProfile {
 pub struct Profiles {
     default: Profile,
     contextual: Vec<ContextualProfile>,
+    /// Global's corrections, run before the selected mode's own on every
+    /// dictation, as the Windows and Linux listeners do.
+    global: ReplacementSet,
 }
 
 impl Profiles {
@@ -230,7 +272,13 @@ impl Profiles {
         Self {
             default,
             contextual: Vec::new(),
+            global: ReplacementSet::default(),
         }
+    }
+
+    pub(crate) fn global_replacements(mut self, replacements: ReplacementSet) -> Self {
+        self.global = replacements;
+        self
     }
 
     pub fn application(self, application: impl Into<String>, profile: Profile) -> Self {
@@ -270,6 +318,11 @@ impl Profiles {
         selected.map_or(&self.default, |selected| &selected.profile)
     }
 
+    /// The selected mode's own vocabulary.
+    pub(crate) fn vocabulary_for(&self, context: &ContextSnapshot) -> Vec<VocabularyEntry> {
+        self.select(context).vocabulary.clone()
+    }
+
     pub fn processes(&self, context: &ContextSnapshot) -> bool {
         let profile = self.select(context);
         crate::labs::local_polish() || profile.ai_enabled || !profile.transformations.is_empty()
@@ -307,7 +360,9 @@ impl Profiles {
         } else {
             transcript
         };
-        let corrected = profile.replacements.replace(transcript);
+        let corrected = profile
+            .replacements
+            .replace(&self.global.replace(transcript));
         profile.rewrite(
             corrected,
             crate::labs::local_polish(),
@@ -318,7 +373,10 @@ impl Profiles {
                     profile,
                     input,
                     context,
-                    &crate::dictation::vocabulary::entries(),
+                    &crate::dictation::vocabulary::merged(
+                        &profile.vocabulary,
+                        &crate::dictation::vocabulary::entries(),
+                    ),
                 );
                 generate_cancellable_with_fallback(
                     &prompt,
@@ -332,6 +390,64 @@ impl Profiles {
             },
         )
     }
+}
+
+/// Whether a transcript says nothing but numbers: digits or English number
+/// words, with punctuation between them.
+fn numbers_only(transcript: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+        "thirty",
+        "forty",
+        "fifty",
+        "sixty",
+        "seventy",
+        "eighty",
+        "ninety",
+        "hundred",
+        "thousand",
+        "million",
+        "billion",
+    ];
+    /// Words that join numbers but are not numbers themselves.
+    const JOINERS: &[&str] = &["and", "point", "minus", "negative"];
+    let mut any_number = false;
+    for token in transcript.split(|c: char| c.is_whitespace() || c == '-') {
+        let word = token.trim_matches(|c: char| !c.is_alphanumeric());
+        if word.is_empty() {
+            continue;
+        }
+        if word
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+            || WORDS.iter().any(|w| word.eq_ignore_ascii_case(w))
+        {
+            any_number = true;
+        } else if !JOINERS.iter().any(|w| word.eq_ignore_ascii_case(w)) {
+            return false;
+        }
+    }
+    any_number
 }
 
 /// One generation from OpenCode's default ranked models, for work outside
@@ -512,9 +628,14 @@ fn ranked_candidates_for(service: &Service) -> Vec<Model> {
 
 /// The running service's model catalog. Reads OpenCode's registration and
 /// talks loopback HTTP; never starts anything. Call off the UI thread.
+/// `None` when OpenCode isn't running; an obsolete OpenCode is an error that
+/// says to update it.
 pub fn load_model_catalog() -> Result<Option<ModelCatalog>> {
-    let Some(service) = crate::desktop::opencode_service::find() else {
-        return Ok(None);
+    use crate::desktop::opencode_service::Missing;
+    let service = match crate::desktop::opencode_service::find() {
+        Ok(service) => service,
+        Err(Missing::NotRunning) => return Ok(None),
+        Err(missing) => return Err(eyre!(missing.message())),
     };
     let models: ModelsResponse = opencode_api(&service, "/api/model")?;
     let default: DefaultModelResponse = opencode_api(&service, "/api/model/default")?;
@@ -673,6 +794,33 @@ fn prompt(
 mod tests {
     use super::*;
     use url::Url;
+
+    #[test]
+    fn managed_locks_drop_the_rewrite_and_transformations() {
+        use crate::policy::{Lock, Policy};
+        let settings = PostProcessingSettings {
+            enabled: true,
+            ..PostProcessingSettings::default()
+        };
+        let build = |policy| {
+            Profile::configured_under(
+                "Mode",
+                ReplacementSet::default(),
+                vec!["lowercase".into()],
+                &settings,
+                policy,
+            )
+        };
+        let open = build(Policy::default());
+        assert!(open.rewrites());
+        assert_eq!(open.transformations, ["lowercase"]);
+        let rewrite = build(Policy::default().with(Lock::OpenCodeProcessing));
+        assert!(!rewrite.rewrites());
+        assert_eq!(rewrite.transformations, ["lowercase"]);
+        let transforms = build(Policy::default().with(Lock::Transforms));
+        assert!(transforms.rewrites());
+        assert!(transforms.transformations.is_empty());
+    }
 
     fn context(application: &str, url: Option<&str>) -> ContextSnapshot {
         ContextSnapshot {
@@ -935,6 +1083,35 @@ mod tests {
 
         assert_eq!(processed.text, "Use OpenCode.");
         assert_eq!(processed.transformations, ["lowercase"]);
+        assert!(processed.observation.is_none());
+    }
+
+    #[test]
+    fn numbers_only_transcripts_skip_the_rewrite() {
+        for numbers in [
+            "One, two, three, four, five, six, seven, eight, nine, ten.",
+            "1355",
+            "Twenty-one point five.",
+            "one hundred and forty two",
+        ] {
+            assert!(numbers_only(numbers), "{numbers}");
+        }
+        for speech in [
+            "",
+            "And.",
+            "Point one, the dataset has 1355 evaluation windows.",
+            "Call me at five.",
+        ] {
+            assert!(!numbers_only(speech), "{speech}");
+        }
+
+        let profiles = Profiles::new(Profile::new("default", "Rewrite freely.").ai_enabled(true));
+        let processed = profiles.process_cancellable(
+            "one two three four five",
+            &context("Zed", None),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(processed.text, "one two three four five");
         assert!(processed.observation.is_none());
     }
 

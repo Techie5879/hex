@@ -28,14 +28,48 @@ Picker header -> "Add model file…" -> native dialog (GGUF, All files)   // set
 │   no benchmark; Use prepares it like a catalog model (verifies Hex's copy
 │   against its receipt instead of downloading)
 ├── Remove -> Hex's copy, receipt, and manifest only; not the active model
-├── Changed -> "Check again" rehashes the copy: the recorded SHA-256 again ->
-│   new receipt, ready; else it stays changed. Missing or changed -> "Import
-│   again…": the same file replaces the copy and keeps the import's name
+├── Changed (a copy replaced by a link or hard link to the same file reads as
+│   changed: its file ID and mtime moved) -> "Check again" rehashes the file:
+│   the recorded SHA-256 again -> new receipt, ready; else it stays changed.
+│   Missing or changed -> "Import again…": the same file replaces the copy and
+│   keeps the import's name
+├── The selected import missing or changed -> its card is not In use and
+│   shows only Check again / Import again… (no Rename or Remove); a check or
+│   import that succeeds asks for it again (ChooseModel), so the listener
+│   leaves the fallback for it
 └── Saved import missing or changed (size, mtime, or file ID) -> the choice
     stays saved; the listener runs a downloaded fallback (the system language's
     recommendation if downloaded, else the first downloaded catalog model;
-    custom_models::runnable); General's model row says so; the card warns
+    custom_models::runnable); General's model row names the fallback and says
+    to check it again in the picker (not "can't listen until downloaded",
+    while the fallback is downloaded); the card warns
 ```
+
+With Labs › Model in use first on, an import in use when the picker opens
+leads Every model, and "Your model files" shows above the language's group
+([labs.md](labs.md)).
+
+## Use A Model File Where It Is (Labs)
+
+```ts
+Labs › Use model files where they are on (labs.model_in_place, off by default)  // labs.model-in-place
+Picker header -> "Use model file where it is…" beside "Add model file…" -> the same dialog
+├── Gate: the button shows only while the toggle is on, and the add starts only
+│   if it is still on when the dialog answers (model_import::in_place_on)
+├── custom_models::add_in_place on a worker: the import's header check, one full
+│   SHA-256, receipt and manifest (with the file's path, no Hugging Face origin)
+│   in models/custom/; nothing copied, nothing written near the file
+├── The same file imported by copy before -> same ID, keeps its name; Hex's
+│   copy is removed
+├── Card -> "Used where it is" · family · languages · the file's name; Use
+│   loads it from its path; later uses rehash only when size, mtime, or file ID
+│   change, and Check again accepts it when the contents still match
+├── Another account changes or removes the file -> Changed or Missing, as above
+└── Forget -> Hex's receipt and record only; the file stays
+```
+
+Off, the picker has no such button and Hex copies every added file as before.
+Shared folders and catalog models from a shared folder are not built.
 
 The local digest identifies the file Hex copied; it is not a publisher
 checksum. The selection, recent models, and keyboard-language mappings keep an
@@ -83,10 +117,11 @@ API's `/models` and the SDK's `ModelInfo.source` carry the same field.
 ## Onboarding Choice
 
 ```ts
-Onboarding opens -> scan; the tour's own download waits until it answers  // setup.found-choice
-├── Nothing compatible found -> today's flow, unchanged: the recommended model downloads
-└── Something found -> "Choose a speech model": one card of radio rows in place
-    of the model row (below the permission rows on macOS), no buttons inside
+Onboarding opens -> scan; its own download waits until it answers  // setup.found-choice
+├── Nothing compatible found -> Setting up Hex, unchanged: the recommended
+│   model downloads by itself, and the model step never shows
+└── Something found -> the first run's model step in place of Setting up Hex:
+    "Choose a speech model", one card of radio rows, no buttons inside
     ├── Hex's recommended model first, selected, [Recommended] -> "731 MB
     │   download", or "On this computer" when its exact file (same SHA-256) is
     │   in the cache (one row, never two)
@@ -96,10 +131,13 @@ Onboarding opens -> scan; the tour's own download waits until it answers  // set
     ├── Picking a row starts it: ours downloads ("Downloading… 42%" on the row)
     │   or, already here, is checked in place; a found file is used where it
     │   is ("Checking…"). A later pick supersedes one still preparing
-    ├── Continue with no pick starts the selected row (the recommended one),
-    │   then works as today: it waits for the model where setup needs it
-    │   (Linux, Windows) and moves on while it downloads where it doesn't
-    └── The held download is released once the tour passes setup, so a tour
+    ├── Continue starts the selected row if none was picked, then the story
+    │   moves on once the pick is under way: ours with its download pill on
+    │   top, a found one with no download page or pill at all
+    ├── A pick that fails asks again on the list
+    ├── Back on the pages after it returns to the list to change the pick,
+    │   even with the model ready
+    └── The held download is released once the tour passes setup, so a run
         that skips the step still gets the recommended model
 ```
 
@@ -117,10 +155,15 @@ without symlinks, and the GPU memory warning on a small GPU.
 
 Checks: `transcription::found_models::tests` (scan, cache, catalog match,
 in-place use and forgetting, the full check refusing a mismatched file),
-`transcription::gguf_header::tests`, `transcription::custom_models::tests`,
+`transcription::gguf_header::tests`, `transcription::custom_models::tests`
+(including `a_relinked_copy_reads_as_changed_and_check_again_accepts_only_the_same_contents`
+and `a_file_added_in_place_is_recorded_by_path_copied_nowhere_and_forgetting_leaves_it`),
 `desktop::onboarding::tests::a_held_download_waits_for_the_person`,
+`a_found_model_moves_on_without_a_download_and_back_returns_to_it`,
+`the_onboarding_model_list_starts_the_row_picked_or_the_recommended_one`,
 `labs::tests::graduated_features_answer_by_name`, and the goldens
 `rune-picker-custom-models-light`, `rune-picker-found-light`, and
 `rune-onboarding-model-found-light`,
-`rune-onboarding-model-found-downloading-light`, and
-`rune-onboarding-model-found-recommended-light`.
+`rune-onboarding-model-found-downloading-light`,
+`rune-onboarding-model-found-recommended-light`, and
+`rune-onboarding-model-found-back-light`.

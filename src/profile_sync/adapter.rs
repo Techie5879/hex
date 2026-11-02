@@ -370,3 +370,99 @@ mod tests {
         assert_eq!(vocabulary_changes(&wanted, &wanted), (vec![], vec![]));
     }
 }
+
+/// Rebase an open editor's actual profile changes onto newly synced settings.
+/// Unrelated UI saves must not write its stale dictionary or prompt back.
+pub(crate) fn rebase_editor(
+    before: &crate::app_settings::AppSettings,
+    candidate: &mut crate::app_settings::AppSettings,
+    current: &crate::app_settings::AppSettings,
+) {
+    let mut baseline = super::empty();
+    absorb(
+        &mut baseline,
+        &super::empty(),
+        &before.vocabulary,
+        &before.dictation_processing.default_mode.post_processing,
+        "baseline",
+        1,
+    );
+    let mut edited = baseline.clone();
+    absorb(
+        &mut edited,
+        &baseline,
+        &candidate.vocabulary,
+        &candidate.dictation_processing.default_mode.post_processing,
+        "editor",
+        3,
+    );
+    let mut remote = baseline.clone();
+    absorb(
+        &mut remote,
+        &baseline,
+        &current.vocabulary,
+        &current.dictation_processing.default_mode.post_processing,
+        "current",
+        2,
+    );
+    let rebased = super::merge(&edited, &remote, &baseline);
+    candidate.vocabulary = vocabulary(&rebased);
+    candidate.dictation_processing.default_mode.post_processing = apply(
+        &rebased,
+        &candidate.dictation_processing.default_mode.post_processing,
+    );
+}
+
+#[cfg(test)]
+mod editor_tests {
+    use super::*;
+    #[test]
+    fn stale_editor_preserves_remote_edits_and_applies_only_its_own_changes() {
+        let before = crate::app_settings::AppSettings::default();
+        let mut current = before.clone();
+        current
+            .dictation_processing
+            .default_mode
+            .post_processing
+            .prompt = "Phone wording".into();
+        current.vocabulary.push(VocabularyEntry {
+            term: "Nimbus".into(),
+            sounds_like: vec![],
+        });
+        let mut candidate = before.clone();
+        candidate.show_dock_icon = !candidate.show_dock_icon;
+        rebase_editor(&before, &mut candidate, &current);
+        assert_eq!(
+            candidate
+                .dictation_processing
+                .default_mode
+                .post_processing
+                .prompt,
+            "Phone wording"
+        );
+        assert_eq!(candidate.vocabulary, current.vocabulary);
+        let mut edited = before.clone();
+        edited
+            .dictation_processing
+            .default_mode
+            .post_processing
+            .min_words = 250;
+        rebase_editor(&before, &mut edited, &current);
+        assert_eq!(
+            edited
+                .dictation_processing
+                .default_mode
+                .post_processing
+                .prompt,
+            "Phone wording"
+        );
+        assert_eq!(
+            edited
+                .dictation_processing
+                .default_mode
+                .post_processing
+                .min_words,
+            250
+        );
+    }
+}

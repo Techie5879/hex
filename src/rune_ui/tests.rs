@@ -230,15 +230,15 @@ fn a_refused_note_sits_with_the_shortcut_the_desktop_kept() {
 #[test]
 fn each_panes_advanced_fold_starts_closed_and_stays_its_own() {
     let mut rt = runtime("portal", true, TALL_SIZE);
-    assert!(rt.find("double-tap-only").is_none(), "closed at first");
+    assert!(
+        rt.find("avoid-bluetooth-microphone").is_none(),
+        "closed at first"
+    );
     tap(&mut rt, "advanced-toggle");
     tap(&mut rt, "advanced-toggle");
     tap(&mut rt, "advanced-toggle");
-    rt.state.settings.double_tap_lock = true;
-    rt.state.settings.double_tap_only = true;
-    rt.invalidate();
     settle(&mut rt);
-    assert!(rt.find("double-tap-only").is_some());
+    assert!(rt.find("avoid-bluetooth-microphone").is_some());
     assert_eq!(rt.state.advanced, vec![Pane::General]);
 }
 
@@ -672,7 +672,7 @@ fn every_scene_stops_asking_for_frames() {
         for _ in 0..150 {
             rt.frame(1.0 / 30.0);
         }
-        if *scene != "shortcut-explainer-motion" {
+        if *scene != "shortcut-mode-motion" {
             moving.extend(
                 rt.elements()
                     .into_iter()
@@ -890,19 +890,21 @@ fn a_press_in_a_sidebar_gap_selects_the_nearest_item() {
 fn a_settings_row_shows_no_hover_or_press_of_its_own() {
     let mut rt = runtime("portal", true, TALL_SIZE);
     open_advanced(&mut rt, Pane::General);
-    let before = rt.state.settings.double_tap_lock;
-    let (x, y) = rt.find("double-tap/lead/copy").expect("the row's title");
+    let before = rt.state.settings.avoid_bluetooth_microphone;
+    let (x, y) = rt
+        .find("avoid-bluetooth-microphone/lead/copy")
+        .expect("the row's title");
     rt.pointer_move(x, y);
     rt.frame(1.0 / 120.0);
-    let row = element(&rt, "double-tap");
+    let row = element(&rt, "avoid-bluetooth-microphone");
     assert_eq!((row.hover, row.fill), (0.0, rune::Color::TRANSPARENT));
     rt.pointer_down(x, y);
     rt.frame(1.0 / 120.0);
-    assert_eq!(element(&rt, "double-tap").press, 0.0);
+    assert_eq!(element(&rt, "avoid-bluetooth-microphone").press, 0.0);
     rt.pointer_up(x, y);
     settle(&mut rt);
     assert_ne!(
-        rt.state.settings.double_tap_lock, before,
+        rt.state.settings.avoid_bluetooth_microphone, before,
         "pressing the row still flips it"
     );
 }
@@ -939,8 +941,8 @@ fn segments_and_switch_tracks_hover_at_once() {
     let mut rt = runtime("portal", true, TALL_SIZE);
     open_advanced(&mut rt, Pane::General);
     let targets = [
-        rt.find("shortcut-mode-control-trigger"),
-        rt.find("double-tap/switch"),
+        rt.find("speech-engine-control-trigger"),
+        rt.find("avoid-bluetooth-microphone/switch"),
     ];
     for (target, name) in targets.into_iter().zip(["select", "switch"]) {
         let (x, y) = target.unwrap_or_else(|| panic!("no {name}"));
@@ -1429,7 +1431,7 @@ fn mode_applications_refuse_one_another_modes_use() {
 #[test]
 fn the_transcription_picker_asks_the_service_for_a_model() {
     let mut rt = runtime("picker", true, PANE_SIZE);
-    tap(&mut rt, "model2/top/actions/choose-model");
+    tap(&mut rt, "model2/action/cell/slot/choose-model");
     assert!(matches!(
         sent(&rt),
         [Request::ChooseModel {
@@ -1445,13 +1447,24 @@ fn the_transcription_picker_asks_the_service_for_a_model() {
     assert!(!rt.state.picker.open);
 }
 
-/// The card index of `model` in the picker over `language`.
-fn picker_card(language: &str, model: TranscriptionModelId) -> String {
-    let index = crate::transcription::models::picker_models(language)
-        .iter()
-        .position(|(candidate, _)| candidate.id == model)
-        .expect("every available model is listed");
-    format!("model{index}")
+/// Scrolls the full model list until `key` is inside it, then presses it.
+fn tap_in_model_list(rt: &mut Runtime<Ui>, key: &str) {
+    for _ in 0..400 {
+        let target = element(rt, key).rect;
+        let list = element(rt, "model-scroll").rect;
+        let middle = target[1] + target[3] / 2.0;
+        if middle > list[1] && middle < list[1] + list[3] {
+            break;
+        }
+        let dy = if middle > list[1] + list[3] {
+            20.0
+        } else {
+            -20.0
+        };
+        rt.wheel(list[0] + list[2] / 2.0, list[1] + list[3] / 2.0, dy);
+        rt.frame(1.0 / 60.0);
+    }
+    tap(rt, key);
 }
 
 #[test]
@@ -1464,13 +1477,15 @@ fn a_model_without_the_saved_language_falls_back_to_its_own_visibly() {
     rt.state.picker.installed = Some(Vec::new());
     rt.invalidate();
     settle(&mut rt);
-    let card = picker_card("he", TranscriptionModelId::ParakeetUnifiedEnglish);
+    // Parakeet is folded away with the models that don't speak Hebrew.
+    tap(&mut rt, "more-models");
+    tap(&mut rt, "other-languages");
     let shown = texts(&rt);
     assert!(
-        shown.contains(&"Doesn't support Hebrew; switches the language to English".to_owned()),
+        shown.contains(&"Choosing it switches the language to English".to_owned()),
         "{shown:?}"
     );
-    tap(&mut rt, &format!("{card}/top/actions/choose-model"));
+    tap_in_model_list(&mut rt, "model-parakeet_unified_en/actions/choose-model");
     assert_eq!(
         sent(&rt),
         [Request::ChooseModel {
@@ -1595,6 +1610,85 @@ fn add_term_scrolls_the_new_row_into_view() {
     );
 }
 
+/// The wheel scrolls a term list longer than the sheet, wherever the
+/// pointer is over it: on a row's field or between rows (#906).
+#[test]
+fn the_wheel_scrolls_a_long_term_list() {
+    let mut rt = runtime("portal", true, (900.0, 480.0));
+    rt.state.settings.vocabulary = (0..75)
+        .map(|index| crate::dictation::vocabulary::VocabularyEntry {
+            term: format!("term {index}"),
+            sounds_like: vec![format!("sound {index}")],
+        })
+        .collect();
+    rt.state.vocabulary = super::vocabulary::VocabularyEditor::new(&rt.state.settings.vocabulary);
+    rt.invalidate();
+    settle(&mut rt);
+    tap(&mut rt, "vocabulary-control");
+    settle(&mut rt);
+    let first = |rt: &Runtime<Ui>| element(rt, "term0").rect[1];
+    let list = element(&rt, "term-scroll").rect;
+    // Beside the fields, on a term field, and on a "sounds like" field; a
+    // mouse wheel's line steps, then a touchpad's precise gesture.
+    for (x, precise) in [
+        (list[0] + 1.0, false),
+        (list[0] + 40.0, true),
+        (list[0] + list[2] - 8.0, false),
+    ] {
+        let before = first(&rt);
+        wheel_down(&mut rt, x, list[1] + list[3] / 2.0, precise);
+        assert!(
+            first(&rt) < before - 100.0,
+            "the list didn't scroll at x {x}"
+        );
+    }
+}
+
+/// The model picker's full list scrolls with the wheel too. The picker opens
+/// on the comparison, which fits without scrolling, so this opens every model.
+#[test]
+fn the_wheel_scrolls_the_model_picker() {
+    let mut rt = runtime("picker-custom-models", true, (900.0, 480.0));
+    let list = element(&rt, "model-scroll").rect;
+    let first = |rt: &Runtime<Ui>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.path.contains("model-scroll/inset/"))
+            .map(|e| e.rect[1])
+            .unwrap()
+    };
+    let before = first(&rt);
+    wheel_down(
+        &mut rt,
+        list[0] + list[2] / 2.0,
+        list[1] + list[3] / 2.0,
+        true,
+    );
+    assert!(first(&rt) < before - 50.0, "the picker didn't scroll");
+}
+
+/// Ten wheel steps down at (x, y), as the window's platform sends them: the
+/// pointer moves there first, and a gesture begins, moves, and ends.
+fn wheel_down(rt: &mut Runtime<Ui>, x: f32, y: f32, precise: bool) {
+    rt.pointer_move(x, y);
+    rt.frame(1.0 / 60.0);
+    for step in 0..10 {
+        let phase = match step {
+            0 => rune::GesturePhase::Began,
+            9 => rune::GesturePhase::Ended,
+            _ => rune::GesturePhase::Moved,
+        };
+        rt.wheel_event(
+            rune::WheelEvent::new(0.0, -30.0)
+                .at(x, y)
+                .phase(phase)
+                .precise(precise),
+        );
+        rt.frame(1.0 / 60.0);
+    }
+    settle(rt);
+}
+
 /// A model whose transcription takes no vocabulary says so on the Vocabulary
 /// row and in its sheet; Parakeet-based and prompt-reading models show none.
 #[test]
@@ -1686,7 +1780,7 @@ fn the_sound_sets_sheet_plays_and_chooses_sets() {
 #[test]
 fn a_download_in_progress_can_be_cancelled() {
     let mut rt = runtime("picker-downloading", true, PANE_SIZE);
-    tap(&mut rt, "model1/top/actions/cancel-model");
+    tap(&mut rt, "model1/action/cell/slot/preparing/cancel-model");
     assert!(matches!(sent(&rt), [Request::CancelModel]));
 }
 
@@ -1806,10 +1900,25 @@ fn settings_opens_the_picker_and_names_the_model_and_language_apart() {
 }
 
 #[test]
+fn a_new_install_opens_the_first_run() {
+    use crate::desktop::onboarding::{PermissionState, SetupStatus};
+    let fresh = SetupStatus {
+        microphone: PermissionState::Ready,
+        accessibility: PermissionState::Ready,
+        transcription_model: false,
+    };
+    let mut ui = portal_fixture();
+    ui.platform.permissions = fresh;
+    ui.picker.installed = Some(Vec::new());
+    ui.tour = Some(onboarding::Tour::replay(&ui.settings, &ui.platform));
+    onboarding_kit::live::open(&mut ui);
+    assert!(ui.first_run.is_some(), "the story opens over the tour");
+}
+
+#[test]
 fn onboarding_downloads_the_model_through_the_service() {
     let mut rt = runtime("onboarding", true, PANE_SIZE);
-    // Setup starts the download as soon as it opens.
-    tap(&mut rt, "tour-continue");
+    // The download starts as soon as onboarding opens.
     assert!(matches!(
         sent(&rt),
         [Request::ChooseModel {
@@ -1817,21 +1926,83 @@ fn onboarding_downloads_the_model_through_the_service() {
             ..
         }]
     ));
-    // The service finishes: the model is installed and setup moves on.
+    assert!(texts(&rt).contains(&"Setting up Hex".to_owned()));
+    // The service finishes: the model is installed and the practice opens.
     rt.state.picker.installed = Some(vec![TranscriptionModelId::ParakeetUnifiedEnglish]);
     settle(&mut rt);
-    std::thread::sleep(std::time::Duration::from_millis(750));
+    rt.update(|ui, _| onboarding_kit::live::fixture_resume(ui, Page::Try));
     settle(&mut rt);
-    // Setup moves on to the practice dictation, which can be skipped.
-    tap(&mut rt, "tour-skip");
-    tap(&mut rt, "tour-continue");
+    let step = |rt: &Runtime<Ui>| rt.state.tour.as_ref().unwrap().flow.step();
+    assert_eq!(step(&rt), crate::desktop::onboarding::Step::TryIt);
+    // The practice can be left with Done; Start using Hex closes onboarding.
+    tap(&mut rt, "done");
+    tap(&mut rt, "start-using-hex");
     assert!(rt.state.tour.is_none(), "Start using Hex closes setup");
+    assert!(rt.state.first_run.is_none());
+}
+
+#[test]
+fn a_found_model_moves_on_without_a_download_and_back_returns_to_it() {
+    let mut rt = runtime("onboarding-model-found", false, PANE_SIZE);
+    assert!(rt.find("model-list").is_some());
+    tap(&mut rt, "model1");
+    // The service saves the pick and has the found file ready: the list
+    // stays, with no "Setting up Hex" download page.
+    rt.state.settings.transcription = TranscriptionSelection {
+        model: TranscriptionModelId::ParakeetV3,
+        language: "en".into(),
+    };
+    rt.state.picker.installed = Some(vec![TranscriptionModelId::ParakeetV3]);
+    settle(&mut rt);
+    let shown = texts(&rt);
+    assert!(
+        shown.contains(&"Choose a speech model".to_owned()),
+        "{shown:?}"
+    );
+    assert!(!shown.contains(&"Setting up Hex".to_owned()), "{shown:?}");
+    assert!(
+        shown.contains(&"Parakeet Unified English".to_owned()),
+        "the rows stay"
+    );
+    tap(&mut rt, "continue");
+    rt.update(|ui, _| onboarding_kit::live::fixture_resume(ui, Page::Demo));
+    settle(&mut rt);
+    let s = rt.state.first_run.as_ref().unwrap();
+    assert!(s.had_model, "a model here needs no download pill");
+    assert!(!texts(&rt).contains(&"Setting up Hex".to_owned()));
+    // Back returns to the list to change the pick.
+    tap(&mut rt, "back");
+    assert!(rt.find("model-list").is_some());
+}
+
+#[test]
+fn a_failed_download_names_its_cause_and_offers_a_model_file() {
+    let mut rt = runtime("onboarding", false, PANE_SIZE);
+    if let Some(view) = &mut rt.state.view {
+        view.transcription.preparing = None;
+        view.transcription.error = Some(
+            "Couldn't reach huggingface.co through the proxy proxy.corp:8080: the proxy refused (403)\n\nCheck your connection, then retry, or choose a model file."
+                .into(),
+        );
+    }
+    rt.invalidate();
+    settle(&mut rt);
+    let shown = texts(&rt);
+    assert!(
+        shown.contains(
+            &"Couldn't reach huggingface.co through the proxy proxy.corp:8080: the proxy refused (403)"
+                .to_owned()
+        ),
+        "{shown:?}"
+    );
+    assert!(shown.contains(&"Use a model file…".to_owned()), "{shown:?}");
+    assert!(shown.contains(&"Try again".to_owned()), "{shown:?}");
 }
 
 #[test]
 fn with_no_model_found_onboarding_downloads_the_recommended_model_with_no_list() {
     for scene in ["onboarding", "mac-onboarding"] {
-        let mut rt = runtime(scene, false, PANE_SIZE);
+        let rt = runtime(scene, false, PANE_SIZE);
         assert!(rt.state.found.models.is_empty());
         // The download starts on its own, before any step or pick.
         assert!(
@@ -1845,9 +2016,12 @@ fn with_no_model_found_onboarding_downloads_the_recommended_model_with_no_list()
             "{scene}: {:?}",
             sent(&rt)
         );
-        tap(&mut rt, "tour-continue");
         let shown = texts(&rt);
         assert!(rt.find("model-list").is_none(), "{scene}: no model list");
+        assert!(
+            shown.contains(&"Setting up Hex".to_owned()),
+            "{scene}: {shown:?}"
+        );
         assert!(
             !shown.contains(&"Choose a speech model".to_owned()),
             "{scene}: {shown:?}"
@@ -1860,7 +2034,7 @@ fn the_onboarding_model_list_starts_the_row_picked_or_the_recommended_one() {
     // Continue with no pick starts the selected, recommended model.
     let mut rt = runtime("onboarding-model-found", false, PANE_SIZE);
     assert!(sent(&rt).is_empty(), "nothing starts before a pick");
-    tap(&mut rt, "tour-continue");
+    tap(&mut rt, "continue");
     assert!(matches!(
         sent(&rt),
         [Request::ChooseModel {
@@ -2003,8 +2177,8 @@ fn render(scene: &str, dark: bool, size: (f32, f32)) -> Option<(u32, u32, Vec<u8
     );
     renderer.upload_images(&gpu.device, &gpu.queue, &mut rt.images);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
-    // The window's own compositor: the UI, the welcome hero over its stage,
-    // and the Sounds sheet's HUD.
+    // The window's own compositor: the UI, the first run's GPU stage, and
+    // the Sounds sheet's HUD.
     rune::compose::Compositor::render(
         &mut super::WindowCompositor::default(),
         &mut rune::compose::Frame {
@@ -2163,6 +2337,7 @@ fn goldens() {
     // A list longer than the window fades at its scrolling edge (#840).
     check_golden("language-menu", false, GOLDEN_SIZE);
     check_golden("modes-opencode-not-running", false, PANE_SIZE);
+    check_golden("output-trust", false, PANE_SIZE);
     check_golden("picker-custom-models", false, PANE_SIZE);
     check_golden("picker-found", false, PANE_SIZE);
 }
@@ -2194,4 +2369,132 @@ fn the_recorder_still_gets_space_and_enter_after_a_menu_closes() {
             );
         }
     }
+}
+
+/// The trust prompt shows what an unapproved config reaches, and Allow
+/// pins this config's hash and hides it.
+#[test]
+fn the_trust_prompt_lists_what_a_config_reaches_until_it_is_allowed() {
+    let mut rt = runtime("output-trust", false, PANE_SIZE);
+    let shown = texts(&rt);
+    assert!(
+        shown
+            .iter()
+            .any(|text| text == "Your transformations want to use the network and run programs")
+    );
+    assert!(shown.iter().any(|text| text == "Hosts: localhost"));
+    assert!(shown.iter().any(|text| text == "Programs: pandoc, say"));
+    tap(&mut rt, "allow-transformations");
+    settle(&mut rt);
+    assert_eq!(
+        rt.state.modes.approved.as_deref(),
+        Some("0".repeat(64).as_str())
+    );
+    assert!(rt.find("allow-transformations").is_none());
+}
+
+/// Labs › Fix results in Output: the Try card offers Vocabulary and Fix
+/// this only with the toggle on, and Fix this copies for the sentence typed.
+#[test]
+fn output_fixes_show_only_with_their_lab_and_fix_this_copies_for_the_sentence() {
+    let output = |on: bool| {
+        let mut state = Ui::with(AppSettings::default(), Service::Fixture(Vec::new()));
+        output::fixture(&mut state);
+        state.pane = Pane::Output;
+        state.settings.labs.output_fixes = on;
+        runtime_for(state, false, TALL_SIZE)
+    };
+    let off = output(false);
+    assert!(off.find("output-vocabulary").is_none());
+    assert!(off.find("fix-this").is_none());
+
+    let mut on = output(true);
+    assert!(on.find("output-vocabulary").is_some());
+    tap(&mut on, "fix-this");
+    assert!(on.state.output.prompt_copied);
+    assert_eq!(
+        on.state.output.fix_copied.as_deref(),
+        Some("Um, open code shipped the hex app today.")
+    );
+    tap(&mut on, "output-vocabulary");
+    assert!(on.state.vocabulary.open);
+}
+
+#[test]
+fn pending_desktop_draft_keeps_phone_edits_after_adoption_and_save() {
+    let mut ui = portal_fixture();
+    ui.settings.labs.profile_sync = true;
+    let service = ui.settings.clone();
+    ui.adopt(service.clone());
+    ui.vocabulary
+        .push(TextEdit::new("Desktop term"), TextEdit::default());
+    let start = Instant::now();
+    assert!(!ui.save_drafts(start));
+    let mut incoming = service;
+    incoming
+        .vocabulary
+        .push(crate::dictation::vocabulary::VocabularyEntry {
+            term: "Phone term".into(),
+            sounds_like: vec![],
+        });
+    incoming
+        .dictation_processing
+        .default_mode
+        .post_processing
+        .min_words = 250;
+    ui.adopt(incoming);
+    assert!(ui.save_drafts(start + DRAFT_DELAY));
+    let words: Vec<_> = ui
+        .settings
+        .vocabulary
+        .iter()
+        .map(|v| v.term.as_str())
+        .collect();
+    assert!(words.contains(&"Desktop term"));
+    assert!(words.contains(&"Phone term"));
+    assert_eq!(
+        ui.settings
+            .dictation_processing
+            .default_mode
+            .post_processing
+            .min_words,
+        250
+    );
+}
+
+#[test]
+fn rebased_save_updates_editors_before_the_next_autosave() {
+    let mut ui = portal_fixture();
+    let before = ui.settings.clone();
+    let mut candidate = ui.drafted();
+    candidate.show_dock_icon = !candidate.show_dock_icon;
+    let mut incoming = before.clone();
+    incoming
+        .vocabulary
+        .push(crate::dictation::vocabulary::VocabularyEntry {
+            term: "Phone term".into(),
+            sounds_like: vec![],
+        });
+    incoming
+        .dictation_processing
+        .default_mode
+        .post_processing
+        .prompt = "Phone wording".into();
+    crate::profile_sync::adapter::rebase_editor(&before, &mut candidate, &incoming);
+    assert!(ui.commit(candidate));
+    assert!(!ui.save_drafts(Instant::now() + DRAFT_DELAY));
+    assert!(
+        ui.settings
+            .vocabulary
+            .iter()
+            .any(|v| v.term == "Phone term")
+    );
+    assert_eq!(
+        ui.settings
+            .dictation_processing
+            .default_mode
+            .post_processing
+            .prompt,
+        "Phone wording"
+    );
 }

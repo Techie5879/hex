@@ -29,7 +29,18 @@ pub struct LocalTranscriber {
     gpu: Option<transcribe_cpp::Device>,
     /// The device setting it loaded for.
     preference: TranscriptionDevice,
+    /// A warm run of [`PREWARM_SAMPLES`] once loaded, in milliseconds.
+    warm_ms: u128,
 }
+
+/// 1.5 s of silence: what loading runs to warm a model and time it.
+const PREWARM_SAMPLES: usize = 24_000;
+
+/// An integrated GPU slower than this on a warm 1.5 s run (a fifth of real
+/// time) may lose to the CPU, so Auto times the CPU too (#484). Healthy
+/// GPUs run it in tens of milliseconds; the UHD 620 and Iris Plus 655 that
+/// missed streaming deadlines ran a 35 s clip at about 0.4× real time.
+const SLOW_WARM_MS: u128 = 300;
 
 /// Settings › Speech engine (`transcription_device`), for every later load.
 static DEVICE: AtomicU8 = AtomicU8::new(0);
@@ -215,6 +226,14 @@ impl LocalTranscriber {
     /// or prewarm that fails retries on the CPU, and when the CPU works the
     /// GPU is remembered as failed.
     pub fn load(selection: &TranscriptionSelection) -> Result<Self> {
+        let loaded = Self::load_where(selection)?;
+        gpu_health::set_auto_on_cpu(
+            loaded.preference == TranscriptionDevice::Auto && loaded.gpu.is_none(),
+        );
+        Ok(loaded)
+    }
+
+    fn load_where(selection: &TranscriptionSelection) -> Result<Self> {
         let backend = init_backends()?;
         let preference = device();
         if backend == Backend::Cpu || preference == TranscriptionDevice::Cpu {
@@ -233,7 +252,7 @@ impl LocalTranscriber {
                 Some((backend, gpu)) => (backend, Some(gpu)),
                 None => {
                     tracing::info!(
-                        "this GPU failed before under its current driver; transcribing on the CPU (Settings › Speech engine › GPU tries it again)"
+                        "this GPU failed or ran slower than the CPU before, under its current driver; transcribing on the CPU (Settings › Speech engine › GPU tries it again)"
                     );
                     return Self::load_on(selection, Backend::Cpu, None, preference);
                 }
@@ -250,6 +269,9 @@ impl LocalTranscriber {
                     && let Some(gpu) = &loaded.gpu
                 {
                     gpu_health::forget(gpu);
+                }
+                if preference == TranscriptionDevice::Auto && loaded.slow_igpu() {
+                    return Ok(loaded.or_faster_cpu());
                 }
                 Ok(loaded)
             }
@@ -342,9 +364,10 @@ impl LocalTranscriber {
             )
             .then(|| device.clone()),
             preference,
+            warm_ms: 0,
         };
         let started = Instant::now();
-        transcriber.transcribe(&vec![0.0; 24_000])?;
+        transcriber.warm_on_silence()?;
         tracing::info!(
             prewarm_ms = started.elapsed().as_millis(),
             "prewarmed local transcription model"
@@ -352,7 +375,29 @@ impl LocalTranscriber {
         transcriber.stream = transcriber
             .session
             .probe_stream(&transcriber.options, &architecture);
+        // Warm now, so this times the device rather than its first run's
+        // shader compiles.
+        let started = Instant::now();
+        transcriber.warm_on_silence()?;
+        transcriber.warm_ms = started.elapsed().as_millis();
         Ok(transcriber)
+    }
+
+    /// Runs [`PREWARM_SAMPLES`] of silence through the model. A decoder
+    /// that runs to its generation cap on silence (Qwen3-ASR 1.7B, #968)
+    /// still ran the whole graph on the device, so that is a warm model,
+    /// not a failed device.
+    fn warm_on_silence(&mut self) -> Result<()> {
+        match self.transcribe(&vec![0.0; PREWARM_SAMPLES]) {
+            Err(error) if output_truncated(&error) => {
+                tracing::info!(
+                    error = format!("{error:#}"),
+                    "the warm-up run on silence hit the output limit; the model is warm"
+                );
+                Ok(())
+            }
+            result => result.map(drop),
+        }
     }
 
     pub(crate) fn stream_options(&self) -> Option<&transcribe_cpp::StreamOptions> {
@@ -385,9 +430,8 @@ impl LocalTranscriber {
         if self.session.ran_recently() {
             return Ok(());
         }
-        self.transcribe(&vec![0.0; 24_000])
+        self.warm_on_silence()
             .wrap_err("could not prewarm transcription model")
-            .map(drop)
     }
 
     /// Transcribes a complete 16 kHz clip, padded as a dictation's clip is.
@@ -438,6 +482,50 @@ impl LocalTranscriber {
         }
     }
 
+    /// Whether this model runs on an integrated GPU slow enough that the
+    /// CPU may be faster.
+    fn slow_igpu(&self) -> bool {
+        self.warm_ms > SLOW_WARM_MS
+            && self
+                .gpu
+                .as_ref()
+                .is_some_and(|gpu| gpu.device_type == transcribe_cpp::DeviceType::Igpu)
+    }
+
+    /// This model, or the same one on the CPU when the CPU runs it faster;
+    /// then the GPU is remembered as slow, so later loads go straight to the
+    /// CPU (#484).
+    fn or_faster_cpu(self) -> Self {
+        let cpu = match Self::load_on(&self.selection, Backend::Cpu, None, self.preference) {
+            Ok(cpu) => cpu,
+            Err(error) => {
+                tracing::warn!(
+                    error = format!("{error:#}"),
+                    "could not time the model on the CPU; keeping the GPU"
+                );
+                return self;
+            }
+        };
+        tracing::info!(
+            gpu_ms = self.warm_ms,
+            cpu_ms = cpu.warm_ms,
+            "timed a warm 1.5 s run on the integrated GPU and the CPU"
+        );
+        if cpu.warm_ms >= self.warm_ms {
+            return self;
+        }
+        if let Some(gpu) = &self.gpu {
+            gpu_health::record_slow(
+                gpu,
+                &format!(
+                    "a warm 1.5 s run took {} ms on the GPU and {} ms on the CPU",
+                    self.warm_ms, cpu.warm_ms
+                ),
+            );
+        }
+        cpu
+    }
+
     /// Whether `error` came from the GPU this model runs on failing.
     fn gpu_failed(&self, error: &color_eyre::eyre::Report) -> bool {
         self.gpu.is_some() && gpu_health::device_error(error)
@@ -456,6 +544,7 @@ impl LocalTranscriber {
         if let Some(gpu) = &gpu {
             gpu_health::record(gpu, &format!("{error:#}"));
         }
+        gpu_health::set_auto_on_cpu(self.preference == TranscriptionDevice::Auto);
         *self = cpu;
         Ok(())
     }
@@ -521,6 +610,16 @@ impl LocalTranscriber {
             result => result,
         }
     }
+}
+
+/// Whether `error` is a decode stopped at its output limit.
+fn output_truncated(error: &color_eyre::eyre::Report) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<transcribe_cpp::Error>(),
+            Some(transcribe_cpp::Error::OutputTruncated { .. })
+        )
+    })
 }
 
 /// The local API's own model, loaded for the selection a host asks for
@@ -682,6 +781,22 @@ pub(crate) struct SwapFailed {
 mod model_swap_tests {
     use super::*;
     use crate::transcription::models::TranscriptionModelId;
+
+    #[test]
+    fn a_truncated_decode_is_recognised_through_its_context() {
+        let truncated: Result<()> = Err(transcribe_cpp::Error::OutputTruncated {
+            message: "budget".into(),
+            partial: None,
+        })
+        .wrap_err("transcription failed");
+        assert!(output_truncated(&truncated.unwrap_err()));
+        let other: Result<()> = Err(transcribe_cpp::Error::OutputRepetition {
+            message: "loop".into(),
+            partial: None,
+        })
+        .wrap_err("transcription failed");
+        assert!(!output_truncated(&other.unwrap_err()));
+    }
 
     #[test]
     fn an_unchanged_selection_loads_nothing() {
