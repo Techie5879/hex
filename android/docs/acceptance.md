@@ -73,9 +73,9 @@ Turn TalkBack off when you're done, as Hex's overlays behave differently with it
 
 ## 6. Sync with your Mac
 
-1. On the companion machine: enable HTTPS on your tailnet once (the Tailscale admin console, under DNS), then follow
-   `companion/README.md`. `opencode service start` keeps polish available.
-2. Tailscale connected on the phone. Settings › Sync and polish: enter the URLs and the token.
+1. On the Mac: enable HTTPS on your tailnet once (the Tailscale admin console, under DNS), then follow
+   `companion/README.md`.
+2. Tailscale connected on the phone. Settings › Dictionary sync: enter the URL and the token.
 3. Turn on Sync. Your private dictionary and prompts appear.
 4. On the Mac: Labs › Profile sync on, then `hex profile connect <url> --token-file <file>` and
    `hex profile sync`.
@@ -84,9 +84,10 @@ Turn TalkBack off when you're done, as Hex's overlays behave differently with it
 
 ## 7. Long-text polish
 
-Needs OpenCode's service running on the companion machine. Dictate 150+ words and check History shows
-`polish` ran. Then stop OpenCode and repeat: it should keep the local text, and name the failed step
-in History.
+Settings › ChatGPT sign-in: tap Sign in with ChatGPT, copy the code, and approve it in the browser.
+Check it comes back signed in, then turn on Cleanup › Polish long text. Dictate 150+ words and check
+History shows `polish` ran. Then turn on airplane mode after recording and repeat: it should keep the
+local text and name the failed step in History. Check Codex on your other machines stays signed in.
 
 ## 8. Retention
 

@@ -28,7 +28,7 @@ Process                                   // android.pipeline; core CleanupPipel
 ├── Speech model in :engine -> transcript, with the dictionary as context
 ├── Local cleanup -> SpeakoFlow if chosen, else filler rules; failure keeps input
 ├── Size gate on its output -> >=150 words or >=3000 characters
-└── Polish through the companion -> 8 s, typed quota-only fallback, failure keeps local text
+└── Polish, direct with the phone's ChatGPT sign-in -> 8 s, no fallback, failure keeps local text
 
 Insert                                    // android.insert; TextInserter
 ├── Same field and still safe -> commitText at the caret -> confirmed by reading back
@@ -56,7 +56,7 @@ Sync                                      // android.sync; android/companion, sr
 On an Android 16 (API 36) emulator with Gboard and Chrome, 2026-11-02: real speech through the capture
 path, Whisper and SpeakoFlow on the device, tap, hold, cancel, and drag, Chrome's text, password, card,
 phone, and rich fields, crash and engine-death recovery, retention and expiry, and sync with the
-desktop CLI. Polish ran against a fake provider for each outcome, and once against real OpenCode. HTTPS
+desktop CLI. Sync's HTTPS
 was a local proxy with a test certificate, because Tailscale HTTPS needs enabling on the tailnet. Not
 observed: any real phone, physical microphone, speed, heat, battery policy, Tailscale serve, or
 TalkBack. See

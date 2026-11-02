@@ -1,30 +1,23 @@
 #!/usr/bin/env bun
-// Hex companion: one small, private, authenticated service for the things a phone
-// can't do alone. It stores the portable profile as one ETag-versioned document, so
-// devices sync through compare-and-swap, and forwards long-text polish to the OpenCode
-// service on this machine, so provider credentials never reach the phone.
+// Hex companion: one small, private, authenticated service that stores the portable
+// profile as one ETag-versioned document, so devices sync through compare-and-swap.
 //
 // It binds to loopback only. `tailscale serve` is the only way in, which gives
 // devices on your tailnet HTTPS with a real certificate and leaves the internet out.
 // It never logs request bodies. See README.md.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
-import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, writeSync } from "node:fs"
+import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
 const MAX_PROFILE_BYTES = 1024 * 1024
-const MAX_GENERATE_BYTES = 512 * 1024
-const MAX_DEADLINE_MS = 60_000
-const GENERATE_ROUTES = ["/api/experimental/generate", "/api/generate"]
 
 export interface Config {
   directory: string
-  stateDirectory: string
 }
 
 export const defaultConfig = (): Config => ({
   directory: process.env.HEX_COMPANION_DIR ?? join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local/share"), "hex-companion"),
-  stateDirectory: join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local/state"), "opencode"),
 })
 
 const sha256 = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex")
@@ -108,71 +101,11 @@ const putProfile = async (config: Config, request: Request): Promise<Response> =
   return new Response(null, { status: exists ? 204 : 201, headers: { ETag: quoted(sha256(body)) } })
 }
 
-// ---- polish: forwards to the OpenCode service on this machine ----
-
 interface Registration {
   id: string
   url: string
   pid: number
   password?: string
-}
-
-const loopback = (url: string) => {
-  try {
-    const { protocol, hostname } = new URL(url)
-    return protocol === "http:" && (hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]")
-  } catch {
-    return false
-  }
-}
-
-const authHeader = (password?: string): Record<string, string> =>
-  password ? { Authorization: `Basic ${btoa(`opencode:${password}`)}` } : {}
-
-/** Reads the owner-only registration and confirms the service answers, as desktop Hex does. */
-const findOpenCode = async (config: Config): Promise<Registration | null> => {
-  const paths = [join(config.stateDirectory, "service.json")]
-  if (existsSync(config.stateDirectory)) {
-    for (const name of readdirSync(config.stateDirectory).sort()) {
-      if (name.startsWith("service-") && name.endsWith(".json")) paths.push(join(config.stateDirectory, name))
-    }
-  }
-  for (const path of paths) {
-    if (!existsSync(path)) continue
-    try {
-      if ((statSync(path).mode & 0o077) !== 0) continue
-      const registration: Registration = JSON.parse(readFileSync(path, "utf8"))
-      if (!loopback(registration.url)) continue
-      const info = await fetch(`${registration.url}/api/info`, { headers: authHeader(registration.password), signal: AbortSignal.timeout(1000) })
-      if (info.ok && (await info.json()).pid === registration.pid) return registration
-    } catch {}
-  }
-  return null
-}
-
-const generate = async (config: Config, request: Request): Promise<Response> => {
-  const body = new Uint8Array(await request.arrayBuffer())
-  if (body.length > MAX_GENERATE_BYTES) return new Response("Too large", { status: 413 })
-  const deadline = Math.min(Number(request.headers.get("x-hex-deadline-ms")) || MAX_DEADLINE_MS, MAX_DEADLINE_MS)
-  const service = await findOpenCode(config)
-  if (!service) return Response.json({ _tag: "CompanionError", reason: "opencode_not_running", message: "OpenCode isn't running on the companion" }, { status: 503 })
-  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(deadline)])
-  try {
-    for (const route of GENERATE_ROUTES) {
-      const reply = await fetch(`${service.url}${route}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeader(service.password) },
-        body,
-        signal,
-      })
-      if (reply.status === 404) continue
-      // The body passes through untouched, so the client reads OpenCode's own typed errors.
-      return new Response(await reply.text(), { status: reply.status, headers: { "Content-Type": "application/json" } })
-    }
-    return Response.json({ _tag: "CompanionError", reason: "no_route", message: "OpenCode has no generation route" }, { status: 502 })
-  } catch {
-    return Response.json({ _tag: "CompanionError", reason: "upstream", message: "OpenCode didn't answer in time" }, { status: 504 })
-  }
 }
 
 // ---- server ----
@@ -182,10 +115,7 @@ export const handler = (config: Config) => async (request: Request): Promise<Res
   if (!authorized(config, request)) return new Response("Unauthorized", { status: 401, headers: { "WWW-Authenticate": "Bearer" } })
   if (pathname === "/v1/profile" && request.method === "GET") return getProfile(config)
   if (pathname === "/v1/profile" && request.method === "PUT") return putProfile(config, request)
-  if (pathname === "/v1/generate" && request.method === "POST") return generate(config, request)
-  if (pathname === "/v1/health" && request.method === "GET") {
-    return Response.json({ ok: true, profile: existsSync(profilePath(config)), opencode: (await findOpenCode(config)) !== null })
-  }
+  if (pathname === "/v1/health" && request.method === "GET") return Response.json({ ok: true, profile: existsSync(profilePath(config)) })
   return new Response("Not found", { status: 404 })
 }
 

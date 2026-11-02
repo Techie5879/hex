@@ -36,7 +36,6 @@ data class DeviceSettings(
     val excludedPackages: Set<String> = emptySet(),
     val syncUrl: String = "",
     val syncEnabled: Boolean = false,
-    val polishUrl: String = "",
     val lastSyncMs: Long = 0,
     val lastSyncError: String? = null,
     val asrDeadlineFactor: Int = 8,

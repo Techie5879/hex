@@ -15,7 +15,7 @@ DictationCoordinator       // one dictation, gesture to text
 │                            ├── NativeAsr (transcribe.cpp)
 │                            └── NativeLlm (llama.cpp, SpeakoFlow)
 └── CleanupPipeline        // core: local, then size gate, then polish
-    └── CompanionPolisher ──HTTPS──> companion ──> OpenCode service
+    └── CodexPolisher ──HTTPS──> ChatGPT Codex API, with this phone's own sign-in
 
 ProfileRepository ←→ ProfileSync ──HTTPS, ETag/If-Match──> companion or WebDAV
 ```
@@ -63,10 +63,15 @@ and any WebDAV server work alike. See `companion/README.md` for what was rejecte
 leave tombstones and win or lose by stamp, and a concurrent prompt edit keeps the newest and records
 the other as an open conflict for a person to settle, so nothing silently disappears.
 
-**Polish.** The phone never holds a provider credential. It posts to the companion, which uses the
-OpenCode login on that machine and passes OpenCode's typed replies through unchanged. The phone
-applies the same rule as desktop: only `ProviderRequestError` with `reason: "rate_limit"` for the
-requested provider tries the fallback. Messages aren't inspected. A timeout keeps the local text.
+**Polish.** The phone calls the Codex API directly, with a ChatGPT login made on the phone through a
+device code. The APK holds no credential. The login is the phone's own session because refresh tokens
+rotate: copying one from another machine would let either device sign the other out. Tokens are
+wrapped by a Keystore key, and a refresh finishes and saves on its own thread even if the polish that
+asked for it has given up. A 401 renews the login and retries once inside the deadline. Anything else,
+including a 429, keeps the local text. With one provider there's nothing to fall back to, so the
+profile's fallback setting is left for desktop. Statuses decide this, and error messages aren't read.
+Only `response.completed` makes a reply usable. This API isn't documented for third-party apps, so it
+may change; if it does, polish fails and the local text stays.
 
 ## Known limits
 

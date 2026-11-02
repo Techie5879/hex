@@ -26,11 +26,14 @@ class DebugReceiver : BroadcastReceiver() {
                         threads = intent.getIntExtra("threads", settings.threads),
                         localCleanupDeadlineSeconds = intent.getIntExtra("localCleanupDeadlineSeconds", settings.localCleanupDeadlineSeconds),
                         syncUrl = intent.getStringExtra("syncUrl") ?: settings.syncUrl,
-                        polishUrl = intent.getStringExtra("polishUrl") ?: settings.polishUrl,
                         syncEnabled = intent.getBooleanExtra("syncEnabled", settings.syncEnabled),
                     )
                 }
                 intent.getStringExtra("token")?.let { app.secure.putToken("sync", it) }
+                intent.getStringExtra("codexAccess")?.let {
+                    app.codex.signIn(anomaly.hex.android.core.codex.CodexTokens(it, "", intent.getStringExtra("codexAccount").orEmpty()))
+                }
+                if (intent.getBooleanExtra("codexSignOut", false)) app.codex.signOut()
                 intent.getStringExtra("addTerm")?.let { app.profile.putTerm(it) }
                 intent.getStringExtra("removeTerm")?.let { app.profile.removeTerm(it) }
                 intent.getStringExtra("settingKey")?.let { key ->

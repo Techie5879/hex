@@ -1,21 +1,11 @@
 package anomaly.hex.android.sync
 
-import anomaly.hex.android.core.pipeline.CancelToken
-import anomaly.hex.android.core.pipeline.CancelledException
-import anomaly.hex.android.core.pipeline.GenerationException
-import anomaly.hex.android.core.pipeline.GenerationTransport
-import anomaly.hex.android.core.pipeline.ModelRef
-import anomaly.hex.android.core.pipeline.Polisher
-import anomaly.hex.android.core.pipeline.QuotaFallbackGenerator
 import anomaly.hex.android.core.sync.ProfileTransport
 import anomaly.hex.android.core.sync.RemoteDocument
 import anomaly.hex.android.core.sync.SyncConflictException
 import java.io.IOException
 import java.net.HttpURLConnection
-import java.net.SocketTimeoutException
 import java.net.URL
-import java.util.Timer
-import kotlin.concurrent.timerTask
 
 /** Rejected by the server: wrong token, or a URL that isn't this document. */
 class SyncAuthException : IOException("The server refused the token")
@@ -72,48 +62,4 @@ class HttpProfileTransport(private val url: String, private val token: String?) 
             else -> "Bearer $token"
         }
     }
-}
-
-/** Sends a polish request to the companion, which holds the provider credentials. */
-class CompanionTransport(private val url: String, private val token: String?) : GenerationTransport {
-    override fun post(body: String, remainingMs: Long, cancel: CancelToken): String {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = remainingMs.coerceIn(1, 3000).toInt()
-            readTimeout = remainingMs.coerceAtLeast(1).toInt()
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("X-Hex-Deadline-Ms", remainingMs.toString())
-            HttpProfileTransport.authorization(token)?.let { setRequestProperty("Authorization", it) }
-        }
-        cancel.onCancel { connection.disconnect() }
-        // Socket timeouts bound each read, not the whole reply: this bounds the whole request.
-        var timedOut = false
-        val watchdog = Timer("hex-polish-deadline", true).apply {
-            schedule(timerTask { timedOut = true; connection.disconnect() }, remainingMs.coerceAtLeast(1))
-        }
-        try {
-            connection.outputStream.use { it.write(body.toByteArray()) }
-            val code = connection.responseCode
-            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-            val reply = stream?.bufferedReader()?.use { it.readText() } ?: throw GenerationException("Companion returned nothing")
-            // A provider's own 401 arrives as a JSON envelope; the companion's is plain text.
-            if ((code == 401 || code == 403) && !reply.trimStart().startsWith("{")) throw GenerationException("Companion refused the token")
-            return reply
-        } catch (_: SocketTimeoutException) {
-            throw GenerationException("Polish timed out")
-        } catch (_: IOException) {
-            if (cancel.cancelled) throw CancelledException()
-            throw GenerationException(if (timedOut) "Polish timed out" else "Polish could not reach the companion")
-        } finally {
-            watchdog.cancel()
-            connection.disconnect()
-        }
-    }
-}
-
-class CompanionPolisher(url: String, token: String?) : Polisher {
-    private val generator = QuotaFallbackGenerator(CompanionTransport(url, token))
-    override fun polish(prompt: String, model: ModelRef, fallbackProvider: String?, deadlineMs: Long, cancel: CancelToken): String =
-        generator.generate(prompt, model, fallbackProvider, deadlineMs, cancel)
 }

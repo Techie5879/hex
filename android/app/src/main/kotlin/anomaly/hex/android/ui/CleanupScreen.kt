@@ -34,7 +34,7 @@ fun CleanupScreen(openPage: (String) -> Unit) {
     val profile by app.profile.flow.collectAsStateWithLifecycle()
     val settings by app.settings.flow.collectAsStateWithLifecycle()
     val policy = CleanupPolicy.from(profile)
-    val polishReady = settings.polishUrl.isNotBlank()
+    val polishReady by app.chatGpt.signedIn.collectAsStateWithLifecycle()
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
         Text("Cleanup", style = MaterialTheme.typography.headlineSmall, color = hex.text, modifier = Modifier.padding(vertical = 16.dp))
@@ -65,9 +65,11 @@ fun CleanupScreen(openPage: (String) -> Unit) {
 
         SectionLabel("Long dictations")
         Card {
+            Row("ChatGPT sign-in", if (polishReady) "Signed in" else "Needed for polish", onClick = { openPage("settings/chatgpt") })
+            Divider()
             SwitchRow(
                 "Polish long text",
-                if (polishReady) "Sent to ${policy.model} through your companion" else "Set up a companion in Sync first",
+                if (polishReady) "Sent to ${policy.model.substringAfterLast('/')} with your ChatGPT sign-in" else "Sign in with ChatGPT first",
                 checked = policy.polishEnabled,
                 enabled = polishReady,
             ) { app.profile.putSetting(ProfileKeys.POLISH_ENABLED, JsonPrimitive(it)) }
@@ -82,15 +84,11 @@ fun CleanupScreen(openPage: (String) -> Unit) {
             Divider()
             TextRow("Reasoning", policy.variant.orEmpty()) { app.profile.putSetting(ProfileKeys.POLISH_VARIANT, JsonPrimitive(it)) }
             Divider()
-            TextRow("If quota runs out, same model on", policy.fallbackProvider.orEmpty()) {
-                app.profile.putSetting(ProfileKeys.POLISH_FALLBACK_PROVIDER, JsonPrimitive(it))
-            }
-            Divider()
             PromptEditor("Polish prompt", policy.polishPrompt, CleanupPolicy.DEFAULT_POLISH_PROMPT) {
                 app.profile.putSetting(ProfileKeys.POLISH_PROMPT, JsonPrimitive(it))
             }
         }
-        Note("Shorter dictations stay local, for speed. A timeout or outage keeps the local text. Only a typed quota rejection tries the fallback.")
+        Note("Shorter dictations stay local, for speed. A timeout, an outage, or a used-up quota keeps the local text.")
         Spacer(Modifier.height(20.dp))
     }
 }

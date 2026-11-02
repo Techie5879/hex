@@ -87,7 +87,7 @@ private fun ColumnScope.Disclosure(onAgree: () -> Unit) {
                 Divider()
                 Disclose("When it records", "Only after you tap or hold the button. A notification and the status bar show it while it records. You can cancel at any time.")
                 Divider()
-                Disclose("What leaves this phone", "Nothing by default. Long-text polish and dictionary sync are opt-in, and go only to a server you set up.")
+                Disclose("What leaves this phone", "Nothing by default. Long-text polish is opt-in and goes to OpenAI with your ChatGPT sign-in. Dictionary sync is opt-in and goes only to a server you set up.")
             }
         }
     }

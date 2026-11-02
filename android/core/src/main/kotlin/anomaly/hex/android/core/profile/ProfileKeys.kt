@@ -35,7 +35,6 @@ data class CleanupPolicy(
     val model: String,
     val variant: String?,
     val deadlineSeconds: Int,
-    val fallbackProvider: String?,
     val minWords: Int,
     val minChars: Int,
 ) {
@@ -63,7 +62,6 @@ data class CleanupPolicy(
                 model = s[ProfileKeys.POLISH_MODEL].stringValue() ?: "opencode-go/gpt-6-luna",
                 variant = s[ProfileKeys.POLISH_VARIANT].stringValue() ?: "none",
                 deadlineSeconds = s[ProfileKeys.POLISH_DEADLINE_SECONDS].intValue() ?: 8,
-                fallbackProvider = s[ProfileKeys.POLISH_FALLBACK_PROVIDER].stringValue() ?: "openai",
                 minWords = s[ProfileKeys.POLISH_MIN_WORDS].intValue() ?: 150,
                 minChars = s[ProfileKeys.POLISH_MIN_CHARS].intValue() ?: 3000,
             )

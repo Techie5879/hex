@@ -50,6 +50,7 @@ import anomaly.hex.android.core.retention.Retention
 import anomaly.hex.android.data.DeviceSettings
 import anomaly.hex.android.data.SecureStore
 import anomaly.hex.android.service.HexFocus
+import anomaly.hex.android.sync.ChatGptSignIn
 import anomaly.hex.android.sync.SyncRunner
 import java.text.DateFormat
 import java.util.Date
@@ -70,7 +71,8 @@ fun SettingsScreens(page: String, open: (String) -> Unit, close: () -> Unit) {
         "settings/models" to "Models",
         "settings/benchmark" to "Benchmark",
         "settings/retention" to "Recordings and history",
-        "settings/sync" to "Sync and polish",
+        "settings/sync" to "Dictionary sync",
+        "settings/chatgpt" to "ChatGPT sign-in",
         "settings/conflicts" to "Sync conflicts",
         "settings/exclusions" to "Apps without the button",
     )
@@ -85,6 +87,7 @@ fun SettingsScreens(page: String, open: (String) -> Unit, close: () -> Unit) {
                 "settings/benchmark" -> BenchmarkPage()
                 "settings/retention" -> RetentionPage()
                 "settings/sync" -> SyncPage(open)
+                "settings/chatgpt" -> ChatGptPage()
                 "settings/conflicts" -> ConflictsPage()
                 "settings/exclusions" -> ExclusionsPage()
             }
@@ -98,6 +101,7 @@ private fun SettingsHome(open: (String) -> Unit) {
     val context = LocalContext.current
     val app = HexApp.get(context)
     val settings by app.settings.flow.collectAsStateWithLifecycle()
+    val signedIn by app.chatGpt.signedIn.collectAsStateWithLifecycle()
     SectionLabel("Button")
     Card {
         Row("Size", "${settings.bubbleSizeDp} dp", onClick = { open("settings/bubble-size") })
@@ -118,7 +122,9 @@ private fun SettingsHome(open: (String) -> Unit) {
     Card {
         Row("Recordings and history", "Recordings: ${settings.audioRetention.label()}. Text: ${settings.historyRetention.label()}.", onClick = { open("settings/retention") })
         Divider()
-        Row("Sync and polish", if (settings.syncEnabled) "On" else "Off", onClick = { open("settings/sync") })
+        Row("Dictionary sync", if (settings.syncEnabled) "On" else "Off", onClick = { open("settings/sync") })
+        Divider()
+        Row("ChatGPT sign-in", if (signedIn) "Signed in" else "Not signed in", onClick = { open("settings/chatgpt") })
     }
     SectionLabel("Reliability")
     Card {
@@ -339,7 +345,6 @@ private fun SyncPage(open: (String) -> Unit) {
     val running by app.sync.running.collectAsStateWithLifecycle()
     val profile by app.profile.flow.collectAsStateWithLifecycle()
     var url by remember { mutableStateOf(settings.syncUrl) }
-    var polish by remember { mutableStateOf(settings.polishUrl) }
     var token by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
 
@@ -347,7 +352,6 @@ private fun SyncPage(open: (String) -> Unit) {
     Card {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             OutlinedTextField(url, { url = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Profile URL") }, singleLine = true, colors = hexFieldColors(), placeholder = { Text("https://…/v1/profile") })
-            OutlinedTextField(polish, { polish = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Polish URL (optional)") }, singleLine = true, colors = hexFieldColors(), placeholder = { Text("https://…/v1/generate") })
             OutlinedTextField(
                 token,
                 { token = it.trim() },
@@ -362,11 +366,10 @@ private fun SyncPage(open: (String) -> Unit) {
             SecondaryButton("Save") {
                 try {
                     if (url.isNotBlank()) SyncRunner.validateUrl(url)
-                    if (polish.isNotBlank()) SyncRunner.validateUrl(polish)
                     if (token.isNotBlank()) app.secure.putToken(SecureStore.SYNC_TOKEN, token)
                     token = ""
                     message = null
-                    app.settings.update { it.copy(syncUrl = url, polishUrl = polish) }
+                    app.settings.update { it.copy(syncUrl = url) }
                 } catch (e: IllegalArgumentException) {
                     message = e.message
                 }
@@ -392,6 +395,41 @@ private fun SyncPage(open: (String) -> Unit) {
         if (profile.openConflicts.isNotEmpty()) {
             Divider()
             Row("Conflicts", "${profile.openConflicts.size} to review", onClick = { open("settings/conflicts") })
+        }
+    }
+}
+
+@Composable
+private fun ChatGptPage() {
+    val context = LocalContext.current
+    val app = HexApp.get(context)
+    val signedIn by app.chatGpt.signedIn.collectAsStateWithLifecycle()
+    val state by app.chatGpt.state.collectAsStateWithLifecycle()
+
+    Note("Long dictations go straight to OpenAI with this phone's own ChatGPT sign-in and count against your plan. The sign-in stays on this phone. Short dictations never use it.")
+    Spacer(Modifier.height(12.dp))
+    if (signedIn) {
+        Card { Row("Signed in", "Sign out", onClick = { app.chatGpt.signOut() }) }
+        return
+    }
+    when (val current = state) {
+        is ChatGptSignIn.State.Waiting -> Card {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("Enter this code on the ChatGPT page", style = MaterialTheme.typography.bodyMedium, color = hex.muted)
+                Text(current.code, style = MaterialTheme.typography.headlineSmall, color = hex.text)
+                PrimaryButton("Copy code and open page") {
+                    context.getSystemService(android.content.ClipboardManager::class.java)
+                        .setPrimaryClip(android.content.ClipData.newPlainText("Sign-in code", current.code))
+                    context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(app.chatGpt.approvalPage)))
+                }
+                SecondaryButton("Cancel") { app.chatGpt.cancel() }
+                Text("Waiting for you to approve. If ChatGPT refuses the code, turn on device code sign-in in its security settings.", style = MaterialTheme.typography.bodySmall, color = hex.muted)
+            }
+        }
+        ChatGptSignIn.State.Starting -> Note("Getting a code…")
+        else -> {
+            (current as? ChatGptSignIn.State.Failed)?.let { Note(it.message, hex.danger) }
+            PrimaryButton("Sign in with ChatGPT") { app.chatGpt.start() }
         }
     }
 }

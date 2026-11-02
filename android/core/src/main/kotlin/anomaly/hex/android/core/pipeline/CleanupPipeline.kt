@@ -9,7 +9,7 @@ fun interface LocalCleaner {
 }
 
 fun interface Polisher {
-    fun polish(prompt: String, model: ModelRef, fallbackProvider: String?, deadlineMs: Long, cancel: CancelToken): String
+    fun polish(prompt: String, model: String, effort: String?, deadlineMs: Long, cancel: CancelToken): String
 }
 
 enum class CleanupStage { LocalCleanup, Polish }
@@ -71,8 +71,9 @@ class CleanupPipeline(
 
         checkCancelled(cancel)
         if (willPolish && meetsThreshold(text, policy.minWords, policy.minChars)) {
-            val model = ModelRef.parse(policy.model, policy.variant)
-            if (model == null) {
+            // Desktop saves `provider/model`. The phone has one provider, so only the model counts.
+            val model = policy.model.substringAfterLast('/').trim()
+            if (model.isEmpty()) {
                 failures += "Polish: invalid model"
             } else {
                 onStage(CleanupStage.Polish)
@@ -81,7 +82,7 @@ class CleanupPipeline(
                     polisher.polish(
                         polishPrompt(policy.polishPrompt, text, vocabulary, appName),
                         model,
-                        policy.fallbackProvider,
+                        policy.variant?.takeIf(String::isNotBlank),
                         policy.deadlineSeconds * 1000L,
                         cancel,
                     )

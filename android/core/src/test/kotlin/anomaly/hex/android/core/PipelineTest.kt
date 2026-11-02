@@ -7,8 +7,6 @@ import anomaly.hex.android.core.pipeline.CleanupGuard
 import anomaly.hex.android.core.pipeline.CleanupPipeline
 import anomaly.hex.android.core.pipeline.FillerWords
 import anomaly.hex.android.core.pipeline.GenerationException
-import anomaly.hex.android.core.pipeline.ModelRef
-import anomaly.hex.android.core.pipeline.QuotaFallbackGenerator
 import anomaly.hex.android.core.pipeline.Vocabulary
 import anomaly.hex.android.core.profile.CleanupPolicy
 import anomaly.hex.android.core.profile.PortableProfile
@@ -34,7 +32,6 @@ class PipelineTest {
         assertEquals(3000, p.minChars)
         assertEquals(8, p.deadlineSeconds)
         assertEquals("none", p.variant)
-        assertEquals("openai", p.fallbackProvider)
         assertEquals("opencode-go/gpt-6-luna", p.model)
         assertFalse("polish is opt-in", p.polishEnabled)
     }
@@ -77,20 +74,20 @@ class PipelineTest {
         var seenPrompt = ""
         var seenSystem = ""
         var seenDeadline = 0L
-        var seenFallback: String? = null
-        var seenModel: ModelRef? = null
+        var seenEffort: String? = null
+        var seenModel = ""
         val pipeline = CleanupPipeline(
             localCleaner = { system, _, _ -> seenSystem = system; words(150) },
-            polisher = { prompt, model, fallback, deadline, _ ->
-                seenPrompt = prompt; seenModel = model; seenFallback = fallback; seenDeadline = deadline
+            polisher = { prompt, model, effort, deadline, _ ->
+                seenPrompt = prompt; seenModel = model; seenEffort = effort; seenDeadline = deadline
                 "polished"
             },
         )
         val out = pipeline.process(words(150), policy, terms, "Notes", CancelToken())
         assertEquals("polished", out.text)
         assertEquals(8000, seenDeadline)
-        assertEquals("openai", seenFallback)
-        assertEquals(ModelRef("opencode-go", "gpt-6-luna", "none"), seenModel)
+        assertEquals("none", seenEffort)
+        assertEquals("gpt-6-luna", seenModel)
         // The custom prompt is whole and only in polish; local gets the default; both get vocabulary.
         assertTrue(seenPrompt.contains("Profile instructions:\nCUSTOM PROMPT\n"))
         assertTrue(seenPrompt.contains("Nimbus (may be transcribed as nimbas)"))
@@ -166,104 +163,6 @@ class PipelineTest {
             pipeline.process("raw", policy.copy(minWords = 0, minChars = 0), terms, "App", cancel)
         }
         assertFalse(polished)
-    }
-
-    // ---- typed quota fallback ----
-
-    private val model = ModelRef("opencode-go", "gpt-6-luna", "none")
-    private val quota = """{"_tag":"ProviderRequestError","providerID":"opencode-go","reason":"rate_limit","status":402,"message":"任意のメッセージ"}"""
-    private val ok = """{"data":{"text":"Clean text."}}"""
-
-    @Test
-    fun typedQuotaRetriesSamePromptModelAndVariantOnFallbackProvider() {
-        val bodies = mutableListOf<String>()
-        val replies = ArrayDeque(listOf(quota, ok))
-        val out = QuotaFallbackGenerator({ body, _, _ -> bodies += body; replies.removeFirst() })
-            .generate("PROMPT", model, "openai", 8000, CancelToken())
-        assertEquals("Clean text.", out)
-        assertEquals(2, bodies.size)
-        assertEquals(bodies[0].replace("opencode-go", "openai"), bodies[1])
-        assertTrue(bodies[1].contains("\"variant\":\"none\""))
-        assertTrue(bodies[1].contains("\"id\":\"gpt-6-luna\""))
-    }
-
-    @Test
-    fun onlyTheTypedRejectionFallsBack() {
-        val notQuota = listOf(
-            // The words in the message must not matter, whatever they say.
-            """{"_tag":"ProviderRequestError","providerID":"opencode-go","reason":"auth","message":"rate limit quota exceeded"}""",
-            """{"_tag":"Other","providerID":"opencode-go","reason":"rate_limit","message":"x"}""",
-            """{"_tag":"ProviderRequestError","providerID":"another","reason":"rate_limit","message":"x"}""",
-            """{"message":"quota exhausted, rate_limit"}""",
-        )
-        for (reply in notQuota) {
-            var calls = 0
-            assertThrows(reply, GenerationException::class.java) {
-                QuotaFallbackGenerator({ _, _, _ -> calls += 1; reply }).generate("p", model, "openai", 8000, CancelToken())
-            }
-            assertEquals(reply, 1, calls)
-        }
-    }
-
-    @Test
-    fun timeoutAndNetworkFailuresNeverFallBack() {
-        var calls = 0
-        assertThrows(IOException::class.java) {
-            QuotaFallbackGenerator({ _, _, _ -> calls += 1; throw IOException("timeout") })
-                .generate("p", model, "openai", 8000, CancelToken())
-        }
-        assertEquals(1, calls)
-    }
-
-    @Test
-    fun theFallbackSharesTheOriginalDeadlineAndRunsAtMostOnce() {
-        var now = 1000L
-        val remaining = mutableListOf<Long>()
-        val generator = QuotaFallbackGenerator({ _, left, _ ->
-            remaining += left
-            now += 3000
-            quota.replace("opencode-go", if (remaining.size == 1) "opencode-go" else "openai")
-        }, { now })
-        assertThrows(GenerationException::class.java) { generator.generate("p", model, "openai", 8000, CancelToken()) }
-        assertEquals(listOf(8000L, 5000L), remaining)
-
-        // Deadline gone by the time the fallback would start: no second request.
-        now = 1000
-        var calls = 0
-        val late = QuotaFallbackGenerator({ _, _, _ -> calls += 1; now += 9000; quota }, { now })
-        assertThrows(GenerationException::class.java) { late.generate("p", model, "openai", 8000, CancelToken()) }
-        assertEquals(1, calls)
-    }
-
-    @Test
-    fun aReplyAfterTheDeadlineIsNotUsed() {
-        var now = 1000L
-        val late = QuotaFallbackGenerator({ _, _, _ -> now += 8000; ok }, { now })
-        assertThrows(GenerationException::class.java) { late.generate("p", model, "openai", 8000, CancelToken()) }
-        now = 1000
-        val inTime = QuotaFallbackGenerator({ _, _, _ -> now += 7999; ok }, { now })
-        assertEquals("Clean text.", inTime.generate("p", model, "openai", 8000, CancelToken()))
-    }
-
-    @Test
-    fun noFallbackWithoutAProviderOrToTheSameProvider() {
-        for (fallback in listOf(null, "", "  ", "opencode-go")) {
-            var calls = 0
-            assertThrows(GenerationException::class.java) {
-                QuotaFallbackGenerator({ _, _, _ -> calls += 1; quota }).generate("p", model, fallback, 8000, CancelToken())
-            }
-            assertEquals(1, calls)
-        }
-    }
-
-    @Test
-    fun cancelledGenerationSendsNothing() {
-        var calls = 0
-        val cancel = CancelToken().apply { cancel() }
-        assertThrows(CancelledException::class.java) {
-            QuotaFallbackGenerator({ _, _, _ -> calls += 1; ok }).generate("p", model, "openai", 8000, cancel)
-        }
-        assertEquals(0, calls)
     }
 
     // ---- guards and rules ----

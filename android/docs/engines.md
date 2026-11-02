@@ -55,7 +55,7 @@ Each dictation waits for speech, then local cleanup, then polish if the size gat
 
 - Speech: at least 20 s, or 8× the clip's length.
 - Local cleanup: 8 s.
-- Polish: 8 s, including any quota fallback.
+- Polish: 8 s, including any sign-in renewal and retry.
 
 ## What to measure on the phone
 

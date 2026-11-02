@@ -4,15 +4,20 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import anomaly.hex.android.core.codex.CodexTokenStore
+import anomaly.hex.android.core.codex.CodexTokens
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 /**
- * The companion's bearer token, wrapped by a hardware-backed Keystore key where
- * the device has one. It is never in the APK, the profile, backups, or logs.
+ * The sync token and this phone's ChatGPT login, wrapped by a hardware-backed
+ * Keystore key where the device has one. Neither is in the APK, the profile,
+ * backups, or logs.
  */
 class SecureStore(context: Context) {
     private val prefs = context.getSharedPreferences("hex-secure", Context.MODE_PRIVATE)
@@ -33,12 +38,12 @@ class SecureStore(context: Context) {
 
     fun putToken(name: String, token: String?) {
         if (token.isNullOrEmpty()) {
-            prefs.edit().remove(name).apply()
+            prefs.edit().remove(name).commit()
             return
         }
         val cipher = Cipher.getInstance(TRANSFORM).apply { init(Cipher.ENCRYPT_MODE, key()) }
         val sealed = cipher.iv + cipher.doFinal(token.toByteArray())
-        prefs.edit().putString(name, Base64.encodeToString(sealed, Base64.NO_WRAP)).apply()
+        prefs.edit().putString(name, Base64.encodeToString(sealed, Base64.NO_WRAP)).commit()
     }
 
     fun token(name: String): String? {
@@ -59,5 +64,14 @@ class SecureStore(context: Context) {
         private const val TRANSFORM = "AES/GCM/NoPadding"
         private const val IV_BYTES = 12
         const val SYNC_TOKEN = "sync"
+        const val CODEX_TOKENS = "codex"
     }
+}
+
+/** Committed before use: a rotated refresh token that isn't saved ends the session. */
+class SecureCodexTokens(private val secure: SecureStore) : CodexTokenStore {
+    override fun load(): CodexTokens? =
+        secure.token(SecureStore.CODEX_TOKENS)?.let { runCatching { Json.decodeFromString<CodexTokens>(it) }.getOrNull() }
+
+    override fun save(tokens: CodexTokens?) = secure.putToken(SecureStore.CODEX_TOKENS, tokens?.let { Json.encodeToString(it) })
 }

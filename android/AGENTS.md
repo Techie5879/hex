@@ -7,7 +7,8 @@ macOS rules don't apply here. Its privacy and product rules do.
 
 - This repository is public. Never commit personal dictionary entries, prompts, audio,
   screenshots of real accounts, hostnames, tokens, or logs. Tests use synthetic data only.
-- The APK holds no credentials and no models. A person enters a companion token at runtime.
+- The APK holds no credentials and no models. A person enters a sync token and signs in to ChatGPT
+  at runtime.
 - Never log transcripts, field text, or tokens.
 - Never weaken a privacy gate to make automation pass. See `docs/testing.md`.
 
@@ -19,7 +20,7 @@ macOS rules don't apply here. Its privacy and product rules do.
 - `native-asr/`, `native-llm/`: JNI over transcribe.cpp and llama.cpp. Each is its own module
   because each brings its own ggml, and both load in one process.
 - `testapp/`: Editors to dictate into, plus on-device tests. Never shipped.
-- `companion/`: Sync and polish gateway for a private machine. One Bun file, no dependencies.
+- `companion/`: Profile sync server for a private machine. One Bun file, no dependencies.
 
 ## Rules that keep it correct
 

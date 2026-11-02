@@ -11,7 +11,11 @@ import anomaly.hex.android.data.ProfileRepository
 import anomaly.hex.android.data.SecureStore
 import anomaly.hex.android.engine.EngineClient
 import anomaly.hex.android.models.ModelStore
-import anomaly.hex.android.sync.CompanionPolisher
+import anomaly.hex.android.core.codex.CodexPolisher
+import anomaly.hex.android.core.codex.CodexSession
+import anomaly.hex.android.data.SecureCodexTokens
+import anomaly.hex.android.sync.ChatGptSignIn
+import kotlinx.coroutines.flow.MutableStateFlow
 import anomaly.hex.android.sync.SyncRunner
 import java.io.File
 
@@ -25,6 +29,8 @@ class HexApp : Application() {
     lateinit var secure: SecureStore private set
     lateinit var engine: EngineClient private set
     lateinit var sync: SyncRunner private set
+    lateinit var codex: CodexSession private set
+    lateinit var chatGpt: ChatGptSignIn private set
 
     val captureDir get() = File(noBackupFilesDir, "capture")
 
@@ -34,7 +40,7 @@ class HexApp : Application() {
             localCleaner = current.cleanupModel?.takeIf(models::isInstalled)?.let {
                 engine.cleaner(models.file(it).path, current.threads, current.localCleanupDeadlineSeconds * 1000L)
             },
-            polisher = current.polishUrl.takeIf(String::isNotBlank)?.let { CompanionPolisher(it, secure.token(SecureStore.SYNC_TOKEN)) },
+            polisher = if (codex.signedIn) CodexPolisher(codex) else null,
         )
     }
 
@@ -47,6 +53,10 @@ class HexApp : Application() {
         archive = AudioArchive(this)
         models = ModelStore(this)
         secure = SecureStore(this)
+        val signedIn = MutableStateFlow(false)
+        codex = CodexSession(SecureCodexTokens(secure), onChange = { signedIn.value = it })
+        signedIn.value = codex.signedIn
+        chatGpt = ChatGptSignIn(codex, signedIn)
         engine = EngineClient(this) { settings.current.unloadIdleMinutes }
         sync = SyncRunner(settings, profile, secure)
         profile.onEdited = { sync.schedule() }
