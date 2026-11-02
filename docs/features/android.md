@@ -63,3 +63,11 @@ was a local proxy with a test certificate, because Tailscale HTTPS needs enablin
 observed: any real phone, physical microphone, speed, heat, battery policy, Tailscale serve, or
 TalkBack. See
 [`android/docs/acceptance.md`](../../android/docs/acceptance.md).
+
+Integrated-host update, 2026-11-02: the Linux desktop suite passed 1,536 tests
+with 22 opt-in tests ignored; Android core passed 85 tests. The rebuilt app opened
+on the Android 16 emulator, whose scheduler reported a one-hour maintenance job.
+The host's authentication, conditional writes, interrupted apply, migration, and
+editor-race regressions passed. Native Mac hosting and migration remain unverified:
+the linked Mac was unreachable and the fork's GitHub Actions was disabled. The
+installed Mac companion was therefore not changed.
