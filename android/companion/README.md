@@ -14,13 +14,19 @@ to run on a machine you already own. Run it on one that stays awake, such as a M
 
 ```sh
 android/companion/install-macos.sh     # copies the file and starts it at login
-~/.local/share/hex-companion/run add-device phone   # shows the token once
-~/.local/share/hex-companion/run add-device mac
+~/.local/share/hex-companion/hex-companion add-device phone   # shows the token once
+~/.local/share/hex-companion/hex-companion add-device mac
 tailscale serve --bg --https=8443 http://127.0.0.1:8787
 tailscale serve status    # shows your https://<host>.<tailnet>.ts.net:8443 address
 ```
 
 `tailscale serve` needs HTTPS turned on for your tailnet. If it stops and prints a link, open it once.
+
+The LaunchAgent is `anomaly.hex.companion`, installed at
+`~/Library/LaunchAgents/anomaly.hex.companion.plist`. Its launcher is named `hex-companion`
+so background activity is identifiable. Rerunning the installer replaces the old `run` launcher
+without changing the stored profile or device tokens. macOS may retain the old notification name
+until its background-item registration refreshes.
 
 In Hex on the phone, open Settings › Dictionary sync:
 

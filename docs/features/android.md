@@ -48,6 +48,7 @@ Keep                                      // android.retention
 Sync                                      // android.sync; android/companion, src/profile_sync
 ├── Opt-in. Dictionary, prompts, and cleanup policy only
 ├── Offline edits stay; tombstones for deletes; prompt conflicts ask a person
+├── Mac companion: `anomaly.hex.companion` LaunchAgent, `hex-companion` launcher
 └── Desktop: Labs › Profile sync, then `hex profile connect` and `hex profile sync`
 ```
 
