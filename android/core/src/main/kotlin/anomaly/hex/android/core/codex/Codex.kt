@@ -227,13 +227,13 @@ class CodexDeviceLogin(private val endpoints: CodexEndpoints = CodexEndpoints())
      * The login once approved, or null while the code is waiting for approval. Throws
      * [CodexLoginFailedException] when it can't succeed, and plain IOException for an outage.
      */
-    fun poll(code: Code): CodexTokens? {
+    fun poll(device: Code): CodexTokens? {
         val (status, body) = send(
             "${endpoints.auth}/api/accounts/deviceauth/token",
             "application/json",
             buildJsonObject {
-                put("device_auth_id", code.id)
-                put("user_code", code.userCode)
+                put("device_auth_id", device.id)
+                put("user_code", device.userCode)
             }.toString(),
         )
         when (status) {
@@ -243,21 +243,25 @@ class CodexDeviceLogin(private val endpoints: CodexEndpoints = CodexEndpoints())
             else -> throw CodexLoginFailedException("Sign-in server said $status")
         }
         val reply = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrElse { throw CodexLoginFailedException("Invalid sign-in reply") }
-        val (exchange, tokens) = send(
-            "${endpoints.auth}/oauth/token",
-            FORM,
-            form(
-                "grant_type" to "authorization_code",
-                "code" to (reply.string("authorization_code") ?: throw CodexLoginFailedException("Invalid sign-in reply")),
-                "redirect_uri" to "${endpoints.auth}/deviceauth/callback",
-                "client_id" to CLIENT_ID,
-                "code_verifier" to (reply.string("code_verifier") ?: throw CodexLoginFailedException("Invalid sign-in reply")),
-            ),
-        )
-        // The approved code works once, so a failed exchange can't be retried.
-        if (exchange != 200) throw CodexLoginFailedException("Token server said $exchange")
+        val code = reply.string("authorization_code") ?: throw CodexLoginFailedException("Invalid sign-in reply")
+        val verifier = reply.string("code_verifier") ?: throw CodexLoginFailedException("Invalid sign-in reply")
+        // The approved code works once, so nothing after this point can be retried.
         return try {
+            val (exchange, tokens) = send(
+                "${endpoints.auth}/oauth/token",
+                FORM,
+                form(
+                    "grant_type" to "authorization_code",
+                    "code" to code,
+                    "redirect_uri" to "${endpoints.auth}/deviceauth/callback",
+                    "client_id" to CLIENT_ID,
+                    "code_verifier" to verifier,
+                ),
+            )
+            if (exchange != 200) throw CodexLoginFailedException("Token server said $exchange")
             parseTokens(tokens, null)
+        } catch (failed: CodexLoginFailedException) {
+            throw failed
         } catch (error: IOException) {
             throw CodexLoginFailedException(error.message.orEmpty())
         }

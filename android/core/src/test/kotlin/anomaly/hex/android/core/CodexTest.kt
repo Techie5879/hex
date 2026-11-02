@@ -374,7 +374,7 @@ class CodexTest {
         }
         val login = CodexDeviceLogin(endpoints)
         val code = CodexDeviceLogin.Code("dev-1", "ABCD-EFGH", 5)
-        for (reply in listOf<(HttpExchange) -> Unit>({ reply(it, 400, "{}") }, { reply(it, 503, "") }, { reply(it, 200, "not json") })) {
+        for (reply in listOf<(HttpExchange) -> Unit>({ reply(it, 400, "{}") }, { reply(it, 503, "") }, { reply(it, 200, "not json") }, { it.close() })) {
             tokenReply = reply
             assertThrows(CodexLoginFailedException::class.java) { login.poll(code) }
         }
