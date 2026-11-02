@@ -7,7 +7,7 @@ macOS rules don't apply here. Its privacy and product rules do.
 
 - This repository is public. Never commit personal dictionary entries, prompts, audio,
   screenshots of real accounts, hostnames, tokens, or logs. Tests use synthetic data only.
-- The APK holds no credentials and no models. A person enters a sync token and signs in to ChatGPT
+- The APK holds no credentials or speech/cleanup model weights. Its small pinned voice-activity detector is bundled. A person enters a sync token and signs in to ChatGPT
   at runtime.
 - Never log transcripts, field text, or tokens.
 - Never weaken a privacy gate to make automation pass. See `docs/testing.md`.
