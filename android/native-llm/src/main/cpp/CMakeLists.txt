@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.22)
 project(hexllm C CXX)
 include(FetchContent)
 
+# Assert messages embed source paths. Keep the builder's directories out of the shipped library.
+add_compile_options(
+    -ffile-prefix-map=${CMAKE_SOURCE_DIR}=src
+    -ffile-prefix-map=${CMAKE_BINARY_DIR}=build
+    -ffile-prefix-map=${ANDROID_NDK}=ndk)
+
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)

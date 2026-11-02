@@ -30,12 +30,28 @@ data class FieldFacts(
     val isSearchField: Boolean = false,
     val keyguardLocked: Boolean = false,
     val excludedByUser: Boolean = false,
+    /** The keyboard's own field, the notification shade, and similar: never a dictation target. */
+    val systemSurface: Boolean = false,
     /** The field's resource or HTML id, and its hint. Used only as an extra signal to hide. */
     val viewId: String? = null,
     val hint: String? = null,
 )
 
-enum class HideReason { NoField, NotEditable, Disabled, Password, DataSensitive, NonText, UnknownType, PaymentField, ExcludedApp, Locked, NoPackage }
+enum class HideReason {
+    NoField, NotEditable, Disabled, Password, DataSensitive, NonText, UnknownType, PaymentField, ExcludedApp, SystemSurface, Locked, NoPackage;
+
+    /**
+     * Whether focus landing here must end a recording. Leaving a text field for nothing, or
+     * pulling down the shade, needn't. A field Hex wouldn't dictate into must, or speech meant for
+     * it could be captured with the button gone. A field whose type hasn't arrived yet may simply
+     * be a moment behind, so it counts once the editor has settled.
+     */
+    fun endsCapture(editorSettled: Boolean) = when (this) {
+        NoField, NotEditable, Disabled, SystemSurface, NoPackage -> false
+        UnknownType -> editorSettled
+        Password, DataSensitive, NonText, PaymentField, ExcludedApp, Locked -> true
+    }
+}
 
 sealed interface Eligibility {
     data class Show(val multiline: Boolean, val search: Boolean) : Eligibility
@@ -57,6 +73,7 @@ object FieldEligibility {
         if (facts.keyguardLocked) return hide(HideReason.Locked)
         if (facts.packageName.isNullOrEmpty()) return hide(HideReason.NoPackage)
         if (facts.excludedByUser) return hide(HideReason.ExcludedApp)
+        if (facts.systemSurface) return hide(HideReason.SystemSurface)
         // Chrome keeps an input connection with no input type while nothing editable has focus.
         val editorIsField = facts.editorActive && facts.editorSettled && (facts.editorInputType ?: 0) != 0
         if (!facts.nodeEditable && !editorIsField) return hide(HideReason.NoField)

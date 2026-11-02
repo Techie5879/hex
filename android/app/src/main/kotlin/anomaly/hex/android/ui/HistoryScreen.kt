@@ -16,10 +16,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -47,7 +49,23 @@ fun HistoryScreen() {
     val entries = remember(revision, query) { app.history.list(query) }
     var expanded by remember { mutableLongStateOf(-1L) }
     var player by remember { mutableStateOf<MediaPlayer?>(null) }
+    var unsaved by remember { mutableStateOf<String?>(null) }
     DisposableEffect(Unit) { onDispose { player?.release() } }
+    unsaved?.let { text ->
+        AlertDialog(
+            onDismissRequest = { unsaved = null },
+            containerColor = hex.card,
+            title = { Text("Transcribed", color = hex.text) },
+            text = { Text("Text history is off, so this isn't kept.\n\n$text", color = hex.text) },
+            confirmButton = {
+                TextButton({
+                    context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Hex dictation", text))
+                    unsaved = null
+                }) { Text("Copy", color = hex.text) }
+            },
+            dismissButton = { TextButton({ unsaved = null }) { Text("Close", color = hex.muted) } },
+        )
+    }
 
     Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Text("History", style = MaterialTheme.typography.headlineSmall, color = hex.text, modifier = Modifier.padding(vertical = 16.dp))
@@ -90,6 +108,7 @@ fun HistoryScreen() {
                                 entry.audioName?.let(app.archive::delete)
                                 app.history.delete(entry.id)
                             },
+                            onTextOnly = { unsaved = it },
                         )
                         if (entry !== entries.last()) Divider()
                     }
@@ -101,7 +120,7 @@ fun HistoryScreen() {
 }
 
 @Composable
-private fun HistoryRow(entry: HistoryEntry, expanded: Boolean, onToggle: () -> Unit, onPlay: (String) -> Unit, onCopy: () -> Unit, onDelete: () -> Unit) {
+private fun HistoryRow(entry: HistoryEntry, expanded: Boolean, onToggle: () -> Unit, onPlay: (String) -> Unit, onCopy: () -> Unit, onDelete: () -> Unit, onTextOnly: (String) -> Unit) {
     val context = LocalContext.current
     val app = HexApp.get(context)
     Column(Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(16.dp)) {
@@ -114,7 +133,7 @@ private fun HistoryRow(entry: HistoryEntry, expanded: Boolean, onToggle: () -> U
         if (entry.pendingPcm != null) {
             Text("Recording saved, not transcribed yet.", style = MaterialTheme.typography.bodyLarge, color = hex.text)
             Spacer(Modifier.height(8.dp))
-            PendingActions(entry)
+            PendingActions(entry, onTextOnly)
             return@Column
         }
         Text(entry.text, style = MaterialTheme.typography.bodyLarge, color = hex.text, maxLines = if (expanded) Int.MAX_VALUE else 3)
@@ -142,7 +161,7 @@ private fun HistoryRow(entry: HistoryEntry, expanded: Boolean, onToggle: () -> U
 }
 
 @Composable
-private fun PendingActions(entry: HistoryEntry) {
+private fun PendingActions(entry: HistoryEntry, onTextOnly: (String) -> Unit) {
     val app = HexApp.get(LocalContext.current)
     var working by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -151,7 +170,11 @@ private fun PendingActions(entry: HistoryEntry) {
             working = true
             error = null
             thread(name = "hex-transcribe-pending") {
-                error = PendingTranscriber.run(app, entry)
+                when (val outcome = PendingTranscriber.run(app, entry)) {
+                    PendingTranscriber.Outcome.Saved -> Unit
+                    is PendingTranscriber.Outcome.TextOnly -> onTextOnly(outcome.text)
+                    is PendingTranscriber.Outcome.Failed -> error = outcome.reason
+                }
                 working = false
             }
         }

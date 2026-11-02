@@ -53,10 +53,11 @@ Sync                                      // android.sync; android/companion, sr
 
 ## Observed
 
-On an Android 16 (API 36) emulator with Gboard and Chrome, 2026-11-02: every flow above, including
-real speech through the capture path, Whisper and SpeakoFlow on the device, Chrome's text, password,
-card, phone, and rich fields, crash and engine-death recovery, and sync with the desktop CLI. Polish
-ran against a fake provider for each outcome, and once against real OpenCode. HTTPS was a local proxy
-with a test certificate, because Tailscale HTTPS needs enabling on the tailnet. Not observed: any real
-phone, physical microphone, speed, heat, battery policy, or Tailscale serve. See
+On an Android 16 (API 36) emulator with Gboard and Chrome, 2026-11-02: real speech through the capture
+path, Whisper and SpeakoFlow on the device, tap, hold, cancel, and drag, Chrome's text, password, card,
+phone, and rich fields, crash and engine-death recovery, retention and expiry, and sync with the
+desktop CLI. Polish ran against a fake provider for each outcome, and once against real OpenCode. HTTPS
+was a local proxy with a test certificate, because Tailscale HTTPS needs enabling on the tailnet. Not
+observed: any real phone, physical microphone, speed, heat, battery policy, Tailscale serve, or
+TalkBack. See
 [`android/docs/acceptance.md`](../../android/docs/acceptance.md).

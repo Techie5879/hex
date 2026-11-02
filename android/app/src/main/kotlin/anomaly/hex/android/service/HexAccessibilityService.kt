@@ -24,7 +24,6 @@ import anomaly.hex.android.HexApp
 import anomaly.hex.android.core.field.Eligibility
 import anomaly.hex.android.core.field.FieldEligibility
 import anomaly.hex.android.core.field.FieldFacts
-import anomaly.hex.android.core.field.HideReason
 import anomaly.hex.android.core.overlay.StopReason
 
 /**
@@ -114,7 +113,8 @@ class HexAccessibilityService : AccessibilityService() {
         if (!::coordinator.isInitialized) return
         val target = snapshot()
         val eligibility = target.eligibility
-        val sensitive = eligibility is Eligibility.Hide && eligibility.reason in SENSITIVE
+        val settled = SystemClock.uptimeMillis() - inputChangedAt >= EDITOR_ALONE_AFTER_MS
+        val sensitive = eligibility is Eligibility.Hide && eligibility.reason.endsCapture(settled)
         coordinator.onEligibility(eligibility is Eligibility.Show, sensitive)
         overlay.setKeyboardTop(keyboardTop())
         overlay.setSearchField((eligibility as? Eligibility.Show)?.search == true)
@@ -155,7 +155,8 @@ class HexAccessibilityService : AccessibilityService() {
             editorSettled = SystemClock.uptimeMillis() - inputChangedAt >= EDITOR_ALONE_AFTER_MS,
             isSearchField = editor != null && (editor.imeOptions and EditorInfo.IME_MASK_ACTION) == EditorInfo.IME_ACTION_SEARCH,
             keyguardLocked = getSystemService(KeyguardManager::class.java).isKeyguardLocked,
-            excludedByUser = packageName in settings.excludedPackages || packageName == keyboard || packageName == SYSTEM_UI || overShade,
+            excludedByUser = packageName in settings.excludedPackages,
+            systemSurface = packageName == keyboard || packageName == SYSTEM_UI || overShade,
             viewId = node?.viewIdResourceName,
             hint = node?.hintText?.toString(),
         )
@@ -208,7 +209,6 @@ class HexAccessibilityService : AccessibilityService() {
         private val LATE_REFRESH_MS = longArrayOf(120, 350, 800, 1500)
         private const val EDITOR_ALONE_AFTER_MS = 1400L
         private const val SYSTEM_UI = "com.android.systemui"
-        private val SENSITIVE = setOf(HideReason.Password, HideReason.DataSensitive, HideReason.PaymentField, HideReason.Locked)
     }
 }
 

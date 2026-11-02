@@ -64,7 +64,7 @@ class HistoryStore(context: Context) {
         return id
     }
 
-    fun complete(id: Long, processed: ProcessedText) {
+    fun complete(id: Long, processed: ProcessedText, audioName: String? = null) {
         helper.writableDatabase.update(
             "history",
             ContentValues().apply {
@@ -72,6 +72,7 @@ class HistoryStore(context: Context) {
                 put("final", processed.text)
                 put("stages", processed.stageNames)
                 put("failures", processed.failureNotes)
+                if (audioName != null) put("audio", audioName)
                 putNull("pending")
             },
             "id=?",

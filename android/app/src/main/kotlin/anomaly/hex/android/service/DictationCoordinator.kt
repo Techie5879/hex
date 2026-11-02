@@ -26,6 +26,7 @@ import anomaly.hex.android.core.overlay.ResultReason
 import anomaly.hex.android.core.overlay.StopReason
 import anomaly.hex.android.core.pipeline.CancelToken
 import anomaly.hex.android.core.pipeline.CancelledException
+import anomaly.hex.android.core.pipeline.CleanupPipeline
 import anomaly.hex.android.core.pipeline.CleanupStage
 import anomaly.hex.android.core.pipeline.Vocabulary
 import anomaly.hex.android.data.HistoryEntry
@@ -61,6 +62,8 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
         var capture: AudioCapture? = null
         var mode: RecordingMode = RecordingMode.HandsFree
         var pendingHistoryId: Long? = null
+        var historyId: Long? = null
+        var audioName: String? = null
     }
 
     /** The one dictation the machine is about. Late callbacks from any other are ignored. */
@@ -252,9 +255,12 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
         }
     }
 
+    /** Cancelled: nothing of this dictation stays. Runs on the worker, so after any step in progress. */
     private fun discard(session: Session) {
         session.pcm.delete()
         session.pendingHistoryId?.let(app.history::delete)
+        session.historyId?.let(app.history::delete)
+        session.audioName?.let(app.archive::discard)
     }
 
     /** A dismissed failure: what may be recovered stays in History, and the rest goes now. */
@@ -301,12 +307,13 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
                 return finish(session) { apply(machine.onFailure(ErrorKind.TooQuiet, "No speech heard. Check your mic.", false)) }
             }
             val noLearning = session.target?.noPersonalizedLearning == true
-            val audioName = if (!retry && !noLearning) app.archive.retain(session.pcm, session.id, settings.audioRetention) else null
+            if (!retry && !noLearning) session.audioName = app.archive.retain(session.pcm, session.id, settings.audioRetention)
+            if (session.cancel.cancelled) throw CancelledException()
 
             phase(session, ProcessingPhase.Transcribing, "Transcribing")
             val profile = app.profile.current
             val terms = profile.liveTerms
-            val deadline = maxOf(MIN_ASR_DEADLINE_MS, samples / 16L * settings.asrDeadlineFactor)
+            val deadline = CleanupPipeline.asrDeadlineMs(samples.toLong(), settings.asrDeadlineFactor)
             val prompt = Vocabulary.transcriptionPrompt(terms)
             val raw = app.engine.transcribe(
                 session.pcm.path,
@@ -332,7 +339,7 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
             Log.i(TAG, "processed stages=${processed.stagesRun} failures=${processed.failures.size}")
 
             if (session.cancel.cancelled) throw CancelledException()
-            record(session, settings.historyRetention.keepsNew && !noLearning, audioName, target, processed)
+            record(session, settings.historyRetention.keepsNew && !noLearning, target, processed)
             session.pcm.delete()
             forCurrent(session) {
                 apply(machine.onProcessing(ProcessingPhase.Inserting))
@@ -356,7 +363,7 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
                 }
             }
         } catch (_: CancelledException) {
-            discard(session)
+            // cancelProcessing queues the discard, which runs once this returns.
         } catch (_: EngineDeadlineException) {
             failWithAudio(session, ErrorKind.Timeout, "Transcribing took too long. Try a smaller model.")
         } catch (_: EngineDiedException) {
@@ -377,12 +384,12 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
         then()
     }
 
-    private fun record(session: Session, keepText: Boolean, audioName: String?, target: TextTarget?, processed: anomaly.hex.android.core.pipeline.ProcessedText) {
+    private fun record(session: Session, keepText: Boolean, target: TextTarget?, processed: anomaly.hex.android.core.pipeline.ProcessedText) {
         val pending = session.pendingHistoryId
         when {
             keepText && pending != null -> app.history.complete(pending, processed)
-            keepText -> app.history.add(
-                HistoryEntry(0, session.createdMs, host.appLabel(target?.packageName), processed.raw, processed.text, processed.stageNames, processed.failureNotes, audioName),
+            keepText -> session.historyId = app.history.add(
+                HistoryEntry(0, session.createdMs, host.appLabel(target?.packageName), processed.raw, processed.text, processed.stageNames, processed.failureNotes, session.audioName),
             )
             pending != null -> app.history.delete(pending)
         }
@@ -469,7 +476,6 @@ class DictationCoordinator(private val context: Context, private val host: HexAc
         private const val POST_RELEASE_TAIL_MS = 200L
         private const val EPHEMERAL_SUFFIX = ".ephemeral.pcm"
         private const val LONG_SILENCE_MS = 2 * 60 * 1000L
-        private const val MIN_ASR_DEADLINE_MS = 20_000L
 
         @Volatile var active: DictationCoordinator? = null
             private set

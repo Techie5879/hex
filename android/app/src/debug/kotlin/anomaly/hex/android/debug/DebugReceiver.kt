@@ -40,6 +40,7 @@ class DebugReceiver : BroadcastReceiver() {
                 intent.getStringExtra("download")?.let { anomaly.hex.android.models.ModelDownloadService.start(context, it) }
                 if (intent.getBooleanExtra("pauseDownload", false)) app.models.cancel()
                 if (intent.getBooleanExtra("syncNow", false)) app.sync.runNow()
+                if (intent.getBooleanExtra("dismissResult", false)) DictationCoordinator.active?.onCancelTapped()
                 Log.i(TAG, "config applied")
             }
             "anomaly.hex.android.debug.INSERT" -> {

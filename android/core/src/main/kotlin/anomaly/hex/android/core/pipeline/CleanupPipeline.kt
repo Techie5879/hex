@@ -112,6 +112,10 @@ class CleanupPipeline(
 
     companion object {
         const val LOCAL_INPUT_LIMIT = 3000
+        private const val MIN_ASR_DEADLINE_MS = 20_000L
+
+        /** How long speech may take: bounded, and relative to the clip's length. */
+        fun asrDeadlineMs(samples: Long, factor: Int) = maxOf(MIN_ASR_DEADLINE_MS, samples / 16 * factor)
         private const val SYSTEM =
             "You transform dictated speech into replacement text. Return only the text that should be pasted. " +
                 "Do not add an explanation, label, alternative, or Markdown fence."

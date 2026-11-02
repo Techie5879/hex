@@ -144,6 +144,45 @@ class HexOnDeviceTest {
         }
     }
 
+    private fun latestState(): String =
+        shell("logcat -d -s HexDictation:I").lines().mapNotNull { Regex("state (\\w+)").find(it)?.groupValues?.get(1) }.lastOrNull().orEmpty()
+
+    private fun bubbleCenter(): Pair<Int, Int> {
+        val frame = Regex("Window #\\d+ Window\\{[^}]*HexBubble\\}[\\s\\S]*? frame=\\[(-?\\d+),(-?\\d+)\\]\\[(-?\\d+),(-?\\d+)\\]").find(shell("dumpsys window windows"))
+            ?: throw AssertionError("No button window")
+        val (left, top, right, bottom) = frame.destructured
+        val height = bottom.toInt() - top.toInt()
+        return if (left.toInt() <= 1) (left.toInt() + height / 2) to (top.toInt() + height / 2) else (right.toInt() - height / 2) to (top.toInt() + height / 2)
+    }
+
+    @Test
+    fun d2_focusOnAFieldHexWouldRefuseEndsARecording() {
+        ActivityScenario.launch(FieldsActivity::class.java).use { activity ->
+            for ((name, pick) in listOf<Pair<String, (FieldsActivity) -> View>>("number" to { it.number }, "password" to { it.password })) {
+                focus(activity) { it.multi }
+                waitUntil("the button") { bubbleShown() }
+                SystemClock.sleep(1500)
+                val (x, y) = bubbleCenter()
+                shell("logcat -c")
+                shell("input tap $x $y")
+                waitUntil("recording") { latestState() == "Recording" }
+                focus(activity, pick)
+                waitUntil("recording to end when $name takes focus") { latestState() != "Recording" }
+                // Whatever was said stays out of that field, and the bubble's state is settled.
+                waitUntil("a result") { latestState() in setOf("ResultReady", "Failed", "Idle", "Hidden") }
+                SystemClock.sleep(500)
+                val (cx, cy) = runCatching { bubbleCenter() }.getOrDefault(0 to 0)
+                if (cx != 0 && latestState() == "ResultReady") {
+                    shell("input tap $cx $cy")
+                }
+                activity.onActivity { assert(it.number.text.isEmpty() && it.password.text.isEmpty()) }
+                // A pending result would block the next round; a fresh activity's focus resets it.
+                shell("am broadcast -a anomaly.hex.android.debug.CONFIG -n anomaly.hex.android/.debug.DebugReceiver --ez dismissResult true")
+                SystemClock.sleep(500)
+            }
+        }
+    }
+
     @Test
     fun e_lockedDevicesShowNoButton() {
         ActivityScenario.launch(FieldsActivity::class.java).use { activity ->

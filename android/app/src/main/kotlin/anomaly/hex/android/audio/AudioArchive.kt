@@ -53,6 +53,16 @@ class AudioArchive(context: Context) {
         clip(name)?.delete()
     }
 
+    /** Removes a clip wherever it is. On the encoder's thread, so an encode in progress finishes first. */
+    fun discard(name: String) {
+        val stem = name.removeSuffix(".ogg")
+        worker.execute {
+            File(pending, "$stem.pcm").delete()
+            File(root, "$stem.ogg.partial").delete()
+            File(root, "$stem.ogg").delete()
+        }
+    }
+
     fun totalBytes() = root.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
     fun clipCount() = root.listFiles { f -> f.extension == "ogg" }.orEmpty().size

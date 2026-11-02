@@ -49,6 +49,18 @@ class FieldAndInsertionTest {
     }
 
     @Test
+    fun anyFieldHexWouldRefuseEndsARecordingAndLeavingAFieldDoesNot() {
+        for (reason in listOf(HideReason.Password, HideReason.DataSensitive, HideReason.NonText, HideReason.PaymentField, HideReason.ExcludedApp, HideReason.Locked)) {
+            assertTrue(reason.name, reason.endsCapture(editorSettled = false))
+        }
+        for (reason in listOf(HideReason.NoField, HideReason.NotEditable, HideReason.Disabled, HideReason.SystemSurface, HideReason.NoPackage)) {
+            assertTrue(reason.name, !reason.endsCapture(editorSettled = true))
+        }
+        assertTrue(!HideReason.UnknownType.endsCapture(editorSettled = false))
+        assertTrue(HideReason.UnknownType.endsCapture(editorSettled = true))
+    }
+
+    @Test
     fun aNewEditorWaitsForTheAccessibilityTreeUnlessTheFieldIsAlreadyKnown() {
         // Chrome connects its editor before its tree says which field took focus. That field's
         // id and placeholder may yet hide the button, so the editor alone can't show it yet.
