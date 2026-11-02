@@ -6,10 +6,12 @@ bun=$(command -v bun || true)
 [ -n "$bun" ] || { echo "Install Bun first." >&2; exit 1; }
 home=$HOME/.local/share/hex-companion
 agent=$HOME/Library/LaunchAgents/anomaly.hex.companion.plist
+case "$home" in *[\&\<\>\"]*) echo "Your home folder's name has characters this installer can't write." >&2; exit 1 ;; esac
 mkdir -p "$home" "$(dirname "$agent")"
 chmod 700 "$home"
 cp "$(dirname "$0")/companion.ts" "$home/companion.ts"
-printf '#!/bin/sh\nexec "%s" "%s/companion.ts" "$@"\n' "$bun" "$home" > "$home/run"
+# Pinned, so add-device and the running service always read the same tokens.
+printf '#!/bin/sh\nHEX_COMPANION_DIR="%s" exec "%s" "%s/companion.ts" "$@"\n' "$home" "$bun" "$home" > "$home/run"
 chmod 700 "$home/run"
 cat > "$agent" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

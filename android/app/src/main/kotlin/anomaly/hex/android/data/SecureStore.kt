@@ -6,6 +6,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import anomaly.hex.android.core.codex.CodexTokenStore
 import anomaly.hex.android.core.codex.CodexTokens
+import java.io.IOException
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -36,14 +37,12 @@ class SecureStore(context: Context) {
         return generator.generateKey()
     }
 
-    fun putToken(name: String, token: String?) {
-        if (token.isNullOrEmpty()) {
-            prefs.edit().remove(name).commit()
-            return
-        }
+    /** False if the change didn't reach the disk. */
+    fun putToken(name: String, token: String?): Boolean {
+        if (token.isNullOrEmpty()) return prefs.edit().remove(name).commit()
         val cipher = Cipher.getInstance(TRANSFORM).apply { init(Cipher.ENCRYPT_MODE, key()) }
         val sealed = cipher.iv + cipher.doFinal(token.toByteArray())
-        prefs.edit().putString(name, Base64.encodeToString(sealed, Base64.NO_WRAP)).commit()
+        return prefs.edit().putString(name, Base64.encodeToString(sealed, Base64.NO_WRAP)).commit()
     }
 
     fun token(name: String): String? {
@@ -73,5 +72,7 @@ class SecureCodexTokens(private val secure: SecureStore) : CodexTokenStore {
     override fun load(): CodexTokens? =
         secure.token(SecureStore.CODEX_TOKENS)?.let { runCatching { Json.decodeFromString<CodexTokens>(it) }.getOrNull() }
 
-    override fun save(tokens: CodexTokens?) = secure.putToken(SecureStore.CODEX_TOKENS, tokens?.let { Json.encodeToString(it) })
+    override fun save(tokens: CodexTokens?) {
+        if (!secure.putToken(SecureStore.CODEX_TOKENS, tokens?.let { Json.encodeToString(it) })) throw IOException("Couldn't save the sign-in")
+    }
 }

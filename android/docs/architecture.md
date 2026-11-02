@@ -70,7 +70,8 @@ wrapped by a Keystore key, and a refresh finishes and saves on its own thread ev
 asked for it has given up. A 401 renews the login and retries once inside the deadline. Anything else,
 including a 429, keeps the local text. With one provider there's nothing to fall back to, so the
 profile's fallback setting is left for desktop. Statuses decide this, and error messages aren't read.
-Only `response.completed` makes a reply usable. This API isn't documented for third-party apps, so it
+Only a finished turn makes a reply usable, and only its final answer is text: commentary and partial
+answers are never pasted. This API isn't documented for third-party apps, so it
 may change; if it does, polish fails and the local text stays.
 
 ## Known limits

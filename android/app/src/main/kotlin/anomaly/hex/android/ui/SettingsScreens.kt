@@ -409,6 +409,7 @@ private fun ChatGptPage() {
     Note("Long dictations go straight to OpenAI with this phone's own ChatGPT sign-in and count against your plan. The sign-in stays on this phone. Short dictations never use it.")
     Spacer(Modifier.height(12.dp))
     if (signedIn) {
+        (state as? ChatGptSignIn.State.Failed)?.let { Note(it.message, hex.danger) }
         Card { Row("Signed in", "Sign out", onClick = { app.chatGpt.signOut() }) }
         return
     }

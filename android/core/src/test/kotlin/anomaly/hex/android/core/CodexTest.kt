@@ -2,6 +2,7 @@ package anomaly.hex.android.core
 
 import anomaly.hex.android.core.codex.CodexDeviceLogin
 import anomaly.hex.android.core.codex.CodexEndpoints
+import anomaly.hex.android.core.codex.CodexLoginFailedException
 import anomaly.hex.android.core.codex.CodexPolisher
 import anomaly.hex.android.core.codex.CodexSession
 import anomaly.hex.android.core.codex.CodexSignedOutException
@@ -12,6 +13,7 @@ import anomaly.hex.android.core.pipeline.CancelledException
 import anomaly.hex.android.core.pipeline.GenerationException
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
@@ -79,15 +81,14 @@ class CodexTest {
         return "${encode("{}")}.${encode("""{$auth"exp":$expiresAt}""")}.sig"
     }
 
-    private val completed = """
-        event: response.output_text.delta
-        data: {"type":"response.output_text.delta","delta":"Clean "}
+    private fun item(text: String, phase: String? = "final_answer", status: String = "completed"): String {
+        val phaseField = phase?.let { """"phase":"$it",""" }.orEmpty()
+        return """data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","status":"$status",$phaseField"content":[{"type":"output_text","text":"$text"}]}}"""
+    }
 
-        data: {"type":"response.output_text.delta","delta":"text."}
+    private val done = """data: {"type":"response.completed","response":{}}"""
 
-        data: {"type":"response.completed","response":{}}
-
-    """.trimIndent()
+    private val completed = "event: response.output_item.done\n${item("Clean text.")}\n\n$done\n\n"
 
     private val good = CodexTokens(jwt(), "refresh-1", "acct")
 
@@ -279,11 +280,103 @@ class CodexTest {
         assertEquals(0, seen.size)
     }
 
+    private fun read(vararg events: String) = CodexPolisher.readEvents(events.asSequence())
+
     @Test
-    fun aCutOffOrFailedReplyIsNeverUsed() {
-        val delta = """data: {"type":"response.output_text.delta","delta":"half"}"""
-        for (events in listOf(delta, "$delta\ndata: {\"type\":\"response.failed\"}", "$delta\ndata: {\"type\":\"response.incomplete\"}", "$delta\ndata: {\"type\":\"error\"}")) {
-            assertThrows(events, GenerationException::class.java) { CodexPolisher.readEvents(events.lineSequence()) }
+    fun onlyTheFinalAnswerIsText() {
+        assertEquals("Final.", read(item("Thinking aloud.", "commentary"), item("Final."), done))
+        assertEquals("No phase.", read(item("No phase.", null), done))
+        assertEquals("One two.", read(item("One "), item("two."), done))
+    }
+
+    @Test
+    fun aCutOffPartialOrEmptyReplyIsNeverUsed() {
+        assertThrows(GenerationException::class.java) { read(item("half")) }
+        assertThrows(GenerationException::class.java) { read(item("half", "partial_answer"), done) }
+        assertThrows(GenerationException::class.java) { read(item("half", status = "incomplete"), done) }
+        assertThrows(GenerationException::class.java) { read(item("half", "commentary"), done) }
+        assertThrows(GenerationException::class.java) { read(done) }
+        assertThrows(GenerationException::class.java) {
+            read(item("half"), """data: {"type":"response.completed","response":{"end_turn":false}}""")
+        }
+    }
+
+    @Test
+    fun aFailureEventEndsTheReplyEvenIfACompletionFollows() {
+        for (type in listOf("response.failed", "response.incomplete", "error")) {
+            assertThrows(type, GenerationException::class.java) { read(item("half"), """data: {"type":"$type"}""", done) }
+        }
+    }
+
+    @Test
+    fun cancellingStopsWaitingForARefreshWhichStillSaves() {
+        val release = CountDownLatch(1)
+        val arrived = CountDownLatch(1)
+        responses = { reply(it, 401, "{}") }
+        tokenReply = {
+            arrived.countDown()
+            release.await(5, TimeUnit.SECONDS)
+            reply(it, 200, """{"access_token":"${jwt(expiresAt = 4_000_000_001L)}","refresh_token":"refresh-2"}""")
+        }
+        val store = Memory(good)
+        val cancel = CancelToken()
+        thread { arrived.await(3, TimeUnit.SECONDS); cancel.cancel() }
+        val started = System.currentTimeMillis()
+        assertThrows(CancelledException::class.java) { polish(polisher(store), cancel = cancel) }
+        assertTrue(System.currentTimeMillis() - started < 1000)
+        release.countDown()
+        val until = System.currentTimeMillis() + 3000
+        while (store.tokens?.refresh != "refresh-2" && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertEquals("refresh-2", store.tokens?.refresh)
+    }
+
+    @Test
+    fun aFailedSaveOfARotatedTokenFailsThePolish() {
+        responses = { reply(it, 401, "{}") }
+        tokenReply = { reply(it, 200, """{"access_token":"${jwt(expiresAt = 4_000_000_001L)}","refresh_token":"refresh-2"}""") }
+        val store = object : CodexTokenStore {
+            override fun load() = good
+            override fun save(tokens: CodexTokens?) = throw IOException("disk full")
+        }
+        assertThrows(GenerationException::class.java) { polish(CodexPolisher(CodexSession(store, endpoints), endpoints)) }
+    }
+
+    @Test
+    fun aFailedSignOutIsReported() {
+        val store = object : CodexTokenStore {
+            override fun load() = good
+            override fun save(tokens: CodexTokens?) = throw IOException("disk full")
+        }
+        var changed: Boolean? = null
+        assertThrows(IOException::class.java) { CodexSession(store, endpoints, onChange = { changed = it }).signOut() }
+        assertNull(changed)
+    }
+
+    @Test
+    fun deviceLoginTellsAnOutageFromARefusal() {
+        var status = 503
+        server.createContext("/auth/api/accounts/deviceauth/token") { record(it); reply(it, status, "{}") }
+        val login = CodexDeviceLogin(endpoints)
+        val code = CodexDeviceLogin.Code("dev-1", "ABCD-EFGH", 5)
+        val outage = assertThrows(IOException::class.java) { login.poll(code) }
+        assertFalse(outage is CodexLoginFailedException)
+        for (refused in listOf(400, 401, 410)) {
+            status = refused
+            assertThrows(CodexLoginFailedException::class.java) { login.poll(code) }
+        }
+    }
+
+    @Test
+    fun aFailedExchangeEndsTheSignIn() {
+        server.createContext("/auth/api/accounts/deviceauth/token") {
+            record(it)
+            reply(it, 200, """{"authorization_code":"auth-1","code_verifier":"verify-1"}""")
+        }
+        val login = CodexDeviceLogin(endpoints)
+        val code = CodexDeviceLogin.Code("dev-1", "ABCD-EFGH", 5)
+        for (reply in listOf<(HttpExchange) -> Unit>({ reply(it, 400, "{}") }, { reply(it, 503, "") }, { reply(it, 200, "not json") })) {
+            tokenReply = reply
+            assertThrows(CodexLoginFailedException::class.java) { login.poll(code) }
         }
     }
 

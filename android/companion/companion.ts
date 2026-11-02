@@ -101,13 +101,6 @@ const putProfile = async (config: Config, request: Request): Promise<Response> =
   return new Response(null, { status: exists ? 204 : 201, headers: { ETag: quoted(sha256(body)) } })
 }
 
-interface Registration {
-  id: string
-  url: string
-  pid: number
-  password?: string
-}
-
 // ---- server ----
 
 export const handler = (config: Config) => async (request: Request): Promise<Response> => {

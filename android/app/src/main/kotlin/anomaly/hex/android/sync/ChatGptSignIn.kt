@@ -2,6 +2,7 @@ package anomaly.hex.android.sync
 
 import anomaly.hex.android.core.codex.CodexDeviceLogin
 import anomaly.hex.android.core.codex.CodexEndpoints
+import anomaly.hex.android.core.codex.CodexLoginFailedException
 import anomaly.hex.android.core.codex.CodexSession
 import java.io.IOException
 import kotlin.concurrent.thread
@@ -20,47 +21,80 @@ class ChatGptSignIn(private val session: CodexSession, val signedIn: StateFlow<B
     val approvalPage = CodexEndpoints().approvalPage
     val state = MutableStateFlow<State>(State.Idle)
 
-    @Volatile private var running: Thread? = null
+    // Only the newest attempt may change anything. Cancelling makes the running one stale.
+    private val lock = Any()
+    private var attempt = 0L
+    private var worker: Thread? = null
 
     fun start() {
-        cancel()
-        state.value = State.Starting
-        running = thread(name = "hex-chatgpt-sign-in", isDaemon = true) { run(Thread.currentThread()) }
+        synchronized(lock) {
+            val mine = supersede()
+            state.value = State.Starting
+            worker = thread(name = "hex-chatgpt-sign-in", isDaemon = true) { run(mine) }
+        }
     }
 
     fun cancel() {
-        running?.interrupt()
-        running = null
-        state.value = State.Idle
+        synchronized(lock) {
+            supersede()
+            state.value = State.Idle
+        }
     }
 
     fun signOut() {
-        cancel()
-        session.signOut()
+        synchronized(lock) {
+            supersede()
+            state.value = try {
+                session.signOut()
+                State.Idle
+            } catch (_: IOException) {
+                State.Failed("Couldn't remove the sign-in. Try again.")
+            }
+        }
     }
 
-    private fun run(self: Thread) {
+    private fun supersede(): Long {
+        worker?.interrupt()
+        worker = null
+        return ++attempt
+    }
+
+    private inline fun ifCurrent(mine: Long, block: () -> Unit) = synchronized(lock) { if (attempt == mine) block() }
+
+    private fun run(mine: Long) {
         val login = CodexDeviceLogin()
         try {
             val code = login.start()
-            if (running !== self) return
-            state.value = State.Waiting(code.userCode)
+            ifCurrent(mine) { state.value = State.Waiting(code.userCode) }
             val giveUp = System.currentTimeMillis() + LIMIT_MS
             while (System.currentTimeMillis() < giveUp) {
                 Thread.sleep(code.intervalSeconds * 1000L)
-                // A dropped connection while the person is in the browser isn't a failed sign-in.
-                val tokens = runCatching { login.poll(code) }.getOrNull() ?: continue
-                if (running !== self) return
-                session.signIn(tokens)
-                running = null
-                state.value = State.Idle
+                val tokens = try {
+                    login.poll(code) ?: continue
+                } catch (failed: CodexLoginFailedException) {
+                    throw failed
+                } catch (_: IOException) {
+                    // A dropped connection while the person is in the browser isn't a failed sign-in.
+                    continue
+                }
+                ifCurrent(mine) {
+                    worker = null
+                    state.value = try {
+                        session.signIn(tokens)
+                        State.Idle
+                    } catch (_: IOException) {
+                        State.Failed("Couldn't save the sign-in. Try again.")
+                    }
+                }
                 return
             }
-            if (running === self) state.value = State.Failed("The code expired. Try again.")
+            ifCurrent(mine) { state.value = State.Failed("The code expired. Try again.") }
         } catch (_: InterruptedException) {
             // Cancelled.
+        } catch (_: CodexLoginFailedException) {
+            ifCurrent(mine) { state.value = State.Failed("ChatGPT refused the sign-in. Try again.") }
         } catch (_: IOException) {
-            if (running === self) state.value = State.Failed("Couldn't reach ChatGPT. Try again.")
+            ifCurrent(mine) { state.value = State.Failed("Couldn't reach ChatGPT. Try again.") }
         }
     }
 
