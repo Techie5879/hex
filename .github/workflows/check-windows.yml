@@ -3,8 +3,7 @@ name: Check Windows
 # The full Windows suite (x64 with Vulkan and ARM64: tests, clippy, the
 # no-Visual-C++-runtime check). It runs where it matters: Release's check and
 # stable channels call it on the candidate commit and publish nothing until it
-# passes, and anyone can run it by hand. Pull requests only compile x64
-# (compile.yml).
+# passes, and anyone can run it by hand. Compile is also manual in this fork.
 on:
   workflow_call:
     inputs:

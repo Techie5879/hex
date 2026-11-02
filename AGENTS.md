@@ -1,6 +1,14 @@
 <!-- tallow -->
 # Hex Agent Guide
 
+## Fork automation policy
+
+Desktop Compile, Test builds, Release, and full platform checks are manual-only
+in this fork. Do not reintroduce push or pull-request triggers for these jobs
+when syncing upstream. Explicit releases retain their validation gates. The
+small PR policy check remains automatic. This overrides upstream automation
+descriptions later in this file.
+
 ## Private Kit Tool
 
 `dev` and `production` take changes only through pull requests (Dax's

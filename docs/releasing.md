@@ -1,5 +1,10 @@
 # Releasing Hex
 
+In this fork, Compile, Test builds, Release, and the full platform checks run
+only when explicitly requested. Pushes and PR updates do not start these builds
+or test suites. A manually requested check or stable release still runs its
+required validation. Upstream automation described below is not the fork default.
+
 One run of the **Release** workflow (`.github/workflows/release.yml`)
 builds, signs, and publishes every platform from one commit to the Anomaly
 release service (`anomalyco/release`, `https://anoma.ly/release`). Hex's
@@ -28,7 +33,7 @@ secret. `.github/workflows/` (Release, Site deploy, Legacy appcast) and
   nothing swapped in between jobs is signed or published.
 
 ```ts
-Release (push to dev: dev channel; workflow_dispatch: ref + channel check | dev | stable (from production))
+Release (workflow_dispatch: ref + channel check | dev | stable (from production))
 ├─ plan                     .github/release/plan.sh: version, channel, tag, notes
 ├─ build                    build-desktop.yml: Linux x64 + ARM64 (Ubuntu 24.04) executables, .deb,  [build]
 │                           .rpm (installed and run on Ubuntu and Fedora); Windows x64 + ARM64

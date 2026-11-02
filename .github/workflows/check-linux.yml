@@ -3,7 +3,7 @@ name: Check Linux
 # The full Linux suite (tests, goldens, integration exercises, clippy, Nix).
 # It runs where it matters: Release's check and stable channels call it on the
 # candidate commit and publish nothing until it passes, and anyone can run it
-# by hand. Pull requests only compile (compile.yml).
+# by hand. Compile is also manual in this fork (compile.yml).
 on:
   workflow_call:
     inputs:

@@ -1,37 +1,21 @@
 name: Compile
 
-# What a pull request runs, besides hex-agent-policy: a fast compile of the app
-# on Linux, macOS, and Windows x64 (cargo clippy, warnings as errors). Pull
-# requests merge without waiting for it, and a breakage on dev goes to the CI
-# failure pipeline. The full suites (check-linux.yml, check-macos.yml,
-# check-windows.yml) run in Release's check and stable channels, and by hand.
+# Compile checks in this fork run only when requested. They do not run on
+# pushes or pull-request updates. Full suites are separate manual workflows.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "build.rs"
-      - "crates/**"
-      - "src/**"
-      - "native/**"
-      - "resources/**"
-      - "assets/**"
-      - ".github/workflows/compile.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A new push to a pull request cancels its stale run.
+# Each explicitly requested run has its own concurrency group.
 concurrency:
-  group: compile-${{ github.event.pull_request.number || github.run_id }}
+  group: compile-${{ github.run_id }}
   cancel-in-progress: true
 
 jobs:
   linux:
     name: Linux
-    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -63,7 +47,6 @@ jobs:
 
   macos:
     name: macOS
-    if: ${{ !github.event.pull_request.draft }}
     runs-on: macos-26
     timeout-minutes: 45
     env:
@@ -85,7 +68,6 @@ jobs:
 
   windows:
     name: Windows x64
-    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-latest
     timeout-minutes: 60
     env:

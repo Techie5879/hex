@@ -3,7 +3,7 @@ name: Check macOS
 # The full macOS suite (tests, clippy, app identity, CA roots). It runs where
 # it matters: Release's check and stable channels call it on the candidate
 # commit and publish nothing until it passes, and anyone can run it by hand.
-# Pull requests only compile (compile.yml).
+# Compile is also manual in this fork (compile.yml).
 on:
   workflow_call:
     inputs:

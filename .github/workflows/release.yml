@@ -27,7 +27,7 @@ name: Release
 # Hex never uses the service's dev stage.
 #
 # Channels (.github/release/plan.sh):
-# - dev: every push to dev (except docs/site/Markdown-only) publishes
+# - dev: an explicit dispatch from dev publishes
 #   0.0.0-dev-<run number> on the dev channel, as OpenCode numbers dev builds;
 #   a running release finishes and only the newest push waits behind it
 #   (the ones between are skipped). Only signed platforms are
@@ -52,19 +52,13 @@ on:
         type: choice
         options: [check, dev, stable]
         default: check
-  push:
-    branches: [dev]
-    # Docs and the site alone cut no dev build.
-    paths-ignore: ["docs/**", "site/**", "**/*.md"]
 
 permissions:
   contents: read
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'dev' }}
-  # Releases never cancel each other: the running one finishes, and of the
-  # pushes that land meanwhile only the newest waits (GitHub replaces an
-  # older pending run in the group), so a busy dev branch still publishes.
+  # Explicitly requested releases never cancel one already running.
   cancel-in-progress: false
 
 defaults:
@@ -116,8 +110,8 @@ jobs:
       channel: ${{ needs.plan.outputs.release-channel }}
 
   # ---- Full test suites: check and stable only; repository code, no secrets ---
-  # Pull requests only compile and dev pushes run no checks (CI is minimal),
-  # so the candidate's full suites run here. A stable run publishes nothing
+  # This fork starts compile checks and releases only by explicit dispatch.
+  # The candidate's full suites run here. A stable run publishes nothing
   # until all three pass.
 
   check-linux:
