@@ -1,0 +1,616 @@
+{
+ "comment": "Merge vectors shared by Kotlin (android/core) and Rust (src/profile_sync). Synthetic data only.",
+ "cases": [
+  {
+   "name": "first sync adopts the remote into an empty device",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {},
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "zebra quartz": {
+      "term": "Zebra Quartz",
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "settings": {
+     "cleanup.polish.min_words": {
+      "value": 150,
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "zebra quartz": {
+      "term": "Zebra Quartz",
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "settings": {
+     "cleanup.polish.min_words": {
+      "value": 150,
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "conflicts": {}
+   }
+  },
+  {
+   "name": "an unchanged side takes the other side's edit",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "NIMBUS",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "NIMBUS",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   }
+  },
+  {
+   "name": "concurrent spelling edits union, newest display wins",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000001000-0000-aaa",
+      "sounds_like": [
+       "nimbas"
+      ]
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "nimbus",
+      "stamp": "0000000002000-0000-bbb",
+      "sounds_like": [
+       "nimbos"
+      ]
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "nimbus",
+      "stamp": "0000000002000-0000-bbb",
+      "sounds_like": [
+       "nimbos",
+       "nimbas"
+      ]
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   }
+  },
+  {
+   "name": "a newer delete beats an older edit and leaves a tombstone",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000001000-0000-aaa",
+      "sounds_like": [
+       "nimbas"
+      ]
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000002000-0000-bbb",
+      "deleted": true
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000002000-0000-bbb",
+      "deleted": true
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   }
+  },
+  {
+   "name": "a newer re-add beats an older delete",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000001000-0000-aaa",
+      "deleted": true
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   }
+  },
+  {
+   "name": "a tombstone is not resurrected by a stale remote copy",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000002000-0000-bbb",
+      "deleted": true
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000002000-0000-bbb",
+      "deleted": true
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   }
+  },
+  {
+   "name": "concurrent prompt edits keep the newest and record the other as a conflict",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.prompt": {
+      "value": "phone wording",
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.prompt": {
+      "value": "mac wording",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.prompt": {
+      "value": "old",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.prompt": {
+      "value": "mac wording",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {
+     "cleanup.polish.prompt#0000000001000-0000-aaa": {
+      "key": "cleanup.polish.prompt",
+      "value": "phone wording",
+      "stamp": "0000000001000-0000-aaa",
+      "winner_stamp": "0000000002000-0000-bbb"
+     }
+    }
+   }
+  },
+  {
+   "name": "identical concurrent values are not a conflict",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.min_words": {
+      "value": 200,
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.min_words": {
+      "value": 200,
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.min_words": {
+      "value": 150,
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "cleanup.polish.min_words": {
+      "value": 200,
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {}
+   }
+  },
+  {
+   "name": "a resolved conflict stays resolved when the other side still has it open",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "k": {
+      "value": "w",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {
+     "k#0000000001000-0000-aaa": {
+      "key": "k",
+      "value": null,
+      "stamp": "0000000001000-0000-aaa",
+      "winner_stamp": "0000000002000-0000-bbb",
+      "resolved_stamp": "0000000003000-0000-ccc"
+     }
+    }
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "k": {
+      "value": "w",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {
+     "k#0000000001000-0000-aaa": {
+      "key": "k",
+      "value": "l",
+      "stamp": "0000000001000-0000-aaa",
+      "winner_stamp": "0000000002000-0000-bbb"
+     }
+    }
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "k": {
+      "value": "w",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {
+     "k": {
+      "value": "w",
+      "stamp": "0000000002000-0000-bbb"
+     }
+    },
+    "conflicts": {
+     "k#0000000001000-0000-aaa": {
+      "key": "k",
+      "value": null,
+      "stamp": "0000000001000-0000-aaa",
+      "winner_stamp": "0000000002000-0000-bbb",
+      "resolved_stamp": "0000000003000-0000-ccc"
+     }
+    }
+   }
+  },
+  {
+   "name": "unknown fields survive at every level",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz",
+      "future_flag": 1
+     }
+    },
+    "settings": {},
+    "conflicts": {},
+    "future_top": {
+     "a": 1
+    }
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz",
+      "future_flag": 1
+     }
+    },
+    "settings": {},
+    "conflicts": {},
+    "future_top": {
+     "a": 1
+    }
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "nimbus": {
+      "term": "Nimbus",
+      "stamp": "0000000000500-0000-zzz",
+      "future_flag": 1
+     }
+    },
+    "settings": {},
+    "conflicts": {},
+    "future_top": {
+     "a": 1
+    }
+   }
+  },
+  {
+   "name": "unicode terms key by normalised case-folded form",
+   "local": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "café münchen": {
+      "term": "Café München",
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "remote": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "café münchen": {
+      "term": "café münchen",
+      "stamp": "0000000000500-0000-zzz"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   },
+   "ancestor": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {},
+    "settings": {},
+    "conflicts": {}
+   },
+   "expected": {
+    "schema": "hex.profile",
+    "version": 1,
+    "vocabulary": {
+     "café münchen": {
+      "term": "Café München",
+      "stamp": "0000000001000-0000-aaa"
+     }
+    },
+    "settings": {},
+    "conflicts": {}
+   }
+  }
+ ]
+}

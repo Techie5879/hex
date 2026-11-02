@@ -117,6 +117,11 @@ pub enum ControlCli {
         #[command(flatten)]
         output: Output,
     },
+    /// Share the dictionary and cleanup prompts with Hex on Android (Labs).
+    Profile {
+        #[command(subcommand)]
+        command: crate::profile_sync::cli::ProfileCommand,
+    },
     /// List, add, and remove vocabulary terms.
     Vocabulary {
         #[command(subcommand)]
@@ -494,6 +499,7 @@ pub fn run(command: ControlCli) -> u8 {
             },
             output,
         ),
+        ControlCli::Profile { command } => crate::profile_sync::cli::run(command),
         ControlCli::Vocabulary { command } => match command {
             VocabularyCommand::List { output } => send(ControlCommand::VocabularyList, output),
             VocabularyCommand::Add {
@@ -984,6 +990,11 @@ pub fn send(command: ControlCommand, output: Output) -> u8 {
 /// discovery file and bearer-authenticated `POST /control`.
 fn running() -> bool {
     crate::local_api::running_pid().is_some()
+}
+
+/// One command in the running Hex, its failures as replies.
+pub(crate) fn ask_running_hex(command: ControlCommand) -> ControlReply {
+    call(ControlRequest::new(command)).map_or_else(|reply| reply, |response| response.reply)
 }
 
 /// `hex settings set key value` in the running Hex, which saves and applies

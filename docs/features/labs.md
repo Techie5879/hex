@@ -730,6 +730,17 @@ previous stage's text. Both requests share one deadline and cancellation flag.
 See [configuration, error contract, and fixture coverage](../local-cleanup.md#provider-quota-fallback).
 
 
+## Profile sync in this fork
+
+macOS Labs > Profile sync (`labs.profile_sync`) is off by default. With it on,
+`hex profile connect <url> --token-file <file>` and `hex profile sync` share the
+dictionary and the Global mode's cleanup prompt and policy with
+[Hex for Android](android.md) through your own server. Nothing syncs by itself: each
+sync is a command, carried out by the running Hex's own settings path. No audio,
+history, or other settings are sent. A concurrent prompt edit keeps the newest and
+records the other as a conflict. Checks: `cargo test profile_sync`, whose merge
+vectors `android/core` also runs.
+
 ## Save dictation audio in this fork
 
 macOS Labs > Save dictation audio (`labs.save_dictation_audio`) is off by

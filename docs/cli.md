@@ -38,6 +38,10 @@ hex
 │   ├── stop                       Stop & Transcribe
 │   ├── copy-last                  copy the last meeting transcript to the clipboard
 │   └── list | show | search       read-only (docs/transcript-cli.md)
+├── profile                        Labs: share the dictionary and cleanup prompts with Hex on Android
+│   ├── connect <url> --token-file F   save the server; `-` reads the token from stdin
+│   ├── sync                       merge with the server, then apply through the running Hex
+│   └── status                     the server, the last sync, and open conflicts
 ├── settings
 │   ├── list                       every setting: key, value, kind, choices, writable, about
 │   ├── get <key|prefix>           one setting, or every key under a prefix (`meetings`)

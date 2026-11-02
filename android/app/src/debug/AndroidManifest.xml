@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Debug builds only, and only the shell can reach it. See android/docs/testing.md. -->
+        <receiver
+            android:name=".debug.DebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="anomaly.hex.android.debug.CONFIG" />
+                <action android:name="anomaly.hex.android.debug.INSERT" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

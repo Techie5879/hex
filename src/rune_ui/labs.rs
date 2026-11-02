@@ -162,6 +162,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
     let mut rows = Vec::new();
     if cfg!(target_os = "macos") {
         rows.push(row(Feature::SaveDictationAudio, &WAVE, "Save dictation audio", "Keep compressed recordings on this Mac. Choose retention in History; default Forever. Requires ffmpeg."));
+        rows.push(row(Feature::ProfileSync, &SPARKLES, "Profile sync", "Share the dictionary and cleanup prompts with Hex on Android through your own server, using `hex profile`."));
         rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac before optional OpenCode rewriting; unloads after five idle minutes."));
     }
     if caps.meetings {
@@ -409,6 +410,7 @@ fn row_key(feature: Feature) -> &'static str {
         Feature::SaveDictationAudio => "lab-save-dictation-audio",
         Feature::HistoryStats => "lab-history-stats",
         Feature::RecentDictations => "lab-recent-dictations",
+        Feature::ProfileSync => "lab-profile-sync",
     }
 }
 

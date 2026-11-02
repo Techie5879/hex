@@ -124,6 +124,11 @@ const KEYS: &[Key] = &[
         "Labs: save compressed local dictation audio using audio_retention (requires ffmpeg)",
     ),
     key(
+        "labs.profile_sync",
+        Kind::Bool,
+        "Labs: allow `hex profile sync` to share the dictionary and cleanup prompts through your server",
+    ),
+    key(
         "labs.provider_fallback",
         Kind::Bool,
         "Labs: use a configured alternate rewrite provider on quota or rate limits only",

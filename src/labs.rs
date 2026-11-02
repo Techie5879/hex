@@ -90,10 +90,11 @@ pub enum Feature {
     SaveDictationAudio,
     HistoryStats,
     RecentDictations,
+    ProfileSync,
 }
 
 impl Feature {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -126,6 +127,7 @@ impl Feature {
         Self::SaveDictationAudio,
         Self::HistoryStats,
         Self::RecentDictations,
+        Self::ProfileSync,
     ];
 
     /// The features this OS and build have.
@@ -180,7 +182,8 @@ impl Feature {
             | Self::ProviderFallback
             | Self::SaveDictationAudio
             | Self::HistoryStats
-            | Self::RecentDictations => Audience::Everyone,
+            | Self::RecentDictations
+            | Self::ProfileSync => Audience::Everyone,
         }
     }
 
@@ -214,7 +217,9 @@ impl Feature {
             Self::VoiceFilter => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::TerminalPaste | Self::ShareShortcut => cfg!(target_os = "windows"),
             Self::StandaloneSpecialKeys => cfg!(any(target_os = "linux", target_os = "windows")),
-            Self::LocalPolish | Self::SaveDictationAudio => cfg!(target_os = "macos"),
+            Self::LocalPolish | Self::SaveDictationAudio | Self::ProfileSync => {
+                cfg!(target_os = "macos")
+            }
             Self::MouseShortcuts
             | Self::PauseBrowser
             | Self::KeepOnClipboard
@@ -276,6 +281,7 @@ impl Feature {
             Self::SaveDictationAudio => "save-dictation-audio",
             Self::HistoryStats => "history-stats",
             Self::RecentDictations => "recent-dictations",
+            Self::ProfileSync => "profile-sync",
         }
     }
 
@@ -314,6 +320,7 @@ impl Feature {
             Self::SaveDictationAudio => "labs.save_dictation_audio",
             Self::HistoryStats => "labs.history_stats",
             Self::RecentDictations => "labs.recent_dictations",
+            Self::ProfileSync => "labs.profile_sync",
         }
     }
 
@@ -379,6 +386,9 @@ impl Feature {
             Self::ParakeetUltra => {
                 "Offer Parakeet Ultra, Moondream's post-trained Parakeet v3, in the Local transcription picker"
             }
+            Self::ProfileSync => {
+                "Share the dictionary and cleanup prompts with Hex on Android through your own server"
+            }
             Self::SaveDictationAudio => {
                 "Keep compressed local audio for new dictations with separate retention (requires ffmpeg)"
             }
@@ -442,6 +452,7 @@ impl Feature {
             Self::SaveDictationAudio => settings.labs.save_dictation_audio,
             Self::HistoryStats => settings.labs.history_stats,
             Self::RecentDictations => settings.labs.recent_dictations,
+            Self::ProfileSync => settings.labs.profile_sync,
         }
     }
 
@@ -450,6 +461,7 @@ impl Feature {
             Self::LocalPolish => settings.labs.local_polish = on,
             Self::ProviderFallback => settings.labs.provider_fallback = on,
             Self::SaveDictationAudio => settings.labs.save_dictation_audio = on,
+            Self::ProfileSync => settings.labs.profile_sync = on,
             Self::Meetings => settings.meetings.enabled = on,
             Self::VoiceFilter => settings.experimental.hex_microphone = on,
             Self::Playground => settings.labs.playground = on,
@@ -515,6 +527,11 @@ const PROVIDER_FALLBACK: u64 = 1 << 32;
 const SAVE_DICTATION_AUDIO: u64 = 1 << 33;
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Whether `hex profile sync` may run. Nothing syncs on its own either way.
+pub(crate) fn profile_sync() -> bool {
+    crate::app_settings::AppSettings::load().is_ok_and(|settings| settings.labs.profile_sync)
+}
+
 pub(crate) fn save_dictation_audio() -> bool {
     cfg!(target_os = "macos") && on(SAVE_DICTATION_AUDIO)
 }

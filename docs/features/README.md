@@ -44,6 +44,8 @@ models another app already downloaded.
 [Annotate](capture.md) (macOS, Linux,
 and Windows) records the screen while you draw and talk and sends it to an agent.
 The other capabilities stay here until they need their own verification recipe.
+[Hex for Android](android.md) is a separate app with its own map; it shares the
+portable profile with desktop through Labs › Profile sync.
 
 ## Get Ready
 

@@ -1369,6 +1369,8 @@ pub struct LabsSettings {
     pub local_polish: bool,
     /// Allow an explicitly configured same-model provider on quota rejection.
     pub provider_fallback: bool,
+    /// Allow `hex profile sync` to share the dictionary and cleanup prompts.
+    pub profile_sync: bool,
     /// Live text beside the HUD while dictating.
     pub live_text: bool,
     /// Live chapters while a meeting records.
@@ -1429,6 +1431,7 @@ impl Default for LabsSettings {
             save_dictation_audio: false,
             local_polish: false,
             provider_fallback: false,
+            profile_sync: false,
             live_text: false,
             live_chapters: false,
             playground: false,
