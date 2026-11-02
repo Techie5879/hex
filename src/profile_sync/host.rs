@@ -1,5 +1,6 @@
 //! The profile store owned by the running desktop app. It never serves control,
 //! audio, or credentials. A persisted pending profile survives interrupted apply.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
