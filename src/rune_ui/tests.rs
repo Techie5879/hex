@@ -2480,7 +2480,9 @@ fn rebased_save_updates_editors_before_the_next_autosave() {
         .default_mode
         .post_processing
         .prompt = "Phone wording".into();
+    let before_rebase = candidate.clone();
     crate::profile_sync::adapter::rebase_editor(&before, &mut candidate, &incoming);
+    ui.sync_rebased_editors(&before_rebase, &candidate);
     assert!(ui.commit(candidate));
     assert!(!ui.save_drafts(Instant::now() + DRAFT_DELAY));
     assert!(
