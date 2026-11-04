@@ -138,6 +138,7 @@ fn pane_meeting(meeting: &crate::meeting::query::Meeting, now_ms: u64) -> Meetin
         Transcript::Loaded(turns(&meeting.entries))
     };
     Meeting {
+        snapshots: crate::meeting::snapshots::read(&meeting.id),
         id: meeting.id.clone(),
         title: meeting.title(),
         status: match meeting.status {

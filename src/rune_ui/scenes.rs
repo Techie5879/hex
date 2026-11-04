@@ -543,6 +543,11 @@ pub(super) const SCENES: &[Scene] = &[
         ui.meetings = meetings::MeetingsPane::chapters_fixture();
         ui.pane = Pane::Meetings;
     }),
+    ("meetings-snapshots", |ui| {
+        *ui = mac_fixture();
+        meeting_snapshots::fixture(ui);
+        ui.pane = Pane::Meetings;
+    }),
     ("meetings-platform-icons", |ui| {
         *ui = mac_fixture();
         ui.settings.labs.meeting_platform_icons = true;

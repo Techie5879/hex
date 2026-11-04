@@ -63,6 +63,7 @@ fn main() {
     );
     println!("cargo:rustc-link-arg=-Wl,-weak_framework,FoundationModels");
     compile_swift_bridge("calendar", "HEXCalendarBridge", &[]);
+    compile_swift_bridge("meeting_snapshots", "HEXMeetingSnapshots", &[]);
     println!("cargo:rustc-link-lib=framework=EventKit");
     compile_permission_guide();
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
@@ -295,6 +296,11 @@ fn compile_swift_bridge(name: &str, module: &str, without_autolink: &[&str]) {
     swift
         .arg(String::from_utf8_lossy(&sdk.stdout).trim())
         .args(["-target", target]);
+    if name == "meeting_snapshots" {
+        let header = manifest_dir.join("native/teams_snapshots.h");
+        println!("cargo:rerun-if-changed={}", header.display());
+        swift.arg("-import-objc-header").arg(header);
+    }
     for framework in without_autolink {
         swift.args([
             "-Xfrontend",

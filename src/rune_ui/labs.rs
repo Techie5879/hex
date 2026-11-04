@@ -508,6 +508,14 @@ fn rows(ui: &Ui) -> Vec<Row> {
             tr("Tell apps on this computer when a meeting's transcript is ready. They get only the meeting's ID, through Hex's local API"),
         ));
     }
+    if caps.meetings && caps.os == super::platform::Os::Macos {
+        rows.push(row(
+            Feature::MeetingSnapshots,
+            &BOOK,
+            tr("Meeting snapshots"),
+            tr("Save shared content from native Teams meetings on this Mac. Requires Screen Recording permission. Starts with the next recording."),
+        ));
+    }
     if caps.meetings {
         rows.push(row(
             Feature::MeetingPlatformIcons,
@@ -563,6 +571,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
 fn row_key(feature: Feature) -> &'static str {
     match feature {
         Feature::MeetingPlatformIcons => "lab-meeting-platform-icons",
+        Feature::MeetingSnapshots => "lab-meeting-snapshots",
         Feature::GnomeMeetingCapsules => "lab-gnome-meeting-capsules",
         Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
         Feature::NotchIndicator => "lab-notch-indicator",

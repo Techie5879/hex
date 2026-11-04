@@ -98,6 +98,7 @@ pub(super) struct Meeting {
     pub(super) live_error: Option<String>,
     pub(super) transcript: Transcript,
     pub(super) chapters: Vec<Chapter>,
+    pub(super) snapshots: crate::meeting::snapshots::View,
     /// How long it is kept once finished, as `MeetingRetention::label`;
     /// `None` when it is kept for good.
     pub(super) kept_for: Option<&'static str>,
@@ -161,6 +162,7 @@ fn notes_running_label(ui: &Ui) -> &'static str {
 #[derive(Default)]
 pub(super) struct MeetingsPane {
     pub(super) view: View,
+    pub(super) snapshots: super::meeting_snapshots::Images,
     /// Newest first, as the store lists them.
     pub(super) meetings: Vec<Meeting>,
     error: Option<String>,
@@ -198,7 +200,7 @@ fn length(milliseconds: u64) -> String {
 }
 
 /// `mm:ss`, as `meeting::format_duration`.
-fn clock_offset(milliseconds: u64) -> String {
+pub(super) fn clock_offset(milliseconds: u64) -> String {
     let seconds = milliseconds / 1_000;
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
@@ -340,6 +342,7 @@ impl MeetingsPane {
                 live_error: None,
                 transcript: Transcript::Loaded(Vec::new()),
                 chapters: Vec::new(),
+                snapshots: Default::default(),
                 kept_for: Some("24 hours"),
             };
         let mut live = meeting(
@@ -1014,6 +1017,9 @@ fn detail(ui: &Ui, p: Paint, meeting: &Meeting, layer: &mut Vec<El>) -> El {
                 .font(DESCRIPTION)
                 .color(p.faint()),
         );
+    }
+    if let Some(snapshots) = super::meeting_snapshots::view(ui, p, meeting) {
+        body = body.child(snapshots);
     }
     if !meeting.chapters.is_empty() {
         body = body.child(chapters(p, meeting, &copied));

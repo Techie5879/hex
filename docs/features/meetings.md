@@ -1401,3 +1401,39 @@ Granola import: see [granola-import.md](../plans/granola-import.md).
   tuned on that transcript; the model's same-topic flag is unreliable, and a
   short detour can still become its own chapter. The boundary pass runs only
   when meeting notes run, after publication.
+
+
+## Local Teams snapshots
+
+```ts
+Labs › Meeting snapshots                         // meetings.snapshots
+├── Off by default; macOS native Teams only; initially English Teams UI
+├── On before recording starts -> watch for a verified shared-content region
+│   ├── Screen Recording permission missing -> explicit Allow Screen Recording button
+│   ├── Share verified -> retain selected snapshots in the meeting folder
+│   │   └── Image is the verified region, including any black bars inside it
+│   └── No verified share -> wait; never capture the whole desktop as a fallback
+├── On during recording -> wait until the next recording
+├── Pause / resume in the meeting detail -> control new snapshots
+├── Recording capsule -> the same live snapshot status, refreshed by its background ticker
+├── Off -> stop new snapshot writes; keep saved images browsable
+└── Meeting detail -> status, thumbnails, timestamps, Show image, Delete image
+    ├── A saved gap note marks pauses, interruptions, and capture limits
+    └── Images collapsed until Show images; six per page, decoded on the image-cache worker
+```
+
+Images stay on this computer. They are not sent to OpenCode, meeting summaries,
+or an external service; the meeting-mirror script excludes their folder.
+They follow the meeting's retention and disappear with
+its folder. The toggle is `labs.meeting_snapshots`, also exposed as
+`hex labs on|off meeting-snapshots` on macOS. Other operating systems retain the
+saved setting without executing capture.
+
+Sources: `meeting/snapshots.rs`, `meeting/snapshots/`,
+`rune_ui/meeting_snapshots.rs`, `rune_ui/meetings_host.rs`, `labs.rs`.
+Checks: Labs bit isolation and defaults, snapshot-store checks, translated status
+coverage, the `meetings-snapshots` synthetic scene, and pane tests for pause,
+permission, pagination, deletion, and browsing while disabled. The scene uses
+artificial diagram pixels. These checks do not prove capture of a live Teams
+share, macOS permission behavior, or native end-to-end capture. No live meeting
+or private screenshot is used in repository fixtures.

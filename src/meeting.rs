@@ -51,6 +51,7 @@ mod notes;
 pub mod query;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) mod runtime;
+pub(crate) mod snapshots;
 mod transcript;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod watcher;
@@ -494,6 +495,12 @@ pub fn record(
         }
 
         let started = Instant::now();
+        let snapshots = snapshots::Session::start(
+            &manifest.id,
+            &meeting_dir,
+            capture_clock,
+            start.application.as_deref(),
+        );
         let titles = notes::ProvisionalTitles::start(manifest.id.clone());
         let live_chapters = crate::labs::live_chapters()
             .then(|| chapters::LiveChapters::start(manifest.id.clone()));
@@ -516,6 +523,7 @@ pub fn record(
         }
         drop(titles);
         drop(live_chapters);
+        drop(snapshots);
         keep_rename(&meeting_dir, &mut manifest);
         drop(flush_registration);
         drop(system_capture);

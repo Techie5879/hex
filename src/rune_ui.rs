@@ -35,6 +35,7 @@ mod lists;
 mod live_notes;
 pub(crate) mod live_text;
 pub(crate) mod meeting_capsules;
+mod meeting_snapshots;
 mod meetings;
 mod meetings_host;
 mod model_details;
@@ -1173,6 +1174,8 @@ fn local_meetings(ui: &mut Ui) -> bool {
 fn setup(ui: &mut Ui, waker: Waker) {
     ui.modes.waker = Some(waker.clone());
     ui.modes.icon_cache = Some(rune::ImageCache::new(waker.clone()));
+    ui.meetings.snapshots.cache = Some(rune::ImageCache::new(waker.clone()));
+    ui.meetings.snapshots.waker = Some(waker.clone());
     if let Service::Pending(connect) = &mut ui.service {
         let connect = std::mem::take(connect);
         #[cfg(target_os = "macos")]
@@ -1223,6 +1226,7 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         ui.modes.ensure_applications();
     }
     changed |= ui.modes.poll(ui.live());
+    changed |= ui.meetings.snapshots.poll(ui.meetings.selected.as_deref());
     changed |= modes::poll_chooser(ui);
     changed |= model_import::poll(ui);
     changed |= found::poll(ui);
