@@ -15,6 +15,8 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
 
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("Provider quota fallback", "Резервный провайдер при исчерпании квоты"),
+    ("Try the configured provider when rewriting hits a usage limit. Timeouts keep the previous text.", "При достижении лимита использования попробуйте настроенного провайдера. При тайм-ауте сохраняется прежний текст."),
     ("Hex picks a fast model", "Hex выбирает быструю модель"),
     ("Summary models show once Hex connects to OpenCode.", "Модели для сводок появятся, когда Hex подключится к OpenCode."),
     ("Start OpenCode to choose a summary model. Hex keeps the saved one.", "Запустите OpenCode, чтобы выбрать модель для сводок. Hex сохранит выбранную ранее."),

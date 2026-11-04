@@ -178,6 +178,7 @@ impl Chunker {
 /// Transcribes a chunk unless the speech detector finds no speech in it.
 /// Models invent text for silence and noise, so a speechless chunk becomes an
 /// empty transcript; accepting it still advances the track's coverage.
+#[cfg(any(test, debug_assertions))]
 fn transcribe_speech(
     samples: &[f32],
     transcribe: impl FnOnce() -> Result<Transcript>,

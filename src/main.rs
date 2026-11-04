@@ -72,7 +72,7 @@ use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "macos")]
 use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::Result;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 use color_eyre::eyre::eyre;
 
 #[cfg(target_os = "macos")]
