@@ -106,6 +106,8 @@ struct InferenceJob {
     prepare_ms: u128,
     target: TranscriptionTarget,
     context: ContextSnapshot,
+    /// The clip, kept for History while Labs › Keep recordings is on.
+    recording: Option<crate::history::Recording>,
 }
 
 struct ProcessorJob {
@@ -115,6 +117,7 @@ struct ProcessorJob {
     text: String,
     context: ContextSnapshot,
     timings: JobTimings,
+    recording: Option<crate::history::Recording>,
 }
 
 /// Pipeline timings carried from inference through output for the final log.
@@ -134,6 +137,7 @@ struct CompletedTranscript {
     application: Option<String>,
     timings: JobTimings,
     processing: Option<ProcessingObservation>,
+    recording: Option<crate::history::Recording>,
 }
 
 enum OutputJob {
@@ -384,6 +388,10 @@ impl DictationWorker {
         let _capture = clip.take_capture_marker();
         let samples = clip.into_transcription_samples();
         crate::dictation::diagnostics::persist(&samples);
+        let recording = match target {
+            TranscriptionTarget::Service => None,
+            _ => crate::history::Recording::keep(&samples),
+        };
         let prepare_ms = submitted_at.elapsed().as_millis();
         let offline = {
             let control = control.clone();
@@ -412,6 +420,7 @@ impl DictationWorker {
             prepare_ms,
             target,
             context,
+            recording,
         })
         .map(|()| {
             state.next_sequence += 1;
@@ -598,6 +607,7 @@ fn run_processor_worker(
                     application: job.context.application,
                     timings: job.timings,
                     processing: processed.observation,
+                    recording: job.recording,
                 })),
             })
             .is_err()
@@ -793,6 +803,7 @@ fn run_inference_worker(
                         text,
                         context: job.context,
                         timings,
+                        recording: job.recording,
                     })
                     .is_err()
                 {
@@ -801,12 +812,14 @@ fn run_inference_worker(
             }
             result => {
                 let application = job.context.application;
+                let recording = job.recording;
                 let result = result.map(|text| CompletedTranscript {
                     raw: text.clone(),
                     text,
                     application,
                     timings,
                     processing: None,
+                    recording,
                 });
                 if output
                     .send(OutputJob::Completed {
@@ -949,7 +962,7 @@ fn finish_output(
                 .as_ref()
                 .ok()
                 .and_then(|result| result.processing.clone());
-            let result = result.and_then(|completed| {
+            let result = result.and_then(|mut completed| {
                 if control.is_cancelled() {
                     return Err("dictation was cancelled".into());
                 }
@@ -982,7 +995,7 @@ fn finish_output(
                         *last_transcript = Some(completed.text.clone());
                     }
                     if let Some(history) = history {
-                        record_history(history, target, &completed);
+                        record_history(history, target, &mut completed);
                     }
                 }
                 tracing::info!(
@@ -1044,7 +1057,11 @@ fn finish_output(
 
 /// Record one successfully pasted result. History failures must never fail
 /// the paste that already happened.
-fn record_history(history: &History, target: TranscriptionTarget, completed: &CompletedTranscript) {
+fn record_history(
+    history: &History,
+    target: TranscriptionTarget,
+    completed: &mut CompletedTranscript,
+) {
     let kind = match target {
         TranscriptionTarget::Paste => HistoryKind::Dictation,
         TranscriptionTarget::RawPaste => HistoryKind::Raw,
@@ -1060,6 +1077,8 @@ fn record_history(history: &History, target: TranscriptionTarget, completed: &Co
         audio_ms: completed.timings.audio_ms,
         inference_ms: completed.timings.inference_ms as u64,
         total_ms: completed.timings.total_started.elapsed().as_millis() as u64,
+        recording: completed.recording.take(),
+        model: crate::history::dictation_model(),
     };
     if let Err(error) = history.record(draft) {
         tracing::warn!(%error, "could not record dictation history");
@@ -1299,6 +1318,7 @@ mod tests {
                 prepare_ms: 0,
                 inference_ms: 0,
             },
+            recording: None,
         }
     }
 

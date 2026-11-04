@@ -100,7 +100,7 @@ fn retention_description(policy: Policy) -> String {
 /// The captures folder, with the home folder as `~`.
 fn folder_label(ui: &Ui) -> String {
     let folder = ui.settings.capture.captures_dir();
-    dirs::home_dir()
+    crate::app_paths::home_dir()
         .and_then(|home| {
             folder
                 .strip_prefix(home)
@@ -364,6 +364,7 @@ fn storage_rows(ui: &Ui, p: Paint, view: &ScrawlView, layer: &mut Vec<El>) -> Ve
             select(
                 p,
                 "capture-retention-menu",
+                tr("Keep"),
                 &retention_label(policy),
                 ui.open == Some(Menu::CaptureRetention),
                 choices,
@@ -443,7 +444,7 @@ pub(super) fn pane(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
             storage_rows(ui, p, &view, layer),
         ));
     }
-    super::scroll_body("scroll", content)
+    super::scroll_body(p.k, "scroll", content)
 }
 
 #[cfg(test)]

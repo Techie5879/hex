@@ -76,6 +76,23 @@ pub struct LabsSettings {
     pub picker_downloaded: bool,
     /// The ISO § key may be a shortcut on its own (Linux, issue 1050).
     pub section_key_alone: bool,
+    /// Dictations saved to History keep their audio, for Transcribe again (issue 1032).
+    pub keep_recordings: bool,
+    pub hide_menu_bar_icon: bool,
+    pub movable_meeting_capsules: bool,
+    pub meeting_summary_model: bool,
+    /// A paste restores the clipboard through a running XWayland on Wayland desktops without data-control, such as GNOME (Linux, issue 1111).
+    pub gnome_clipboard_restore: bool,
+    /// Meeting titles and summaries read the vocabulary (issue 1154).
+    pub meeting_notes_vocabulary: bool,
+    /// With the indicator at the top, the HUD grows out of the notch on a screen with one (macOS).
+    pub notch_indicator: bool,
+    /// The local API's `GET /meetings/events` tells a subscriber each finished meeting's id (issue 964).
+    pub meeting_finished_event: bool,
+    /// The meeting capsules float on a running XWayland on Wayland desktops without layer-shell, such as GNOME (Linux, issue 1274).
+    pub gnome_meeting_capsules: bool,
+    /// Each recording in the Meetings list shows its call app's icon, or a neutral one (issue 1290).
+    pub meeting_platform_icons: bool,
 }
 
 /// The idle times Labs › Unload model when idle offers, in minutes.
@@ -119,6 +136,16 @@ impl Default for LabsSettings {
             model_in_place: false,
             picker_downloaded: false,
             section_key_alone: false,
+            keep_recordings: false,
+            hide_menu_bar_icon: false,
+            movable_meeting_capsules: false,
+            meeting_summary_model: false,
+            gnome_clipboard_restore: false,
+            meeting_notes_vocabulary: false,
+            notch_indicator: false,
+            meeting_finished_event: false,
+            gnome_meeting_capsules: false,
+            meeting_platform_icons: false,
         }
     }
 }

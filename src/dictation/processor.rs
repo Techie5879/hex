@@ -450,14 +450,33 @@ fn numbers_only(transcript: &str) -> bool {
     any_number
 }
 
+/// One generation's text and the model that wrote it, when Hex named one
+/// (`None` when OpenCode's own default model answered).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Generated {
+    pub text: String,
+    pub model: Option<Model>,
+}
+
 /// One generation from OpenCode's default ranked models, for work outside
 /// dictation such as meeting notes.
 pub(crate) fn generate_text(
     prompt: &str,
     deadline: Duration,
     cancelled: &AtomicBool,
-) -> Result<String> {
-    generate_cancellable(prompt, None, deadline, cancelled)
+) -> Result<Generated> {
+    generate_reported(prompt, None, deadline, cancelled)
+}
+
+/// One generation from exactly `model`, never another provider's: a failure
+/// is OpenCode's answer for that model (Labs › Choose meeting summary model).
+pub(crate) fn generate_text_with(
+    prompt: &str,
+    model: &Model,
+    deadline: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Generated> {
+    generate_reported(prompt, Some(model), deadline, cancelled)
 }
 
 #[derive(Clone, Debug)]
@@ -608,6 +627,15 @@ static CACHED_RANKED_CANDIDATES: std::sync::Mutex<Option<(Service, Vec<Model>)>>
 fn cache_ranked_candidates(service: &Service, catalog: &ModelCatalog) {
     if let Ok(mut guard) = CACHED_RANKED_CANDIDATES.lock() {
         *guard = Some((service.clone(), catalog.ranked_candidates(None)));
+    }
+}
+
+/// Drops the cached ranked candidates once one of them failed: the catalog
+/// may have been read while OpenCode was still loading, listing models that
+/// left it since (#1123). The next generation reads the catalog again.
+fn forget_ranked_candidates() {
+    if let Ok(mut guard) = CACHED_RANKED_CANDIDATES.lock() {
+        *guard = None;
     }
 }
 
@@ -1134,6 +1162,47 @@ mod tests {
         );
     }
 
+    /// Labs › Choose meeting summary model: a chosen model is the only one
+    /// asked, and its failure is reported rather than another provider tried.
+    #[test]
+    fn a_chosen_model_is_asked_alone_and_never_falls_back() {
+        let chosen = Model {
+            provider: "openai".into(),
+            id: "gpt-5".into(),
+            variant: None,
+        };
+        let mut posted = Vec::new();
+        let error = generate_with_candidates(
+            "Summarize.",
+            Some(&chosen),
+            || -> Vec<Model> { panic!("a chosen model never reads the ranked candidates") },
+            || panic!("a chosen model never forgets the ranked candidates"),
+            Instant::now(),
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+            |data, _, _| {
+                posted.push(data.to_owned());
+                Ok(Response::Error(
+                    serde_json::from_value(
+                        serde_json::json!({"message": "Provider request failed"}),
+                    )
+                    .unwrap(),
+                ))
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("Provider request failed"),
+            "{error}"
+        );
+        assert_eq!(posted.len(), 1);
+        assert!(
+            posted[0].contains(r#""providerID":"openai""#),
+            "{}",
+            posted[0]
+        );
+    }
+
     #[test]
     fn generation_retry_wait_observes_cancellation() {
         let cancelled = AtomicBool::new(true);
@@ -1185,6 +1254,14 @@ mod tests {
             (
                 vec![("/api/experimental/generate", 400, unavailable)],
                 Err("Model unavailable: x"),
+            ),
+            (
+                vec![(
+                    "/api/experimental/generate",
+                    404,
+                    r#"{"_tag":"NotFoundError","message":"Model not found: github-copilot/gpt-5.4-nano"}"#,
+                )],
+                Err("Model not found: github-copilot/gpt-5.4-nano"),
             ),
             (
                 vec![
@@ -1337,16 +1414,20 @@ mod tests {
                 r#"{"data":{"text":"resolved from second ranked model"}}"#,
             ),
         ]);
+        let mut forgotten = 0;
         let output = generate_with_ranked_candidates(
             "Make this concise.",
             &candidates,
+            || forgotten += 1,
             Instant::now(),
             Duration::from_secs(5),
             &AtomicBool::new(false),
             |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
         )
         .unwrap();
-        assert_eq!(output, "resolved from second ranked model");
+        assert_eq!(output.text, "resolved from second ranked model");
+        assert_eq!(output.model.as_ref(), Some(&candidates[1]));
+        assert_eq!(forgotten, 1, "a failed candidate drops the cached list");
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
         let first: serde_json::Value = serde_json::from_slice(&requests[0]).unwrap();
@@ -1366,6 +1447,46 @@ mod tests {
                 "id": "claude-haiku-4-5"
             })
         );
+    }
+
+    /// A ranked list read while OpenCode was still loading can name models
+    /// that left its catalog (#1123): every one failing forgets the list and
+    /// asks OpenCode's own default model instead.
+    #[test]
+    fn stale_ranked_models_fall_back_to_the_default_model() {
+        let candidates = vec![Model {
+            provider: "github-copilot".into(),
+            id: "gpt-5.4-nano".into(),
+            variant: None,
+        }];
+        let mut forgotten = 0;
+        let mut posted = Vec::new();
+        let output = generate_with_ranked_candidates(
+            "Summarize.",
+            &candidates,
+            || forgotten += 1,
+            Instant::now(),
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+            |data, _, _| {
+                posted.push(serde_json::from_str::<serde_json::Value>(data).unwrap());
+                Ok(if posted.len() == 1 {
+                    Response::Error(serde_json::from_value(serde_json::json!({"message": "Model not found: github-copilot/gpt-5.4-nano"})).unwrap())
+                } else {
+                    Response::Success {
+                        data: ResponseData {
+                            text: "from the default".into(),
+                        },
+                    }
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(output.text, "from the default");
+        assert_eq!(output.model, None);
+        assert_eq!(forgotten, 1);
+        assert_eq!(posted.len(), 2);
+        assert!(posted[1].get("model").is_none(), "{}", posted[1]);
     }
 
     #[test]

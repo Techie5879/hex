@@ -402,7 +402,9 @@ fn contributed_options_are_labs_toggles_off_by_default() {
     tap(&mut rt, "lab-copy-only");
     assert!(rt.state.settings.labs.copy_only);
 
-    let mut rt = runtime("windows-settings", true, (980.0, 1600.0));
+    // Tall enough that the last Labs rows (Share shortcut, Terminal paste)
+    // sit inside the window, where a tap reaches them.
+    let mut rt = runtime("windows-settings", true, (980.0, 2400.0));
     open_advanced(&mut rt, Pane::General);
     assert!(rt.find("share-dictation-shortcut").is_none());
     tap(&mut rt, "nav-labs");
@@ -412,8 +414,81 @@ fn contributed_options_are_labs_toggles_off_by_default() {
     assert!(rt.find("lab-spoken-formatting").is_some(), "every OS");
     assert!(rt.find("lab-filler-words").is_some(), "every OS");
     assert!(rt.find("lab-spoken-symbols").is_some(), "every OS");
+    assert!(!rt.state.settings.share_dictation_shortcut);
     tap(&mut rt, "lab-share-shortcut");
     assert!(rt.state.settings.share_dictation_shortcut);
+}
+
+/// Choose meeting summary model is a Labs toggle wherever Meetings is,
+/// Windows and Linux included (#1160), off by default.
+#[test]
+fn the_meeting_summary_model_lab_is_on_every_os_with_meetings() {
+    for scene in ["portal", "windows-settings", "mac-settings"] {
+        let mut rt = runtime(scene, true, (980.0, 2000.0));
+        tap(&mut rt, "nav-labs");
+        assert!(
+            rt.find("lab-meeting-summary-model").is_some(),
+            "{scene} lists Choose meeting summary model"
+        );
+        assert!(!rt.state.settings.labs.meeting_summary_model);
+        tap(&mut rt, "lab-meeting-summary-model");
+        assert!(rt.state.settings.labs.meeting_summary_model, "{scene}");
+    }
+}
+
+/// Labs › Choose meeting summary model picks from OpenCode's models in
+/// Meetings › Settings › Advanced, with the automatic choice first; without
+/// OpenCode it offers a retry and keeps the saved model (#1301).
+#[test]
+fn the_meeting_summary_model_is_picked_from_opencode_s_models() {
+    let size = (980.0, 2400.0);
+    let mut rt = runtime("meetings-summary-model", true, size);
+    assert!(rt.find("meeting-summary-model").is_some());
+    assert!(rt.find("opencode-unavailable").is_none());
+    rt.state.models.open_picker();
+    rt.invalidate();
+    settle(&mut rt);
+    // Hex's automatic choice, then the catalog in order.
+    tap(&mut rt, "model-picker-option-3");
+    assert_eq!(
+        rt.state.settings.meetings.opencode_model.as_deref(),
+        Some("openai/gpt-5")
+    );
+    assert!(rt.find("thinking").is_none(), "summaries have no thinking");
+    tap(&mut rt, "model-value");
+    assert!(rt.state.models.picker.open);
+    tap(&mut rt, "model-picker-option-0");
+    assert_eq!(rt.state.settings.meetings.opencode_model, None);
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|text| text == "Hex picks a fast model")
+    );
+
+    rt.state.settings.labs.meeting_summary_model = false;
+    refresh(&mut rt);
+    assert!(rt.find("meeting-summary-model").is_none(), "off, no picker");
+
+    let rt = runtime("meetings-summary-model-not-running", true, size);
+    assert!(rt.find("opencode-unavailable").is_some());
+    assert!(rt.find("retry-opencode").is_some());
+    assert_eq!(
+        rt.state.settings.meetings.opencode_model.as_deref(),
+        Some("anthropic/claude-sonnet-4-5")
+    );
+    assert!(texts(&rt).iter().any(|text| text == "claude-sonnet-4-5"));
+
+    // A failed folder change opens Advanced with the fold closed; the picker
+    // shows there too, and the catalog is read for it.
+    let mut rt = runtime("meetings-summary-model", true, size);
+    rt.state.advanced.clear();
+    rt.state.platform.meeting_folder_error = Some("Couldn't use that folder".into());
+    refresh(&mut rt);
+    assert!(rt.find("meeting-folder-error").is_some());
+    assert!(rt.find("meeting-summary-model").is_some());
+    assert!(super::super::platform_settings::summary_model_shown(
+        &rt.state
+    ));
 }
 
 /// The cancel shortcut's row shows only in Toggle; its default, Escape,
@@ -503,7 +578,7 @@ fn the_microphone_level_follows_the_voice() {
 #[test]
 fn the_shortcut_mode_row_names_the_choice() {
     let mut rt = runtime("mac-settings", true, PANE_SIZE);
-    let name = |rt: &Runtime<Ui>| element(rt, "shortcut-mode-control").label.clone();
+    let name = |rt: &Runtime<Ui>| a11y_value(rt, "shortcut-mode-control");
     assert_eq!(name(&rt).as_deref(), Some("Hold or double-tap"));
     rt.state.settings.shortcut_mode = crate::dictation::ShortcutMode::Toggle;
     refresh(&mut rt);
@@ -1075,12 +1150,12 @@ fn meetings_settings_save_and_ask_for_system_audio() {
         policy(&rt, "us.zoom.xos"),
         Some(MeetingPolicy::AlwaysRecord)
     );
-    pick(&mut rt, "call7-policy", 0);
+    pick(&mut rt, "call8-policy", 0);
     assert_eq!(
         policy(&rt, "problems.kitlangton.com"),
         Some(MeetingPolicy::Ask)
     );
-    assert!(rt.find("call7").is_some());
+    assert!(rt.find("call8").is_some());
     tap(&mut rt, "meetings-enabled");
     assert!(!rt.state.settings.meetings.enabled);
     assert!(rt.find("meeting-folder").is_none());
@@ -1506,6 +1581,8 @@ fn platform_goldens() {
     let _goldens = Goldens::collect();
     for dark in [true, false] {
         check_golden("meetings-calendar", dark, (980.0, 1800.0));
+        check_golden("meetings-summary-model", dark, (980.0, 1800.0));
+        check_golden("meetings-summary-model-not-running", dark, (980.0, 1800.0));
         for scene in [
             "mac-settings",
             "mac-input-source-models",
@@ -2009,4 +2086,33 @@ fn audio_retention_menu_defaults_to_forever_and_does_not_change_text_retention()
     );
     assert_eq!(rt.state.settings.history_retention, text_retention);
     assert!(saved(&rt) > 0);
+}
+
+/// A pane longer than the window shows a scroll bar to drag, for a pointer
+/// without a wheel (#1209).
+#[test]
+fn a_long_transcript_scrolls_by_dragging_its_scroll_bar() {
+    let mut rt = runtime("meetings", true, PANE_SIZE);
+    settle(&mut rt);
+    let at = |rt: &Runtime<Ui>, path: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.path.ends_with(path))
+            .unwrap_or_else(|| panic!("no {path}"))
+            .rect
+    };
+    let thumb = at(&rt, "meeting-transcript-area/scroll-bar/thumb");
+    assert!(thumb[3] > 0.0, "the transcript overflows, so its bar shows");
+    let top = at(&rt, "meeting-transcript/inset")[1];
+    let (x, y) = (thumb[0] + thumb[2] / 2.0, thumb[1] + 4.0);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.pointer_move(x, y + 60.0);
+    rt.pointer_up(x, y + 60.0);
+    settle(&mut rt);
+    assert!(
+        at(&rt, "meeting-transcript/inset")[1] < top - 60.0,
+        "dragging the thumb scrolled the transcript"
+    );
+    assert!(at(&rt, "meeting-transcript-area/scroll-bar/thumb")[1] > thumb[1] + 59.0);
 }

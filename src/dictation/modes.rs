@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 use url::Url;
 
-use crate::app_settings::{AppSettings, DictationMode};
+use crate::app_settings::{AppSettings, DictationMode, DictationProcessingSettings};
 use crate::dictation::processor::{PostProcessingSettings, Processed, Profile, Profiles};
 use crate::dictation::text_replacements::ReplacementSet;
 
@@ -21,6 +21,7 @@ pub struct ModeRuntime {
     default_transformations: Vec<String>,
     default_vocabulary: Vec<crate::dictation::vocabulary::VocabularyEntry>,
     modes: Vec<DictationMode>,
+    reads_page: bool,
 }
 
 impl ModeRuntime {
@@ -32,7 +33,15 @@ impl ModeRuntime {
             default_transformations: processing.default_mode.transformations.clone(),
             default_vocabulary: processing.default_mode.vocabulary.clone(),
             modes: processing.modes.clone(),
+            reads_page: uses_page(processing),
         }
+    }
+
+    /// Whether processing looks at the focused page: a mode chosen by
+    /// website, an OpenCode rewrite, or a script transformation. Otherwise
+    /// the listener never asks the browser for its address, as on macOS.
+    pub fn reads_page(&self) -> bool {
+        self.reads_page
     }
 
     /// Global replacements, then the matching mode's corrections,
@@ -73,6 +82,26 @@ impl ModeRuntime {
     }
 }
 
+/// Whether anything set up in `settings` looks at the focused page: a mode
+/// chosen by website, an OpenCode rewrite (its prompt names the site), or a
+/// script transformation (it receives the page address). Every OS asks the
+/// browser for its page only then (macOS through `config::reads_browser`).
+pub(crate) fn uses_page(settings: &DictationProcessingSettings) -> bool {
+    settings
+        .modes
+        .iter()
+        .any(|mode| !mode.browser_hosts.is_empty())
+        || std::iter::once(&settings.default_mode)
+            .chain(&settings.modes)
+            .any(|mode| {
+                mode.post_processing.enabled
+                    || mode
+                        .transformations
+                        .iter()
+                        .any(|id| !crate::personal_commands::is_builtin_transformation(id))
+            })
+}
+
 /// The history entry for one pasted dictation.
 pub fn history_draft(
     raw_text: String,
@@ -81,6 +110,7 @@ pub fn history_draft(
     audio_ms: u64,
     inference_ms: u64,
     total_ms: u64,
+    recording: Option<crate::history::Recording>,
 ) -> crate::history::HistoryDraft {
     crate::history::HistoryDraft {
         kind: crate::history::HistoryKind::Dictation,
@@ -97,6 +127,8 @@ pub fn history_draft(
         audio_ms,
         inference_ms,
         total_ms,
+        recording,
+        model: crate::history::dictation_model(),
     }
 }
 
@@ -216,6 +248,36 @@ mod tests {
             Some("Browser")
         );
         assert_eq!(matched(&modes, Some("chrome"), None), Some("Browser"));
+    }
+
+    #[test]
+    fn the_page_is_read_only_when_processing_uses_it() {
+        assert!(!runtime(|_| {}).reads_page());
+        assert!(
+            !runtime(|settings| {
+                settings.dictation_processing.modes = vec![DictationMode {
+                    transformations: vec!["lowercase".into()],
+                    ..mode("Code", &["code"], &[])
+                }];
+            })
+            .reads_page()
+        );
+        assert!(
+            runtime(|settings| {
+                settings.dictation_processing.modes = vec![mode("X", &[], &["x.com"])];
+            })
+            .reads_page()
+        );
+        assert!(
+            runtime(|settings| {
+                settings
+                    .dictation_processing
+                    .default_mode
+                    .post_processing
+                    .enabled = true;
+            })
+            .reads_page()
+        );
     }
 
     #[test]

@@ -25,6 +25,32 @@ pub(super) fn generate(prompt: &str, model: Option<&Model>, deadline: Duration) 
     generate_cancellable(prompt, model, deadline, &AtomicBool::new(false))
 }
 
+pub(super) fn generate_reported(
+    prompt: &str,
+    model: Option<&Model>,
+    deadline: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Generated> {
+    let started = Instant::now();
+    let lock = crate::policy::Lock::OpenCodeProcessing;
+    if crate::policy::Policy::current().locks(lock) {
+        return Err(eyre!(lock.refusal()));
+    }
+    let service =
+        crate::desktop::opencode_service::find().map_err(|missing| eyre!(missing.message()))?;
+    generate_with_candidates(
+        prompt,
+        model,
+        || ranked_candidates_for(&service),
+        forget_ranked_candidates,
+        started,
+        deadline,
+        cancelled,
+        |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
+    )
+}
+
+#[cfg(test)]
 pub(super) fn generate_cancellable(
     prompt: &str,
     model: Option<&Model>,
@@ -63,28 +89,33 @@ pub(super) fn generate_cancellable_with_fallback(
         prompt,
         model,
         || ranked_candidates_for(&service),
+        forget_ranked_candidates,
         started,
         deadline,
         cancelled,
         |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
     )
+    .map(|generated| generated.text)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn generate_with_candidates(
     prompt: &str,
     model: Option<&Model>,
     candidates: impl FnOnce() -> Vec<Model>,
+    forget_candidates: impl FnMut(),
     started: Instant,
     deadline: Duration,
     cancelled: &AtomicBool,
     post: impl FnMut(&str, Duration, &AtomicBool) -> Result<Response>,
-) -> Result<String> {
+) -> Result<Generated> {
     if model.is_none() {
         let candidates = candidates();
         if !candidates.is_empty() {
             return generate_with_ranked_candidates(
                 prompt,
                 &candidates,
+                forget_candidates,
                 started,
                 deadline,
                 cancelled,
@@ -92,7 +123,11 @@ pub(super) fn generate_with_candidates(
             );
         }
     }
-    generate_single_model(prompt, model, started, deadline, cancelled, post)
+    let text = generate_single_model(prompt, model, started, deadline, cancelled, post)?;
+    Ok(Generated {
+        text,
+        model: model.cloned(),
+    })
 }
 
 pub(super) fn remaining_generation_deadline(
@@ -113,34 +148,56 @@ pub(super) fn remaining_generation_deadline(
 pub(super) fn generate_with_ranked_candidates(
     prompt: &str,
     candidates: &[Model],
+    mut forget_candidates: impl FnMut(),
     started: Instant,
     deadline: Duration,
     cancelled: &AtomicBool,
     mut post: impl FnMut(&str, Duration, &AtomicBool) -> Result<Response>,
-) -> Result<String> {
+) -> Result<Generated> {
     let mut last_error = None;
-    for (index, candidate) in candidates.iter().enumerate() {
+    for candidate in candidates {
         let remaining = remaining_generation_deadline(started, deadline)?;
         let data = serde_json::to_string(&Request {
             prompt,
             model: Some(candidate),
         })?;
-        match post(&data, remaining, cancelled)? {
-            Response::Success { data } => return Ok(data.text),
+        let response = match post(&data, remaining, cancelled) {
+            Ok(response) => response,
+            Err(error) => {
+                forget_candidates();
+                return Err(error);
+            }
+        };
+        match response {
+            Response::Success { data } => {
+                return Ok(Generated {
+                    text: data.text,
+                    model: Some(candidate.clone()),
+                });
+            }
             Response::Error(error) => {
-                if index + 1 < candidates.len() {
-                    tracing::warn!(
-                        provider = %candidate.provider,
-                        model = %candidate.id,
-                        message = %error.message,
-                        "ranked OpenCode model failed; trying next available candidate"
-                    );
-                }
-                last_error = Some(eyre!("OpenCode generation failed: {}", error.message));
+                let message = error.message;
+                forget_candidates();
+                tracing::warn!(
+                    provider = %candidate.provider,
+                    model = %candidate.id,
+                    %message,
+                    "ranked OpenCode model failed; trying the next one"
+                );
+                last_error = Some(message);
             }
         }
     }
-    Err(last_error.unwrap_or_else(|| eyre!("no OpenCode models available")))
+    tracing::warn!("every ranked OpenCode model failed; asking OpenCode's default model");
+    match generate_single_model(prompt, None, started, deadline, cancelled, &mut post) {
+        Ok(text) => Ok(Generated { text, model: None }),
+        Err(error) => Err(match last_error {
+            Some(message) => eyre!(
+                "OpenCode generation failed: {message}; OpenCode's default model also failed: {error:#}"
+            ),
+            None => error,
+        }),
+    }
 }
 
 pub(super) fn generate_single_model(
@@ -188,14 +245,14 @@ pub(super) fn post_generation(
             deadline.saturating_sub(started.elapsed()),
             cancelled,
         )?;
-        let missing = attempt.status == 404;
+        let missing = route_missing(&attempt);
         response = Some(attempt);
         if !missing {
             break;
         }
     }
     let response = response.expect("at least one generation route");
-    if response.status == 404 {
+    if route_missing(&response) {
         return Err(eyre!("OpenCode does not serve a generation route"));
     }
     serde_json::from_slice(&response.body)
@@ -539,4 +596,14 @@ mod live_tests {
             started.elapsed()
         );
     }
+}
+
+fn route_missing(response: &crate::desktop::opencode_service::Response) -> bool {
+    response.status == 404
+        && !serde_json::from_slice::<serde_json::Value>(&response.body).is_ok_and(|value| {
+            value.get("_tag").is_some()
+                && value
+                    .get("message")
+                    .is_some_and(serde_json::Value::is_string)
+        })
 }

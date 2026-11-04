@@ -20,6 +20,7 @@
   fontconfig,
   freetype,
   curl,
+  util-linux,
   wl-clipboard,
   wtype,
   makeWrapper,
@@ -89,6 +90,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ../assets
       ../packaging
       ../macos/HexMicrophoneDriver/Info.plist
+      # Built in: a 2.3.1 install moves itself into this installer's layout.
+      ../.github/release/install-linux.sh
     ];
   };
 
@@ -96,8 +99,8 @@ rustPlatform.buildRustPackage (finalAttrs: {
     lockFile = ../Cargo.lock;
     outputHashes = {
       "transcribe-rs-0.3.11" = "sha256-MJJiug3LfbKsuHcL2+LJk95+j5kk/MWzb5ihdBlHLmE=";
-      "rune-0.0.1" = "sha256-QRebxXV18QPsmy39c/wCS3x0bm8CAEy5cwvroLh+0FE=";
-      "transcribe-cpp-sys-0.4.1" = "sha256-AP8+t4baAzjOVJo76vodPoWv8lrFLR2tsXvsrbMFeSk=";
+      "rune-0.0.1" = "sha256-mUrn+AJ4M2dHGZseybw/0mAO+mgIVNSMXMwyj/51En0=";
+      "transcribe-cpp-sys-0.4.1" = "sha256-BAc2qKUMBZ5D6+Bq12NaZ1+ntWxHv95TYcAMTt3a5X8=";
     };
   };
 
@@ -127,8 +130,12 @@ rustPlatform.buildRustPackage (finalAttrs: {
     libxi
   ];
 
-  # OpenCode HTTP requests run through curl, including in the tests.
-  nativeCheckInputs = [ curl ];
+  # OpenCode HTTP requests run through curl, including in the tests; the
+  # 2.3.1 adoption test runs the Linux installer, which needs flock.
+  nativeCheckInputs = [
+    curl
+    util-linux
+  ];
 
   dontUseCmakeConfigure = true;
   env = buildEnv;

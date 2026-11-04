@@ -31,6 +31,9 @@ pub struct LocalTranscriber {
     preference: TranscriptionDevice,
     /// A warm run of [`PREWARM_SAMPLES`] once loaded, in milliseconds.
     warm_ms: u128,
+    /// It loaded on the CPU because the GPU ran out of memory, as it does
+    /// when another copy of a model already fills it (#1170).
+    gpu_full: bool,
 }
 
 /// 1.5 s of silence: what loading runs to warm a model and time it.
@@ -70,27 +73,40 @@ pub fn install(selection: &TranscriptionSelection, canceled: &AtomicBool) -> Res
     Ok(())
 }
 
+/// Speech engine was CPU when [`init_backends`] ran, so only the CPU
+/// backend registered.
+static CPU_CHOSEN: AtomicBool = AtomicBool::new(false);
+
 /// Registers transcribe.cpp's backends once per process and returns the
-/// backend models load on: every GPU (`Auto`), or on Windows only the CPU
-/// after a launch of this build crashed while ggml started a GPU (#662). A
-/// GPU driver crash can't be caught, so a marker file spans that work.
+/// backend models load on: every GPU (`Auto`), or only the CPU when Speech
+/// engine is CPU, so no GPU driver loads (#1253), or on Windows after a
+/// launch of this build crashed while ggml started a GPU (#662). A GPU
+/// driver crash can't be caught, so a marker file spans that work.
 pub fn init_backends() -> Result<Backend> {
     static BACKEND: std::sync::OnceLock<Backend> = std::sync::OnceLock::new();
     if let Some(backend) = BACKEND.get() {
         return Ok(*backend);
     }
     transcribe_cpp::init_logging();
+    let cpu_only = || {
+        transcribe_cpp::init_backends_with(
+            None::<&Path>,
+            transcribe_cpp::BackendMask::for_backend(Backend::Cpu),
+        )
+        .wrap_err("could not initialize the CPU transcription backend")
+    };
     #[cfg(target_os = "windows")]
     if gpu_guard::crashed_before() {
         tracing::warn!(
             marker = %gpu_guard::marker().map(|path| path.display().to_string()).unwrap_or_default(),
             "a previous launch of this Hex crashed while starting the GPU for transcription; transcribing on the CPU until Hex updates or the marker is deleted"
         );
-        transcribe_cpp::init_backends_with(
-            None::<&Path>,
-            transcribe_cpp::BackendMask::for_backend(Backend::Cpu),
-        )
-        .wrap_err("could not initialize the CPU transcription backend")?;
+        cpu_only()?;
+        return Ok(*BACKEND.get_or_init(|| Backend::Cpu));
+    }
+    if device() == TranscriptionDevice::Cpu {
+        cpu_only()?;
+        CPU_CHOSEN.store(true, Ordering::Relaxed);
         return Ok(*BACKEND.get_or_init(|| Backend::Cpu));
     }
     let init = || {
@@ -103,6 +119,12 @@ pub fn init_backends() -> Result<Backend> {
     let init = || gpu_guard::guarded(init);
     init().wrap_err("could not initialize transcription backends")?;
     Ok(*BACKEND.get_or_init(|| Backend::Auto))
+}
+
+/// Speech engine left CPU after this launch registered the CPU alone: the
+/// GPU needs a restart.
+pub(crate) fn gpu_after_restart() -> bool {
+    CPU_CHOSEN.load(Ordering::Relaxed) && device() != TranscriptionDevice::Cpu
 }
 
 /// The marker a Windows launch keeps while ggml starts a GPU (`init_backends`,
@@ -280,10 +302,18 @@ impl LocalTranscriber {
                     error = format!("{error:#}"),
                     "could not load the transcription model on the GPU; loading it on the CPU"
                 );
-                let loaded = Self::load_on(selection, Backend::Cpu, None, preference)?;
-                // The CPU loads the same model, so the GPU failed.
+                let mut loaded = Self::load_on(selection, Backend::Cpu, None, preference)?;
+                // The CPU loads the same model, so the GPU failed, unless it
+                // only ran out of memory (another copy can fill it, #1165).
                 if let Some(gpu) = &expected {
-                    gpu_health::record(gpu, &format!("{error:#}"));
+                    if gpu_health::out_of_memory(&error) {
+                        tracing::info!(
+                            "the GPU ran out of memory; not remembering it as failed, Auto tries it again next load"
+                        );
+                        loaded.gpu_full = true;
+                    } else {
+                        gpu_health::record(gpu, &format!("{error:#}"));
+                    }
                 }
                 Ok(loaded)
             }
@@ -365,6 +395,7 @@ impl LocalTranscriber {
             .then(|| device.clone()),
             preference,
             warm_ms: 0,
+            gpu_full: false,
         };
         let started = Instant::now();
         transcriber.warm_on_silence()?;
@@ -541,7 +572,9 @@ impl LocalTranscriber {
         );
         let gpu = self.gpu.take();
         let cpu = Self::load_on(&self.selection, Backend::Cpu, None, self.preference)?;
-        if let Some(gpu) = &gpu {
+        if let Some(gpu) = &gpu
+            && !gpu_health::out_of_memory(error)
+        {
             gpu_health::record(gpu, &format!("{error:#}"));
         }
         gpu_health::set_auto_on_cpu(self.preference == TranscriptionDevice::Auto);
@@ -667,6 +700,9 @@ pub(crate) struct ModelSwap {
     device: TranscriptionDevice,
     loading: Option<(TranscriptionSelection, TranscriptionDevice, Loading)>,
     ready: Option<(TranscriptionSelection, LocalTranscriber)>,
+    /// A selection whose load beside the running model found the GPU full:
+    /// the engine drops its model and loads this one in its place (#1170).
+    reload: Option<(TranscriptionSelection, TranscriptionDevice)>,
 }
 
 impl ModelSwap {
@@ -676,6 +712,7 @@ impl ModelSwap {
             device: device(),
             loading: None,
             ready: None,
+            reload: None,
         }
     }
 
@@ -685,6 +722,10 @@ impl ModelSwap {
         self.ready
             .as_ref()
             .map(|(selection, model)| (selection, model.preference))
+            .or(self
+                .reload
+                .as_ref()
+                .map(|(selection, device)| (selection, *device)))
             .or(self
                 .loading
                 .as_ref()
@@ -701,7 +742,25 @@ impl ModelSwap {
         transcriber: LocalTranscriber,
     ) {
         self.loading = None;
-        self.ready = Some((selection.clone(), transcriber));
+        self.place(selection.clone(), transcriber);
+    }
+
+    /// Keeps a loaded model to swap in, unless it fell back to the CPU only
+    /// because the running model fills the GPU: then it is dropped, and the
+    /// engine reloads the selection once its own model is gone.
+    fn place(&mut self, selection: TranscriptionSelection, transcriber: LocalTranscriber) {
+        if transcriber.gpu_full {
+            tracing::info!(
+                "the GPU has no room for the new model beside the running one; loading it in its place"
+            );
+            let device = transcriber.preference;
+            drop(transcriber);
+            self.ready = None;
+            self.reload = Some((selection, device));
+        } else {
+            self.reload = None;
+            self.ready = Some((selection, transcriber));
+        }
     }
 
     /// Settings now select `selection`; loads it unless it is already the
@@ -715,6 +774,7 @@ impl ModelSwap {
             return;
         }
         self.ready = None;
+        self.reload = None;
         if selection == self.loaded && device == self.device {
             self.loading = None;
             return;
@@ -746,7 +806,7 @@ impl ModelSwap {
         let (selection, _, _) = self.loading.take()?;
         match result {
             Ok(transcriber) => {
-                self.ready = Some((selection, transcriber));
+                self.place(selection, transcriber);
                 None
             }
             Err(error) => Some(SwapFailed {
@@ -763,6 +823,17 @@ impl ModelSwap {
         self.loaded = selection;
         self.device = transcriber.preference;
         Some(transcriber)
+    }
+
+    /// The selection the engine should load in place of its model, if the
+    /// GPU had no room for both ([`TranscriptionEngine::reload`]).
+    ///
+    /// [`TranscriptionEngine::reload`]: crate::transcription::engine::TranscriptionEngine::reload
+    pub(crate) fn take_reload(&mut self) -> Option<TranscriptionSelection> {
+        let (selection, device) = self.reload.take()?;
+        self.loaded = selection.clone();
+        self.device = device;
+        Some(selection)
     }
 }
 
@@ -809,5 +880,24 @@ mod model_swap_tests {
         assert!(swap.loading.is_none());
         assert!(swap.take_ready().is_none());
         assert!(swap.poll().is_none());
+    }
+
+    #[test]
+    fn a_model_without_room_on_the_gpu_reloads_in_place_once() {
+        let old = TranscriptionSelection::default();
+        let new = TranscriptionSelection {
+            language: "de".into(),
+            ..Default::default()
+        };
+        let mut swap = ModelSwap::new(&old);
+        swap.reload = Some((new.clone(), device()));
+        // Already the target: nothing loads beside the running model.
+        swap.want(&new);
+        assert!(swap.loading.is_none());
+        assert!(swap.take_reload() == Some(new.clone()));
+        assert!(swap.take_reload().is_none());
+        swap.want(&new);
+        assert!(swap.loading.is_none());
+        assert!(swap.take_ready().is_none());
     }
 }

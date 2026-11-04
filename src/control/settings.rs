@@ -404,6 +404,11 @@ const KEYS: &[Key] = &[
         "Labs: a shortcut may be the § key, left of 1 on ISO keyboards, with no modifier (Linux); off puts such a shortcut back to its default",
     ),
     key(
+        "labs.keep_recordings",
+        Kind::Bool,
+        "Labs: dictations saved to History keep their audio, so History can transcribe them again with another model; off stops saving, clearing History deletes it",
+    ),
+    key(
         "labs.history_stats",
         Kind::Bool,
         "Labs: a summary of retained dictations at the top of History, and hex history stats",
@@ -414,6 +419,16 @@ const KEYS: &[Key] = &[
         "Labs: a Copy Recent Dictation submenu in the menu bar that copies one of the last five dictations (macOS)",
     ),
     key(
+        "labs.hide_menu_bar_icon",
+        Kind::Bool,
+        "Labs: hide Hex's menu bar icon while nothing records; shortcuts keep working, and opening Hex again from Finder or Spotlight shows Settings (macOS)",
+    ),
+    key(
+        "labs.notch_indicator",
+        Kind::Bool,
+        "Labs: with indicator_position top, the recording indicator grows out of the notch on a screen that has one, and sits below the menu bar elsewhere (macOS)",
+    ),
+    key(
         "labs.skip_pauses",
         Kind::Bool,
         "Labs: a dictation transcribed as a whole clip hears only the start and end of each long pause, so slow computers paste sooner (Linux and Windows)",
@@ -422,6 +437,41 @@ const KEYS: &[Key] = &[
         "labs.stop_when_call_ends",
         Kind::Bool,
         "Labs: a meeting recording Hex started on its own stops 30 s after its call app leaves the microphone and goes quiet, unless you keep recording (macOS)",
+    ),
+    key(
+        "labs.movable_meeting_capsules",
+        Kind::Bool,
+        "Labs: drag meeting capsules such as Meeting transcript ready out of the way; they show in the corner you left them, shared with the recording capsule (macOS)",
+    ),
+    key(
+        "labs.meeting_summary_model",
+        Kind::Bool,
+        "Labs: meeting notes written with OpenCode use meetings.opencode_model, with no fallback to another model",
+    ),
+    key(
+        "labs.meeting_notes_vocabulary",
+        Kind::Bool,
+        "Labs: final meeting titles and summaries read the vocabulary, so names are spelled the way you wrote them",
+    ),
+    key(
+        "labs.meeting_finished_event",
+        Kind::Bool,
+        "Labs: the local API's GET /meetings/events tells one subscriber each finished meeting's id once its final transcript is written; no transcript, audio, path, or title",
+    ),
+    key(
+        "labs.gnome_clipboard_restore",
+        Kind::Bool,
+        "Labs: on Wayland desktops without data-control, such as GNOME, a paste restores the previous clipboard through XWayland while it is already running (Linux)",
+    ),
+    key(
+        "labs.gnome_meeting_capsules",
+        Kind::Bool,
+        "Labs: on Wayland desktops without layer-shell, such as GNOME, the meeting capsules float over the call through XWayland while it is already running (Linux)",
+    ),
+    key(
+        "labs.meeting_platform_icons",
+        Kind::Bool,
+        "Labs: each recording in the Meetings list shows a small icon for its call app or website, or a neutral one when Hex doesn't know it",
     ),
     key(
         "labs.output_fixes",
@@ -462,6 +512,11 @@ const KEYS: &[Key] = &[
         "meetings.summarize_with_opencode",
         Kind::Bool,
         "Title and summarize meetings with the OpenCode model (sends the transcript to it)",
+    ),
+    optional(
+        "meetings.opencode_model",
+        Kind::Text,
+        "The OpenCode provider/model meeting notes use, with labs.meeting_summary_model; none tries Hex's ranked fast models",
     ),
     key(
         "meetings.show_recording_indicator",
@@ -557,7 +612,7 @@ const KEYS: &[Key] = &[
     optional(
         "ui_language",
         Kind::Choice(&[
-            "en", "pl", "zh", "zh-Hant", "ja", "de", "es", "uk", "pt", "fr",
+            "en", "pl", "zh", "zh-Hant", "ja", "de", "es", "uk", "pt", "fr", "ru",
         ]),
         "Interface language; none follows the system",
     ),
@@ -642,8 +697,14 @@ const NEEDS: &[(&str, &str)] = &[
     ("labs.live_chapters", "meetings"),
     ("labs.subtitle_export", "meetings"),
     ("labs.stop_when_call_ends", "meetings"),
+    ("labs.movable_meeting_capsules", "meetings"),
+    ("labs.meeting_summary_model", "meetings"),
+    ("labs.meeting_notes_vocabulary", "meetings"),
+    ("labs.meeting_finished_event", "meetings"),
+    ("labs.meeting_platform_icons", "meetings"),
     ("experimental.hex_microphone", "fun"),
     ("show_dock_icon", "dock_icon"),
+    ("labs.hide_menu_bar_icon", "dock_icon"),
     ("keyboard_model_switching.", "keyboard_model_switching"),
     ("enable_on_launch", "listener_control"),
     ("share_dictation_shortcut", "share_shortcut"),
@@ -672,6 +733,16 @@ fn unavailable_under(name: &str, policy: crate::policy::Policy) -> Option<Contro
         return Some(ControlError::new(
             "unsupported",
             format!("`{name}` belongs to a Labs feature that only dev builds have"),
+        ));
+    }
+    // A `labs.` key is only its feature's switch, so off its OS it does nothing.
+    if let Some(feature) = crate::labs::Feature::for_settings_key(name)
+        && name.starts_with("labs.")
+        && !feature.on_this_os()
+    {
+        return Some(ControlError::new(
+            "unsupported",
+            format!("`{name}` belongs to a Labs feature this OS doesn't have"),
         ));
     }
     let capability = needs(name).filter(|capability| !crate::rune_ui::capability(capability))?;
@@ -862,8 +933,16 @@ pub fn apply(
     let value = parse(key, raw, shortcuts)?;
     let mut json = serde_json::to_value(settings)
         .map_err(|error| ControlError::new("internal", error.to_string()))?;
+    // An unset optional setting is left out of the file, so give it a slot.
+    let path = pointer(key.key);
+    if json.pointer(&path).is_none()
+        && let Some((parent, leaf)) = path.rsplit_once('/')
+        && let Some(Value::Object(object)) = json.pointer_mut(parent)
+    {
+        object.insert(leaf.to_owned(), Value::Null);
+    }
     let slot = json
-        .pointer_mut(&pointer(key.key))
+        .pointer_mut(&path)
         .ok_or_else(|| ControlError::new("internal", format!("`{name}` is missing")))?;
     *slot = value;
     let mut candidate: AppSettings =
@@ -1130,7 +1209,7 @@ fn parse(key: &Key, raw: &str, shortcuts: &ShortcutRules) -> Result<Value, Contr
         Kind::Text => Ok(Value::String(raw.into())),
         Kind::Path => {
             let path = match trimmed.strip_prefix("~/") {
-                Some(rest) => dirs::home_dir()
+                Some(rest) => crate::app_paths::home_dir()
                     .ok_or_else(|| invalid(name, "no home folder to expand ~ in"))?
                     .join(rest),
                 None => std::path::PathBuf::from(trimmed),
@@ -1341,6 +1420,17 @@ mod tests {
         assert!(unavailable_under("labs.live_text", Policy::default()).is_none());
     }
 
+    #[test]
+    fn a_labs_switch_for_another_os_is_refused() {
+        let refused = unavailable_under("labs.notch_indicator", crate::policy::Policy::default())
+            .map(|error| error.code);
+        if cfg!(target_os = "macos") {
+            assert_eq!(refused, None);
+        } else {
+            assert_eq!(refused, Some("unsupported"));
+        }
+    }
+
     fn rules() -> ShortcutRules {
         ShortcutRules {
             key_named: |name| match name.to_ascii_lowercase().as_str() {
@@ -1400,6 +1490,7 @@ mod tests {
             }],
             meetings: crate::app_settings::MeetingSettings {
                 retention: Some(crate::app_settings::MeetingRetention::Day),
+                opencode_model: Some("anthropic/claude-haiku".into()),
                 ..Default::default()
             },
             ..Default::default()
@@ -1615,6 +1706,34 @@ mod tests {
         assert_eq!(change.settings.meetings.calendar.lead_minutes, 5);
         let change = apply(&settings, "ui_language", "none", &rules()).unwrap();
         assert_eq!(change.settings.ui_language, None);
+        let change = apply(
+            &settings,
+            "meetings.opencode_model",
+            "anthropic/claude-haiku",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(
+            change.settings.meetings.opencode_model.as_deref(),
+            Some("anthropic/claude-haiku")
+        );
+        assert_eq!(
+            get(&change.settings, "meetings.opencode_model").unwrap()[0].value,
+            "anthropic/claude-haiku"
+        );
+        let cleared = apply(
+            &change.settings,
+            "meetings.opencode_model",
+            "none",
+            &rules(),
+        )
+        .unwrap();
+        assert_eq!(cleared.settings.meetings.opencode_model, None);
+        assert!(
+            get(&cleared.settings, "meetings.opencode_model").unwrap()[0]
+                .value
+                .is_null()
+        );
         let mut saved = settings.clone();
         saved.microphone = Some("USB Mic".into());
         let change = apply(&saved, "microphone", "system-default", &rules()).unwrap();

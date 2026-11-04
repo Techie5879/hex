@@ -3,7 +3,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use color_eyre::eyre::{Result, eyre};
 #[cfg(target_os = "macos")]
@@ -15,17 +15,25 @@ use serde::{Deserialize, Serialize};
 use crate::dictation::vocabulary::{VocabularyEntry, serialize_saved};
 use crate::transcription::models::{TranscriptionModelId, TranscriptionSelection};
 
+#[cfg(hex_capture)]
+mod capture;
 mod dictation_processing;
 mod hotkeys;
 mod labs;
-pub use labs::{LabsSettings, UNLOAD_IDLE_MINUTES};
+mod meeting_folder;
+mod meetings;
 mod persistence;
 mod post_processing;
 pub use post_processing::DictationPostProcessing;
 mod shortcut_repair;
 
+#[cfg(hex_capture)]
+pub use capture::*;
 pub use dictation_processing::{DictationMode, DictationProcessingSettings};
 pub use hotkeys::*;
+pub use labs::*;
+pub use meeting_folder::default_meeting_output_folder;
+pub use meetings::*;
 
 static RECORDING_DUCK_VOLUME: AtomicU32 = AtomicU32::new(0.2_f32.to_bits());
 static RECORDING_AUDIO_BEHAVIOR: AtomicU8 = AtomicU8::new(0);
@@ -48,9 +56,7 @@ static CALENDAR_SETTINGS: OnceLock<RwLock<CalendarSettings>> = OnceLock::new();
 static MICROPHONE_POLICY: AtomicU8 = AtomicU8::new(0);
 static CUSTOM_TRANSFORMATIONS_ENABLED: AtomicBool = AtomicBool::new(false);
 static INDICATOR_POSITION: AtomicU8 = AtomicU8::new(0);
-static HOTKEYS: OnceLock<RwLock<RuntimeHotkeys>> = OnceLock::new();
-#[cfg(target_os = "macos")]
-static PASTE_KEY_CODE: OnceLock<u16> = OnceLock::new();
+static HOTKEYS: OnceLock<RwLock<AppliedHotkeys>> = OnceLock::new();
 static HOTKEY_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 /// Distinct names for the tests' settings folders.
@@ -77,256 +83,6 @@ struct RuntimeTranscriptionSelection {
 struct RuntimeMicrophoneSelection {
     revision: u64,
     device: Option<String>,
-}
-
-/// Screen corner where the floating meeting recording indicator snaps.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[repr(u8)]
-pub enum MeetingIndicatorCorner {
-    #[default]
-    TopRight = 0,
-    TopLeft = 1,
-    BottomRight = 2,
-    BottomLeft = 3,
-}
-
-impl MeetingIndicatorCorner {
-    pub const fn is_right(self) -> bool {
-        matches!(self, Self::TopRight | Self::BottomRight)
-    }
-
-    pub const fn is_top(self) -> bool {
-        matches!(self, Self::TopRight | Self::TopLeft)
-    }
-
-    const fn decode(value: u8) -> Self {
-        match value {
-            1 => Self::TopLeft,
-            2 => Self::BottomRight,
-            3 => Self::BottomLeft,
-            _ => Self::TopRight,
-        }
-    }
-}
-
-/// Opt-in meeting recording. Detection, the Meetings pane, and the meeting
-/// paste shortcut stay off in release builds until `enabled` is set.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct MeetingSettings {
-    pub enabled: bool,
-    /// Folder for finished Markdown transcripts; `None` uses the default.
-    pub output_folder: Option<PathBuf>,
-    /// Title meetings and write a two-sentence summary with Apple
-    /// Intelligence when it is available.
-    pub summarize_with_apple_intelligence: bool,
-    /// Title meetings and write a two-sentence summary with the OpenCode
-    /// model, which sends the transcript to it. On a Mac, only when Apple
-    /// Intelligence is unavailable or off.
-    pub summarize_with_opencode: bool,
-    /// Show the floating recording indicator while a meeting is recording.
-    pub show_recording_indicator: bool,
-    /// Screen corner the floating recording indicator snaps to after dragging.
-    pub recording_indicator_corner: MeetingIndicatorCorner,
-    /// What to do when a call from each website or app is detected. Older
-    /// files only had a `never_offer` list, whose entries carry no `policy`
-    /// and so read as Never offer.
-    #[serde(alias = "never_offer")]
-    pub providers: Vec<MeetingProviderChoice>,
-    /// Reminders before calendar meetings (macOS). Off until the user
-    /// connects a calendar.
-    pub calendar: CalendarSettings,
-    /// How long finished meetings are kept before they move to the Trash.
-    /// `None` until the user chooses: meetings recorded since the default
-    /// began are kept 24 hours, and older ones stay. Left out of the file
-    /// while unchosen: a build from before it can't read `null` (#744).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub retention: Option<MeetingRetention>,
-}
-
-/// How long a finished meeting is kept, counted from when it ended.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MeetingRetention {
-    Day,
-    Week,
-    Month,
-    Forever,
-}
-
-impl MeetingRetention {
-    pub const ALL: [Self; 4] = [Self::Day, Self::Week, Self::Month, Self::Forever];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Day => "24 hours",
-            Self::Week => "7 days",
-            Self::Month => "30 days",
-            Self::Forever => "Forever",
-        }
-    }
-
-    pub const fn max_age_ms(self) -> Option<u64> {
-        const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
-        match self {
-            Self::Day => Some(DAY_MS),
-            Self::Week => Some(7 * DAY_MS),
-            Self::Month => Some(30 * DAY_MS),
-            Self::Forever => None,
-        }
-    }
-
-    /// The default for meetings recorded since it began.
-    pub const DEFAULT: Self = Self::Day;
-
-    const fn encode(retention: Option<Self>) -> u8 {
-        match retention {
-            Some(Self::Day) => 0,
-            Some(Self::Week) => 1,
-            Some(Self::Month) => 2,
-            Some(Self::Forever) => 3,
-            None => 4,
-        }
-    }
-
-    const fn decode(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Self::Day),
-            1 => Some(Self::Week),
-            2 => Some(Self::Month),
-            3 => Some(Self::Forever),
-            _ => None,
-        }
-    }
-}
-
-/// The connected calendar and its meeting reminders.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct CalendarSettings {
-    /// Set once the user clicks Connect calendar and macOS grants access;
-    /// Hex never asks for calendar access before that.
-    pub connected: bool,
-    /// Calendars left out of reminders, by EventKit identifier. Every
-    /// calendar is included by default, so new ones are too.
-    pub excluded_calendars: Vec<String>,
-    /// Show a reminder capsule before each meeting.
-    pub remind: bool,
-    /// How many minutes before a meeting starts the reminder shows; zero
-    /// shows it at the start.
-    pub lead_minutes: u8,
-}
-
-/// The reminder lead times Settings offers, in minutes.
-pub const CALENDAR_LEAD_MINUTES: [u8; 4] = [0, 1, 2, 5];
-
-impl Default for CalendarSettings {
-    fn default() -> Self {
-        Self {
-            connected: false,
-            excluded_calendars: Vec::new(),
-            remind: true,
-            lead_minutes: 1,
-        }
-    }
-}
-
-impl CalendarSettings {
-    /// Whether reminders should run: connected, and wanted.
-    pub fn reminders_active(&self) -> bool {
-        self.connected && self.remind
-    }
-
-    /// The lead time, snapped to an offered choice.
-    pub fn lead(&self) -> std::time::Duration {
-        let minutes = if CALENDAR_LEAD_MINUTES.contains(&self.lead_minutes) {
-            self.lead_minutes
-        } else {
-            1
-        };
-        std::time::Duration::from_secs(u64::from(minutes) * 60)
-    }
-
-    pub fn includes(&self, calendar: &str) -> bool {
-        !self
-            .excluded_calendars
-            .iter()
-            .any(|excluded| excluded == calendar)
-    }
-}
-
-/// The call services Settings always lists, by provider key (the app's
-/// canonical bundle ID, or the website host for browser services) and
-/// English name.
-pub const KNOWN_MEETING_PROVIDERS: [(&str, &str); 7] = [
-    ("com.tinyspeck.slackmacgap", "Slack huddles"),
-    ("us.zoom.xos", "Zoom"),
-    ("meet.google.com", "Google Meet"),
-    ("com.microsoft.teams2", "Microsoft Teams"),
-    ("com.apple.FaceTime", "FaceTime"),
-    ("net.whatsapp.WhatsApp", "WhatsApp"),
-    ("com.gather.GatherV2", "Gather"),
-];
-
-/// What Hex does when it detects a call from a provider.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MeetingPolicy {
-    /// Offer to record.
-    #[default]
-    Ask,
-    /// Start recording without an offer.
-    AlwaysRecord,
-    /// Neither offer nor record.
-    NeverOffer,
-}
-
-/// A website host or an app's canonical bundle ID, the name shown in
-/// Settings, and the user's choice for its calls. Unlisted providers Ask.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MeetingProviderChoice {
-    pub key: String,
-    pub label: String,
-    /// Always written; missing only in a legacy `never_offer` entry.
-    #[serde(default = "legacy_never_offer")]
-    pub policy: MeetingPolicy,
-}
-
-fn legacy_never_offer() -> MeetingPolicy {
-    MeetingPolicy::NeverOffer
-}
-
-impl Default for MeetingSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            output_folder: None,
-            summarize_with_apple_intelligence: true,
-            summarize_with_opencode: false,
-            show_recording_indicator: true,
-            recording_indicator_corner: MeetingIndicatorCorner::TopRight,
-            providers: Vec::new(),
-            calendar: CalendarSettings::default(),
-            retention: None,
-        }
-    }
-}
-
-impl MeetingSettings {
-    /// Whether meetings may record and process: always in developer builds,
-    /// otherwise once turned on, and never under a managed lock.
-    pub fn available(&self) -> bool {
-        crate::labs::Feature::Meetings.managed().is_none()
-            && (crate::DEVELOPER_FEATURES_ENABLED || self.enabled)
-    }
-
-    pub fn resolved_output_folder(&self) -> PathBuf {
-        self.output_folder
-            .clone()
-            .filter(|folder| !folder.as_os_str().is_empty())
-            .unwrap_or_else(default_meeting_output_folder)
-    }
 }
 
 /// Experimental opt-in features hidden by default.
@@ -362,17 +118,6 @@ pub fn env_hex_experimental_mic() -> bool {
     std::env::var("HEX_EXPERIMENTAL_MIC")
         .ok()
         .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes"))
-}
-
-pub fn default_meeting_output_folder() -> PathBuf {
-    dirs::document_dir()
-        .or_else(|| dirs::home_dir().map(|home| home.join("Documents")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(if crate::app_paths::is_macos_test_build() {
-            "Hex Test Meetings"
-        } else {
-            "Hex Meetings"
-        })
 }
 
 /// Where Linux and Windows run the speech model (#856): Auto picks a GPU
@@ -441,162 +186,6 @@ pub enum RecordingAudioBehavior {
     PauseMedia,
     #[default]
     DoNothing,
-}
-
-/// Annotate: Scrawl's captures inside Hex, on macOS, Linux, and Windows
-/// (`capture_host`). On by default; off means no capture work at all.
-#[cfg(hex_capture)]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(default)]
-pub struct CaptureSettings {
-    pub enabled: bool,
-    /// Annotate's one key: tap to start and stop, hold while recording to
-    /// draw.
-    pub hotkey: HotkeyBinding,
-    pub transcriber: CaptureTranscriber,
-    /// Where new captures go; `None` is Scrawl's own captures folder.
-    pub folder: Option<PathBuf>,
-    /// Days a capture keeps its video, audio, and full-size frames; `None`
-    /// keeps them.
-    pub media_days: Option<u32>,
-    /// Days a capture is kept at all; `None` keeps it.
-    pub bundle_days: Option<u32>,
-    /// Where a written capture is sent among OpenCode sessions: Scrawl's
-    /// router settings, imported once from Scrawl.
-    pub routing: CaptureRouting,
-    /// Lets screen recordings, Hex's own captures included, show Hex's
-    /// overlays: the capture capsule, picker, and ink, the dictation HUD,
-    /// and the meeting capsules. Off keeps them out (`capture_host`).
-    pub show_overlays_in_recordings: bool,
-    /// How the capsule offers where to send a finished capture, while Kit
-    /// compares the directions.
-    pub capsule_flow: CapsuleFlow,
-}
-
-/// The capsule's flow after a capture stops, one of five prototypes.
-#[cfg(hex_capture)]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CapsuleFlow {
-    /// (a) "Copied", and the suggestions in a list under the capsule.
-    #[default]
-    List,
-    /// (b) One quiet line, "Send to SEER ⏎"; ⇥ moves to the next guess.
-    Toast,
-    /// (c) A short hint of the guesses in the capsule, which then folds
-    /// into Hex's menu-bar item.
-    MenuBar,
-    /// (d) The guesses in a small card at the pointer.
-    Cursor,
-    /// (e) A pill hanging from the top edge that grows down into the
-    /// guesses.
-    Notch,
-}
-
-#[cfg(hex_capture)]
-impl CapsuleFlow {
-    pub const ALL: [Self; 5] = [
-        Self::List,
-        Self::Toast,
-        Self::MenuBar,
-        Self::Cursor,
-        Self::Notch,
-    ];
-}
-
-#[cfg(hex_capture)]
-impl Default for CaptureSettings {
-    fn default() -> Self {
-        let week = scrawl_capture::retention::Preset::Week.policy();
-        Self {
-            enabled: true,
-            hotkey: HotkeyBinding::capture_default(),
-            transcriber: CaptureTranscriber::default(),
-            folder: None,
-            media_days: week.media_days,
-            bundle_days: week.bundle_days,
-            routing: CaptureRouting::default(),
-            show_overlays_in_recordings: false,
-            capsule_flow: CapsuleFlow::default(),
-        }
-    }
-}
-
-/// Scrawl's router settings (`scrawl_capture::RouterConfig`, its
-/// camelCase JSON). Never holds a Jev key: Jev is called with
-/// `$OPENCODE_API_KEY` or OpenCode's own credential, so `hex settings`
-/// never shows one.
-#[cfg(hex_capture)]
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(
-    from = "scrawl_capture::RouterConfig",
-    into = "scrawl_capture::RouterConfig"
-)]
-pub struct CaptureRouting(scrawl_capture::RouterConfig);
-
-// The config's only non-`Eq` field is a JSON value, which compares totally.
-#[cfg(hex_capture)]
-impl Eq for CaptureRouting {}
-
-#[cfg(hex_capture)]
-impl From<scrawl_capture::RouterConfig> for CaptureRouting {
-    fn from(mut config: scrawl_capture::RouterConfig) -> Self {
-        config.jev_api_key = None;
-        Self(config)
-    }
-}
-
-#[cfg(hex_capture)]
-impl From<CaptureRouting> for scrawl_capture::RouterConfig {
-    fn from(routing: CaptureRouting) -> Self {
-        routing.0
-    }
-}
-
-#[cfg(hex_capture)]
-impl CaptureRouting {
-    pub fn config(&self) -> &scrawl_capture::RouterConfig {
-        &self.0
-    }
-}
-
-#[cfg(hex_capture)]
-impl CaptureSettings {
-    /// The folder new captures go to.
-    pub fn captures_dir(&self) -> PathBuf {
-        self.folder
-            .clone()
-            .unwrap_or_else(scrawl_capture::handoff::builtin_captures_dir)
-    }
-
-    pub fn retention(&self) -> scrawl_capture::retention::Policy {
-        scrawl_capture::retention::Policy {
-            media_days: self.media_days,
-            bundle_days: self.bundle_days,
-        }
-    }
-
-    pub fn set_retention(&mut self, policy: scrawl_capture::retention::Policy) {
-        self.media_days = policy.media_days;
-        self.bundle_days = policy.bundle_days;
-    }
-}
-
-/// What turns a capture's narration into words.
-#[cfg(hex_capture)]
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CaptureTranscriber {
-    /// The dictation model Hex already has loaded, with word times.
-    #[default]
-    Parakeet,
-    /// Apple's speech recognizer, as Scrawl uses by default.
-    Apple,
-}
-
-#[cfg(hex_capture)]
-impl CaptureTranscriber {
-    pub const ALL: [Self; 2] = [Self::Parakeet, Self::Apple];
 }
 
 pub use crate::dictation::text_replacements::TextReplacement;
@@ -970,7 +559,7 @@ impl AppSettings {
             if !settings.has_migration(SCRAWL_IMPORT_MIGRATION) {
                 settings.import_scrawl_settings(
                     engine.as_deref(),
-                    dirs::data_dir()
+                    crate::app_paths::data_dir()
                         .and_then(|data| read(data.join("scrawl/config.json")))
                         .as_deref(),
                 );
@@ -1014,7 +603,7 @@ impl AppSettings {
             {
                 self.capture.transcriber = CaptureTranscriber::Apple;
             }
-            let home = dirs::home_dir();
+            let home = crate::app_paths::home_dir();
             if let Some(folder) = config
                 .get("capturesDir")
                 .or_else(|| config.get("captures_dir"))
@@ -1186,6 +775,7 @@ impl AppSettings {
             Ordering::Release,
         );
         MEETING_NOTES_OPENCODE.store(self.meetings.summarize_with_opencode, Ordering::Release);
+        crate::meeting::generator::set_summary_model(self.meetings.opencode_model.as_deref());
         MEETING_INDICATOR_ENABLED.store(self.meetings.show_recording_indicator, Ordering::Release);
         MEETING_INDICATOR_CORNER.store(
             self.meetings.recording_indicator_corner as u8,
@@ -1211,7 +801,10 @@ impl AppSettings {
         *HOTKEYS
             .get_or_init(Default::default)
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = self.runtime_hotkeys();
+            .unwrap_or_else(|error| error.into_inner()) = AppliedHotkeys {
+            runtime: self.runtime_hotkeys(),
+            settings: Some(Arc::new(self.clone())),
+        };
         // An import that can't run stays saved; the listener runs the
         // default model until it is fixed.
         set_transcription_selection(&crate::transcription::custom_models::runnable(
@@ -1615,20 +1208,6 @@ pub fn shortcut_toggle() -> bool {
     SHORTCUT_TOGGLE.load(Ordering::Relaxed)
 }
 
-/// Whether meeting detection and recording may run: always in developer
-/// builds, otherwise only after the user opts in.
-pub fn meetings_enabled() -> bool {
-    MEETINGS_ENABLED.load(Ordering::Acquire)
-}
-
-/// Why meetings can't record now.
-pub fn meetings_off_reason() -> &'static str {
-    match crate::labs::Feature::Meetings.managed() {
-        Some(lock) => lock.refusal(),
-        None => "Meetings are off; turn them on with `hex settings set meetings.enabled on`",
-    }
-}
-
 /// [`voice_filter_enabled`] for the running listener.
 pub fn hex_microphone_enabled() -> bool {
     crate::labs::Feature::VoiceFilter.shipped()
@@ -1639,132 +1218,59 @@ pub fn hex_microphone_enabled() -> bool {
         )
 }
 
-/// Apple Intelligence may write meeting notes (macOS).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn meeting_notes_enabled() -> bool {
-    MEETING_NOTES_ENABLED.load(Ordering::Acquire)
+/// The shortcuts the input layers match, and the settings they came from,
+/// so a keyboard layout change can resolve their letter keys again.
+#[derive(Default)]
+struct AppliedHotkeys {
+    runtime: RuntimeHotkeys,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    settings: Option<Arc<AppSettings>>,
 }
 
-/// The OpenCode model may write meeting notes.
-pub fn meeting_notes_with_opencode() -> bool {
-    MEETING_NOTES_OPENCODE.load(Ordering::Acquire)
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn meeting_indicator_enabled() -> bool {
-    MEETING_INDICATOR_ENABLED.load(Ordering::Acquire)
-}
-
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn meeting_indicator_corner() -> MeetingIndicatorCorner {
-    MeetingIndicatorCorner::decode(MEETING_INDICATOR_CORNER.load(Ordering::Acquire))
-}
-
-/// The user's choices for detected calls, by website or app.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn meeting_provider_choices() -> Vec<MeetingProviderChoice> {
-    MEETING_PROVIDERS
-        .get_or_init(Default::default)
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
-}
-
-/// The connected calendar's reminder settings, as last applied.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-/// [`MeetingSettings::retention`] for the running meeting controller.
-/// The retention the user chose, `None` until they choose. A process that
-/// never loaded settings (`hex mcp`, `hex meetings`) reads it from
-/// `settings.json` without migrating or writing anything.
-pub fn meeting_retention() -> Option<MeetingRetention> {
-    match MEETING_RETENTION.load(Ordering::Acquire) {
-        RETENTION_UNSET if cfg!(test) => None,
-        RETENTION_UNSET => stored_meeting_retention(),
-        value => MeetingRetention::decode(value),
-    }
-}
-
-fn stored_meeting_retention() -> Option<MeetingRetention> {
-    let data = fs::read(path().ok()?).ok()?;
-    let settings: serde_json::Value = serde_json::from_slice(&data).ok()?;
-    serde_json::from_value(settings.get("meetings")?.get("retention")?.clone()).ok()
-}
-
-pub fn calendar_settings() -> CalendarSettings {
-    CALENDAR_SETTINGS
-        .get_or_init(Default::default)
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
-}
-
-/// Sets one provider's policy; returns whether the settings changed.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn set_meeting_provider(meetings: &mut MeetingSettings, choice: MeetingProviderChoice) -> bool {
-    match meetings
-        .providers
-        .iter_mut()
-        .find(|known| known.key == choice.key)
-    {
-        Some(known) if known.policy == choice.policy => false,
-        Some(known) => {
-            known.policy = choice.policy;
-            true
-        }
-        None => {
-            meetings.providers.push(choice);
-            true
+impl AppliedHotkeys {
+    /// Resolves the shortcuts again from the settings they came from, on the
+    /// layout published now, unless newer settings were applied meanwhile.
+    #[cfg(target_os = "macos")]
+    fn resolve_again(
+        applied: &RwLock<Self>,
+        resolve: impl FnOnce(Option<&AppSettings>) -> RuntimeHotkeys,
+    ) {
+        let settings = applied
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .settings
+            .clone();
+        let runtime = resolve(settings.as_deref());
+        let mut applied = applied.write().unwrap_or_else(|error| error.into_inner());
+        // Settings applied while this resolved carry the new layout already.
+        let same = match (&applied.settings, &settings) {
+            (Some(current), Some(resolved)) => Arc::ptr_eq(current, resolved),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            applied.runtime = runtime;
         }
     }
 }
 
-/// Saves a choice made from a meeting capsule while the Settings window is
-/// closed.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn save_meeting_provider(choice: MeetingProviderChoice) {
-    match AppSettings::load() {
-        Ok(mut settings) => {
-            if set_meeting_provider(&mut settings.meetings, choice)
-                && let Err(error) = settings.save()
-            {
-                tracing::warn!(%error, "could not save a meeting provider choice");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "could not load settings to save a meeting choice"),
-    }
-}
-
-/// Saves the corner the recording capsule was dragged to.
-pub fn save_meeting_indicator_corner(corner: MeetingIndicatorCorner) {
-    match AppSettings::load() {
-        Ok(mut settings) => {
-            if settings.meetings.recording_indicator_corner == corner {
-                return;
-            }
-            settings.meetings.recording_indicator_corner = corner;
-            if let Err(error) = settings.save() {
-                tracing::warn!(%error, "could not save the recording capsule's corner");
-            }
-        }
-        Err(error) => tracing::warn!(%error, "could not load settings to save the capsule corner"),
-    }
-}
-
-pub fn meeting_output_folder() -> PathBuf {
-    MEETING_OUTPUT_FOLDER
-        .get_or_init(Default::default)
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
-        .unwrap_or_else(default_meeting_output_folder)
+/// Resolves the shortcuts' letter keys again after the main thread published
+/// a new keyboard layout, from the settings last applied, as a settings
+/// reload does. The listener rebinds each shortcut once it is idle.
+#[cfg(target_os = "macos")]
+pub fn refresh_layout_hotkeys() {
+    AppliedHotkeys::resolve_again(HOTKEYS.get_or_init(Default::default), |settings| {
+        settings.map_or_else(RuntimeHotkeys::default, AppSettings::runtime_hotkeys)
+    });
 }
 
 pub fn runtime_hotkeys() -> RuntimeHotkeys {
     #[cfg_attr(not(hex_capture), allow(unused_mut))]
-    let mut hotkeys = *HOTKEYS
+    let mut hotkeys = HOTKEYS
         .get_or_init(Default::default)
         .read()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(|error| error.into_inner())
+        .runtime;
     #[cfg(hex_capture)]
     if scrawl_app_running() {
         hotkeys.capture = None;
@@ -1774,55 +1280,6 @@ pub fn runtime_hotkeys() -> RuntimeHotkeys {
 
 pub fn dictation_hotkey() -> RuntimeHotkey {
     runtime_hotkeys().dictation
-}
-
-/// The saved capture settings (`cfg(hex_capture)` builds).
-#[cfg(hex_capture)]
-pub fn capture_settings() -> CaptureSettings {
-    CAPTURE_SETTINGS
-        .get_or_init(Default::default)
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
-}
-
-/// The capture shortcut's keycaps (`capture.hotkey`), without cloning the
-/// capture settings.
-#[cfg(hex_capture)]
-pub fn capture_hotkey_keycaps() -> Vec<String> {
-    CAPTURE_SETTINGS
-        .get_or_init(Default::default)
-        .read()
-        .unwrap_or_else(|error| error.into_inner())
-        .hotkey
-        .keycaps()
-}
-
-/// The saved [`CapsuleFlow`], without cloning the capture settings.
-#[cfg(hex_capture)]
-pub fn capsule_flow() -> CapsuleFlow {
-    CapsuleFlow::ALL
-        .get(usize::from(CAPSULE_FLOW.load(Ordering::Acquire)))
-        .copied()
-        .unwrap_or_default()
-}
-
-/// Annotate is on (`capture.enabled`).
-#[cfg(hex_capture)]
-pub fn capture_on() -> bool {
-    CAPTURE_ON.load(Ordering::Acquire)
-}
-
-/// Scrawl's own app is running, so it owns the capture shortcut and Hex
-/// doesn't match it.
-#[cfg(hex_capture)]
-pub fn scrawl_app_running() -> bool {
-    SCRAWL_APP_RUNNING.load(Ordering::Acquire)
-}
-
-#[cfg(hex_capture)]
-pub fn set_scrawl_app_running(running: bool) {
-    SCRAWL_APP_RUNNING.store(running, Ordering::Release);
 }
 
 pub fn hotkey_capture_active() -> bool {
@@ -3132,6 +2589,68 @@ mod tests {
             opted_in.runtime_hotkeys().paste_meeting,
             Some(HotkeyBinding::paste_meeting_default().runtime())
         );
+    }
+
+    /// Launched on Dvorak, then switched to U.S. (t1304): letter shortcuts,
+    /// saved or default, follow the layout the main thread published; other
+    /// keys keep their recorded code.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn letter_shortcuts_resolve_again_on_a_new_layout() {
+        use super::hotkeys::test_layout;
+        let resolve = |settings: Option<&AppSettings>| {
+            settings.map_or_else(RuntimeHotkeys::default, AppSettings::runtime_hotkeys)
+        };
+        test_layout::set([('v', 47)]);
+        let mut settings = AppSettings::default();
+        settings.meetings.enabled = true;
+        settings.raw_dictation_hotkey = Some(HotkeyBinding {
+            modifiers: HotkeyModifiers::option(),
+            key: Some(HotkeyKey {
+                code: 96,
+                label: "F5".into(),
+            }),
+        });
+        let saved_on_dvorak = settings.paste_last_hotkey.clone().unwrap();
+        assert_eq!(saved_on_dvorak.key.as_ref().unwrap().code, 47);
+        let applied = RwLock::new(AppliedHotkeys {
+            runtime: settings.runtime_hotkeys(),
+            settings: Some(Arc::new(settings)),
+        });
+        let key = |applied: &RwLock<AppliedHotkeys>| {
+            let runtime = applied.read().unwrap().runtime;
+            [
+                runtime.paste_last,
+                runtime.paste_meeting,
+                runtime.raw_dictation,
+            ]
+            .map(|hotkey| hotkey.and_then(|hotkey| hotkey.key_code))
+        };
+        assert_eq!(key(&applied), [Some(47), Some(47), Some(96)]);
+
+        test_layout::set([('v', 9)]);
+        AppliedHotkeys::resolve_again(&applied, resolve);
+        assert_eq!(key(&applied), [Some(9), Some(9), Some(96)]);
+
+        // A layout without the letter keeps the recorded key.
+        test_layout::set([('x', 7)]);
+        assert_eq!(saved_on_dvorak.runtime().key_code, Some(47));
+
+        // Settings applied while it resolved win: they saw the new layout.
+        test_layout::set([('v', 47)]);
+        let newer = AppSettings {
+            paste_last_hotkey: None,
+            ..AppSettings::default()
+        };
+        AppliedHotkeys::resolve_again(&applied, |settings| {
+            let resolved = resolve(settings);
+            *applied.write().unwrap() = AppliedHotkeys {
+                runtime: newer.runtime_hotkeys(),
+                settings: Some(Arc::new(newer.clone())),
+            };
+            resolved
+        });
+        assert_eq!(key(&applied)[0], None);
     }
 
     #[test]

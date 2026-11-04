@@ -11,10 +11,8 @@ impl Pump {
                 && host::directory()
                     .and_then(|p| host::devices(&p))
                     .is_ok_and(|d| !d.is_empty());
-            if !wanted {
-                if let Some(listener) = self.profile_listener.as_ref() {
-                    listener.stop();
-                }
+            if !wanted && let Some(listener) = self.profile_listener.as_ref() {
+                listener.stop();
             }
             if self
                 .profile_listener

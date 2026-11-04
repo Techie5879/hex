@@ -7,7 +7,7 @@
 //! model switching, mouse shortcuts, pausing the browser, restoring Paste
 //! last dictation's default shortcut, keeping the dictation on the
 //! clipboard or only copying it (macOS), a second dictation shortcut
-//! (macOS), Toggle's tap or hold (macOS), stopping an automatic meeting
+//! (macOS), Toggle's tap or hold (macOS, Linux), stopping an automatic meeting
 //! recording when its call ends (macOS), and Terminal paste
 //! and shortcut sharing on Windows) is just its toggle.
 //!
@@ -99,10 +99,20 @@ pub enum Feature {
     ModelInPlace,
     PickerDownloaded,
     SectionKeyAlone,
+    KeepRecordings,
+    HideMenuBarIcon,
+    MovableMeetingCapsules,
+    MeetingSummaryModel,
+    GnomeClipboardRestore,
+    MeetingNotesVocabulary,
+    NotchIndicator,
+    MeetingFinishedEvent,
+    GnomeMeetingCapsules,
+    MeetingPlatformIcons,
 }
 
 impl Feature {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 50] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -143,6 +153,16 @@ impl Feature {
         Self::ModelInPlace,
         Self::PickerDownloaded,
         Self::SectionKeyAlone,
+        Self::KeepRecordings,
+        Self::HideMenuBarIcon,
+        Self::MovableMeetingCapsules,
+        Self::MeetingSummaryModel,
+        Self::GnomeClipboardRestore,
+        Self::MeetingNotesVocabulary,
+        Self::NotchIndicator,
+        Self::MeetingFinishedEvent,
+        Self::GnomeMeetingCapsules,
+        Self::MeetingPlatformIcons,
     ];
 
     /// The features this OS and build have.
@@ -205,12 +225,20 @@ impl Feature {
             | Self::PickerActiveFirst
             | Self::ModelInPlace
             | Self::PickerDownloaded
-            | Self::SectionKeyAlone => Audience::Everyone,
+            | Self::SectionKeyAlone
+            | Self::KeepRecordings
+            | Self::HideMenuBarIcon
+            | Self::MovableMeetingCapsules
+            | Self::MeetingSummaryModel
+            | Self::GnomeClipboardRestore
+            | Self::MeetingNotesVocabulary
+            | Self::MeetingFinishedEvent
+            | Self::GnomeMeetingCapsules
+            | Self::MeetingPlatformIcons
+            | Self::NotchIndicator => Audience::Everyone,
         }
     }
 
-    /// Why turning this feature off is refused now: Parakeet Ultra stays on
-    /// while it is the dictation model, until a switch to another succeeds.
     pub fn off_refusal(self, settings: &AppSettings) -> Option<&'static str> {
         (self == Self::ParakeetUltra
             && settings.transcription.model
@@ -231,17 +259,22 @@ impl Feature {
             .find(|feature| feature.settings_key() == key)
     }
 
-    fn on_this_os(self) -> bool {
+    /// Whether this OS has the feature at all, in any build.
+    pub fn on_this_os(self) -> bool {
         match self {
-            Self::Meetings | Self::LiveChapters | Self::SubtitleExport | Self::StopWhenCallEnds => {
-                cfg!(target_os = "macos")
-            }
+            Self::Meetings
+            | Self::LiveChapters
+            | Self::SubtitleExport
+            | Self::StopWhenCallEnds
+            | Self::MovableMeetingCapsules => cfg!(target_os = "macos"),
             Self::VoiceFilter => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::TerminalPaste | Self::ShareShortcut => cfg!(target_os = "windows"),
             Self::LocalPolish | Self::SaveDictationAudio | Self::ProfileSync => {
                 cfg!(target_os = "macos")
             }
-            Self::SectionKeyAlone => cfg!(target_os = "linux"),
+            Self::SectionKeyAlone | Self::GnomeClipboardRestore | Self::GnomeMeetingCapsules => {
+                cfg!(target_os = "linux")
+            }
             Self::StandaloneSpecialKeys | Self::SkipPauses => {
                 cfg!(any(target_os = "linux", target_os = "windows"))
             }
@@ -252,8 +285,10 @@ impl Feature {
             | Self::SecondDictationShortcut
             | Self::SmartSpacing
             | Self::SidedChords
-            | Self::TapOrHold
-            | Self::RecentDictations => cfg!(target_os = "macos"),
+            | Self::RecentDictations
+            | Self::HideMenuBarIcon
+            | Self::NotchIndicator => cfg!(target_os = "macos"),
+            Self::TapOrHold => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::KeyboardModelSwitching => crate::keyboard_input_sources::available(),
             Self::Playground
             | Self::LiveText
@@ -271,6 +306,11 @@ impl Feature {
             | Self::PickerActiveFirst
             | Self::ModelInPlace
             | Self::PickerDownloaded
+            | Self::KeepRecordings
+            | Self::MeetingSummaryModel
+            | Self::MeetingNotesVocabulary
+            | Self::MeetingFinishedEvent
+            | Self::MeetingPlatformIcons
             | Self::FillerWords => true,
         }
     }
@@ -318,6 +358,16 @@ impl Feature {
             Self::ModelInPlace => "model-in-place",
             Self::PickerDownloaded => "picker-downloaded",
             Self::SectionKeyAlone => "section-key",
+            Self::KeepRecordings => "keep-recordings",
+            Self::HideMenuBarIcon => "hide-menu-bar-icon",
+            Self::MovableMeetingCapsules => "movable-meeting-capsules",
+            Self::MeetingSummaryModel => "meeting-summary-model",
+            Self::GnomeClipboardRestore => "gnome-clipboard-restore",
+            Self::MeetingNotesVocabulary => "meeting-notes-vocabulary",
+            Self::NotchIndicator => "notch-indicator",
+            Self::MeetingFinishedEvent => "meeting-finished-event",
+            Self::GnomeMeetingCapsules => "gnome-meeting-capsules",
+            Self::MeetingPlatformIcons => "meeting-platform-icons",
         }
     }
 
@@ -364,6 +414,16 @@ impl Feature {
             Self::ModelInPlace => "labs.model_in_place",
             Self::PickerDownloaded => "labs.picker_downloaded",
             Self::SectionKeyAlone => "labs.section_key_alone",
+            Self::KeepRecordings => "labs.keep_recordings",
+            Self::HideMenuBarIcon => "labs.hide_menu_bar_icon",
+            Self::MovableMeetingCapsules => "labs.movable_meeting_capsules",
+            Self::MeetingSummaryModel => "labs.meeting_summary_model",
+            Self::GnomeClipboardRestore => "labs.gnome_clipboard_restore",
+            Self::MeetingNotesVocabulary => "labs.meeting_notes_vocabulary",
+            Self::NotchIndicator => "labs.notch_indicator",
+            Self::MeetingFinishedEvent => "labs.meeting_finished_event",
+            Self::GnomeMeetingCapsules => "labs.gnome_meeting_capsules",
+            Self::MeetingPlatformIcons => "labs.meeting_platform_icons",
         }
     }
 
@@ -472,6 +532,36 @@ impl Feature {
             Self::SectionKeyAlone => {
                 "Use the § key, left of 1 on ISO keyboards, alone as a shortcut; Hex takes § from every app while it's bound"
             }
+            Self::KeepRecordings => {
+                "Keep the audio of dictations saved to History, so you can transcribe them again with another model"
+            }
+            Self::HideMenuBarIcon => {
+                "Hide Hex's menu bar icon; shortcuts keep working, and opening Hex again shows Settings"
+            }
+            Self::MovableMeetingCapsules => {
+                "Drag meeting capsules such as Meeting transcript ready out of the way; they come back in the corner you left them"
+            }
+            Self::MeetingSummaryModel => {
+                "Choose the OpenCode provider and model that write meeting notes (meetings.opencode_model, provider/model)"
+            }
+            Self::GnomeClipboardRestore => {
+                "Put the previous clipboard back after a paste on GNOME Wayland, through the XWayland clipboard while XWayland is running"
+            }
+            Self::MeetingNotesVocabulary => {
+                "Meeting titles and summaries read your vocabulary, so names are spelled the way you wrote them"
+            }
+            Self::NotchIndicator => {
+                "On a screen with a notch, the recording indicator grows out of the notch instead of sitting below the menu bar"
+            }
+            Self::MeetingFinishedEvent => {
+                "Tell apps on this computer when a meeting's transcript is ready, through the local API's GET /meetings/events (the meeting's id only)"
+            }
+            Self::GnomeMeetingCapsules => {
+                "Show the meeting capsules (recording offer, recording indicator) floating over your call on GNOME Wayland, through XWayland while XWayland is running"
+            }
+            Self::MeetingPlatformIcons => {
+                "Show a small icon for the app or website each meeting was recorded from, beside its name in Meetings"
+            }
         }
     }
 
@@ -522,6 +612,16 @@ impl Feature {
             Self::ModelInPlace => settings.labs.model_in_place,
             Self::PickerDownloaded => settings.labs.picker_downloaded,
             Self::SectionKeyAlone => settings.labs.section_key_alone,
+            Self::KeepRecordings => settings.labs.keep_recordings,
+            Self::HideMenuBarIcon => settings.labs.hide_menu_bar_icon,
+            Self::MovableMeetingCapsules => settings.labs.movable_meeting_capsules,
+            Self::MeetingSummaryModel => settings.labs.meeting_summary_model,
+            Self::GnomeClipboardRestore => settings.labs.gnome_clipboard_restore,
+            Self::MeetingNotesVocabulary => settings.labs.meeting_notes_vocabulary,
+            Self::NotchIndicator => settings.labs.notch_indicator,
+            Self::MeetingFinishedEvent => settings.labs.meeting_finished_event,
+            Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules,
+            Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons,
         }
     }
 
@@ -570,6 +670,16 @@ impl Feature {
             &mut labs.model_in_place,
             &mut labs.picker_downloaded,
             &mut labs.section_key_alone,
+            &mut labs.keep_recordings,
+            &mut labs.hide_menu_bar_icon,
+            &mut labs.movable_meeting_capsules,
+            &mut labs.meeting_summary_model,
+            &mut labs.gnome_clipboard_restore,
+            &mut labs.meeting_notes_vocabulary,
+            &mut labs.notch_indicator,
+            &mut labs.meeting_finished_event,
+            &mut labs.gnome_meeting_capsules,
+            &mut labs.meeting_platform_icons,
         ]
     }
 
@@ -618,6 +728,16 @@ impl Feature {
             Self::PickerActiveFirst => settings.labs.picker_active_first = on,
             Self::ModelInPlace => settings.labs.model_in_place = on,
             Self::PickerDownloaded => settings.labs.picker_downloaded = on,
+            Self::KeepRecordings => settings.labs.keep_recordings = on,
+            Self::HideMenuBarIcon => settings.labs.hide_menu_bar_icon = on,
+            Self::MovableMeetingCapsules => settings.labs.movable_meeting_capsules = on,
+            Self::MeetingSummaryModel => settings.labs.meeting_summary_model = on,
+            Self::GnomeClipboardRestore => settings.labs.gnome_clipboard_restore = on,
+            Self::MeetingNotesVocabulary => settings.labs.meeting_notes_vocabulary = on,
+            Self::NotchIndicator => settings.labs.notch_indicator = on,
+            Self::MeetingFinishedEvent => settings.labs.meeting_finished_event = on,
+            Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules = on,
+            Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons = on,
             // Off, no shortcut keeps a key only the feature allows.
             Self::StandaloneSpecialKeys => {
                 settings.labs.standalone_special_keys = on;
@@ -648,17 +768,26 @@ const SMART_SPACING: u64 = 1 << 12;
 const SPOKEN_SYMBOLS: u64 = 1 << 13;
 const SIDED_CHORDS: u64 = 1 << 14;
 const TAP_OR_HOLD: u64 = 1 << 15;
+const SKIP_PAUSES: u64 = 1 << 16;
 const PARAKEET_ULTRA: u64 = 1 << 17;
 const HISTORY_STATS: u64 = 1 << 18;
 const RECENT_DICTATIONS: u64 = 1 << 19;
+const STOP_WHEN_CALL_ENDS: u64 = 1 << 20;
+const KEEP_RECORDINGS: u64 = 1 << 21;
+const HIDE_MENU_BAR_ICON: u64 = 1 << 22;
+const MOVABLE_MEETING_CAPSULES: u64 = 1 << 23;
+const MEETING_SUMMARY_MODEL: u64 = 1 << 24;
+const GNOME_CLIPBOARD_RESTORE: u64 = 1 << 25;
+const MEETING_NOTES_VOCABULARY: u64 = 1 << 26;
+const NOTCH_INDICATOR: u64 = 1 << 27;
+const MEETING_FINISHED_EVENT: u64 = 1 << 28;
+const GNOME_MEETING_CAPSULES: u64 = 1 << 29;
 /// Unload-idle minutes (at most 1,440, 11 bits) sit above the switches.
-const MINUTES_SHIFT: u32 = 20;
+const MINUTES_SHIFT: u64 = 40;
 const MINUTES_MASK: u64 = (1 << 11) - 1;
-const LOCAL_POLISH: u64 = 1 << 31;
-const PROVIDER_FALLBACK: u64 = 1 << 32;
-const SAVE_DICTATION_AUDIO: u64 = 1 << 33;
-const SKIP_PAUSES: u64 = 1 << 16;
-const STOP_WHEN_CALL_ENDS: u64 = 1 << 34;
+const LOCAL_POLISH: u64 = 1 << 30;
+const PROVIDER_FALLBACK: u64 = 1 << 31;
+const SAVE_DICTATION_AUDIO: u64 = 1 << 32;
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 /// Whether profile sync is enabled for the desktop app and its client commands.
@@ -680,7 +809,8 @@ pub(crate) fn local_polish() -> bool {
     cfg!(target_os = "macos") && on(LOCAL_POLISH)
 }
 
-/// This process's switches, initialized when settings are first read.
+/// This process's `labs` switches: unknown until settings load or one is
+/// first read.
 static STATE: AtomicU64 = AtomicU64::new(0);
 
 fn on(bit: u64) -> bool {
@@ -781,7 +911,8 @@ pub fn sided_modifier_chords() -> bool {
 }
 
 /// In Toggle mode, a press held past the hold threshold finishes its capture
-/// when it lifts instead of locking it (macOS; read at each release).
+/// when it lifts instead of locking it (macOS reads it at each release;
+/// Linux's listener reads the saved switch with its shortcut options).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn tap_or_hold() -> bool {
     on(TAP_OR_HOLD)
@@ -819,6 +950,70 @@ pub fn skip_pauses() -> bool {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn stop_when_call_ends() -> bool {
     on(STOP_WHEN_CALL_ENDS) && Feature::StopWhenCallEnds.on_this_os()
+}
+
+/// A dictation saved to History keeps its 16 kHz audio, and History offers
+/// Transcribe again for it (read as each capture is handed to the engine;
+/// the History pane reads the saved setting).
+pub fn keep_recordings() -> bool {
+    on(KEEP_RECORDINGS)
+}
+
+/// The menu-bar icon is hidden while nothing records (macOS; read each
+/// time the status item refreshes, about twice a second).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn hide_menu_bar_icon() -> bool {
+    on(HIDE_MENU_BAR_ICON) && Feature::HideMenuBarIcon.on_this_os()
+}
+
+/// The meeting panel capsules (Meeting transcript ready, Recording
+/// automatically, offers, reminders) show in the saved capsule corner and
+/// can be dragged to another (macOS; read each time one shows).
+pub fn movable_meeting_capsules() -> bool {
+    on(MOVABLE_MEETING_CAPSULES) && Feature::MovableMeetingCapsules.on_this_os()
+}
+
+/// Meeting notes written with OpenCode use the saved
+/// `meetings.opencode_model`, with no fallback to another model (every OS
+/// with meetings; read at each generation).
+pub fn meeting_summary_model() -> bool {
+    on(MEETING_SUMMARY_MODEL) && Feature::MeetingSummaryModel.on_this_os()
+}
+
+/// Final meeting notes (title and summary) put the vocabulary ahead of the
+/// transcript (every OS with meetings; read at each generation, so
+/// Regenerate summary uses the current list).
+pub fn meeting_notes_vocabulary() -> bool {
+    on(MEETING_NOTES_VOCABULARY) && Feature::MeetingNotesVocabulary.on_this_os()
+}
+
+/// With the indicator at the top, the HUD grows out of the notch on a
+/// screen that has one (macOS; read each time the HUD is placed).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn notch_indicator() -> bool {
+    on(NOTCH_INDICATOR) && Feature::NotchIndicator.on_this_os()
+}
+
+/// A paste on a Wayland desktop without data-control (GNOME) snapshots and
+/// restores the clipboard through an already running XWayland (Linux; read
+/// as each paste starts).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn gnome_clipboard_restore() -> bool {
+    on(GNOME_CLIPBOARD_RESTORE) && Feature::GnomeClipboardRestore.on_this_os()
+}
+
+/// On a Wayland desktop without layer-shell (GNOME), the meeting capsules
+/// float on an already running XWayland (Linux; read as each capsule shows).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn gnome_meeting_capsules() -> bool {
+    on(GNOME_MEETING_CAPSULES) && Feature::GnomeMeetingCapsules.on_this_os()
+}
+
+/// The local API's `GET /meetings/events` serves, and a meeting's final
+/// publication sends, its id (every OS with meetings; read where the route
+/// starts, on each pass of its stream, and at each publication).
+pub fn meeting_finished_event() -> bool {
+    on(MEETING_FINISHED_EVENT) && Feature::MeetingFinishedEvent.on_this_os()
 }
 
 /// How long the speech model may sit unused before the engine unloads it,
@@ -919,6 +1114,51 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             Feature::StopWhenCallEnds,
             settings.stop_when_call_ends,
             STOP_WHEN_CALL_ENDS,
+        ),
+        (
+            Feature::KeepRecordings,
+            settings.keep_recordings,
+            KEEP_RECORDINGS,
+        ),
+        (
+            Feature::HideMenuBarIcon,
+            settings.hide_menu_bar_icon,
+            HIDE_MENU_BAR_ICON,
+        ),
+        (
+            Feature::MovableMeetingCapsules,
+            settings.movable_meeting_capsules,
+            MOVABLE_MEETING_CAPSULES,
+        ),
+        (
+            Feature::MeetingSummaryModel,
+            settings.meeting_summary_model,
+            MEETING_SUMMARY_MODEL,
+        ),
+        (
+            Feature::GnomeClipboardRestore,
+            settings.gnome_clipboard_restore,
+            GNOME_CLIPBOARD_RESTORE,
+        ),
+        (
+            Feature::MeetingNotesVocabulary,
+            settings.meeting_notes_vocabulary,
+            MEETING_NOTES_VOCABULARY,
+        ),
+        (
+            Feature::NotchIndicator,
+            settings.notch_indicator,
+            NOTCH_INDICATOR,
+        ),
+        (
+            Feature::MeetingFinishedEvent,
+            settings.meeting_finished_event,
+            MEETING_FINISHED_EVENT,
+        ),
+        (
+            Feature::GnomeMeetingCapsules,
+            settings.gnome_meeting_capsules,
+            GNOME_MEETING_CAPSULES,
         ),
     ]
     .into_iter()
@@ -1392,6 +1632,90 @@ mod tests {
             assert_eq!(bit & (MINUTES_MASK << MINUTES_SHIFT), 0);
         }
         assert_eq!((state >> MINUTES_SHIFT) & MINUTES_MASK, 1440);
+    }
+
+    #[test]
+    fn keep_recordings_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & KEEP_RECORDINGS, 0);
+        labs.keep_recordings = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & KEEP_RECORDINGS, 0);
+        assert_eq!(state & STOP_WHEN_CALL_ENDS, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
+    }
+
+    #[test]
+    fn hide_menu_bar_icon_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & HIDE_MENU_BAR_ICON, 0);
+        labs.hide_menu_bar_icon = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & HIDE_MENU_BAR_ICON, 0);
+        assert_eq!(state & KEEP_RECORDINGS, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
+    }
+
+    #[test]
+    fn notch_indicator_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & NOTCH_INDICATOR, 0);
+        labs.notch_indicator = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & NOTCH_INDICATOR, 0);
+        assert_eq!(state & MEETING_NOTES_VOCABULARY, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
+    }
+
+    #[test]
+    fn movable_meeting_capsules_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & MOVABLE_MEETING_CAPSULES, 0);
+        labs.movable_meeting_capsules = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & MOVABLE_MEETING_CAPSULES, 0);
+        assert_eq!(state & HIDE_MENU_BAR_ICON, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
+    }
+
+    #[test]
+    fn gnome_clipboard_restore_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & GNOME_CLIPBOARD_RESTORE, 0);
+        labs.gnome_clipboard_restore = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & GNOME_CLIPBOARD_RESTORE, 0);
+        assert_eq!(state & MEETING_SUMMARY_MODEL, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
+    }
+
+    #[test]
+    fn meeting_finished_event_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & MEETING_FINISHED_EVENT, 0);
+        labs.meeting_finished_event = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & MEETING_FINISHED_EVENT, 0);
+        assert_eq!(state & NOTCH_INDICATOR, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
+    }
+
+    #[test]
+    fn gnome_meeting_capsules_is_its_own_bit_and_off_by_default() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & GNOME_MEETING_CAPSULES, 0);
+        labs.gnome_meeting_capsules = true;
+        labs.unload_idle_minutes = 24 * 60;
+        let state = encode_where(&labs, |_| true);
+        assert_ne!(state & GNOME_MEETING_CAPSULES, 0);
+        assert_eq!(state & GNOME_CLIPBOARD_RESTORE, 0);
+        assert_eq!(state >> MINUTES_SHIFT, 24 * 60);
     }
 
     #[test]

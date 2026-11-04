@@ -8,7 +8,7 @@ use rune::{El, Icon, Tx, row, text};
 use super::controls::{
     self, CardRow, Paint, card, icon_row, icon_row_tagged, pressable_row, row_switch,
 };
-use super::icons::{BOOK, GLOBE, HINTS, KEYBOARD, MOUSE, SPARKLES, TERMINAL, TIMER, WAVE};
+use super::icons::{BOOK, GLOBE, KEYBOARD, MOUSE, SPARKLES, TERMINAL, TIMER, WAVE};
 use super::lists::{Tone, tone_tag};
 use super::sidebar::{NAV_ROW_GAP, NAV_ROW_HEIGHT, VOICE_FILTER_ICON};
 use super::{Pane, Ui};
@@ -174,7 +174,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
     let mut rows = Vec::new();
     if cfg!(target_os = "macos") {
         rows.push(row(Feature::SaveDictationAudio, &WAVE, "Save dictation audio", "Keep compressed recordings on this Mac. Choose retention in History; default Forever. Requires ffmpeg."));
-        rows.push(row(Feature::ProfileSync, &SPARKLES, "Profile sync", "Share the dictionary and cleanup prompts with Hex on Android through your own server, using `hex profile`."));
+        rows.push(row(Feature::ProfileSync, &SPARKLES, "Profile sync", "Share the dictionary and cleanup prompts with Hex on Android through this running Mac. Pair devices with hex profile."));
         rows.push(row(Feature::LocalPolish, &SPARKLES, "Local SpeakoFlow cleanup", "Clean up dictation on this Mac before optional OpenCode rewriting; unloads after five idle minutes."));
     }
     if caps.meetings {
@@ -220,13 +220,13 @@ fn rows(ui: &Ui) -> Vec<Row> {
     if caps.meetings {
         rows.push(row(
             Feature::LiveChapters,
-            &HINTS,
+            &BOOK,
             tr("Live chapters"),
             tr("Break meeting transcripts into chapters while recording"),
         ));
         rows.push(row(
             Feature::SubtitleExport,
-            &HINTS,
+            &BOOK,
             tr("Subtitle export"),
             tr("Export meeting transcripts as SRT or VTT subtitles with hex meetings show"),
         ));
@@ -270,13 +270,13 @@ fn rows(ui: &Ui) -> Vec<Row> {
         ));
         rows.push(row(
             Feature::KeepOnClipboard,
-            &HINTS,
+            &BOOK,
             tr("Keep dictation on clipboard"),
             tr("Leave the dictation on the clipboard after pasting instead of restoring what was there"),
         ));
         rows.push(row(
             Feature::CopyOnly,
-            &HINTS,
+            &BOOK,
             tr("Copy dictation only"),
             tr("Put the dictation on the clipboard instead of pasting it"),
         ));
@@ -291,7 +291,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
             // Reads the text before the cursor through macOS Accessibility.
             rows.push(row(
                 Feature::SmartSpacing,
-                &HINTS,
+                &BOOK,
                 tr("Smart spacing"),
                 tr("Add a space before a dictation pasted right after a word"),
             ));
@@ -312,7 +312,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
             // macOS's menu-bar menu lists them.
             rows.push(row(
                 Feature::RecentDictations,
-                &HINTS,
+                &BOOK,
                 tr("Copy recent dictations"),
                 tr("Copy one of your last five dictations from the menu bar, under Paste Last Dictation"),
             ));
@@ -356,25 +356,25 @@ fn rows(ui: &Ui) -> Vec<Row> {
     ));
     rows.push(row(
         Feature::SpokenFormatting,
-        &HINTS,
+        &BOOK,
         tr("Spoken formatting"),
         tr("Say \"new line\", \"new paragraph\", \"open quote\", or \"close quote\" to insert line breaks and quotation marks"),
     ));
     rows.push(row(
         Feature::SpokenSymbols,
-        &HINTS,
+        &BOOK,
         tr("Spoken symbols"),
         tr("Say \"comma\", \"colon\", \"hashtag\", \"underscore\", or \"slash\" to insert the symbol joined to its words"),
     ));
     rows.push(row(
         Feature::FillerWords,
-        &HINTS,
+        &BOOK,
         tr("Remove filler words"),
         tr("Remove filler words such as um and uh from dictations, without an AI model"),
     ));
     rows.push(row(
         Feature::HistoryStats,
-        &HINTS,
+        &BOOK,
         tr("Dictation stats"),
         tr("Show a summary of your retained dictations at the top of History, with hex history stats"),
     ));
@@ -386,37 +386,37 @@ fn rows(ui: &Ui) -> Vec<Row> {
     ));
     rows.push(row(
         Feature::PickerSortFilter,
-        &HINTS,
+        &BOOK,
         tr("Sort and filter models"),
         tr("Sort the Local transcription picker by size or name and show only models for the saved language"),
     ));
     rows.push(row(
         Feature::BenchmarkDetails,
-        &HINTS,
+        &BOOK,
         tr("Benchmark details"),
         tr("Show each model's raw error rate, benchmark, and source in the Local transcription picker"),
     ));
     rows.push(row(
         Feature::PickerActiveFirst,
-        &HINTS,
+        &BOOK,
         tr("Model in use first"),
         tr("The speech model picker lists the model you're using first"),
     ));
     rows.push(row(
         Feature::ModelInPlace,
-        &HINTS,
+        &BOOK,
         tr("Use model files where they are"),
         tr("Add a speech model file without copying it, so several accounts can share one file"),
     ));
     rows.push(row(
         Feature::PickerDownloaded,
-        &HINTS,
+        &BOOK,
         tr("Downloaded models only"),
         tr("Show only downloaded speech models in the picker, with the space they take"),
     ));
     let ultra_locked = Feature::ParakeetUltra.managed().is_none()
         && Feature::ParakeetUltra.off_refusal(&ui.settings).is_some();
-    let ultra = row(Feature::ParakeetUltra, &HINTS, tr("Parakeet Ultra"), "");
+    let ultra = row(Feature::ParakeetUltra, &BOOK, tr("Parakeet Ultra"), "");
     // A managed row already says so.
     rows.push(if ultra.locked {
         ultra
@@ -447,12 +447,102 @@ fn rows(ui: &Ui) -> Vec<Row> {
             tr("Paste with Ctrl+Shift+V so terminals accept it"),
         ));
     }
+    if caps.meetings && cfg!(target_os = "macos") {
+        rows.push(row(
+            Feature::MovableMeetingCapsules,
+            &BOOK,
+            tr("Movable meeting capsules"),
+            tr("Drag meeting capsules out of the way; they come back in the corner you left them"),
+        ));
+    }
+    if caps.meetings {
+        rows.push(row(
+            Feature::MeetingSummaryModel,
+            &SPARKLES,
+            tr("Choose meeting summary model"),
+            tr("Pick the OpenCode provider and model that write meeting titles and summaries, in Meetings › Settings › Advanced"),
+        ));
+    }
+    if caps.meetings {
+        rows.push(row(
+            Feature::MeetingNotesVocabulary,
+            &BOOK,
+            tr("Vocabulary in meeting notes"),
+            tr("Meeting titles and summaries read your vocabulary, so names are spelled the way you wrote them"),
+        ));
+    }
+    if caps.meetings {
+        rows.push(row(
+            Feature::MeetingFinishedEvent,
+            &GLOBE,
+            tr("Meeting finished event"),
+            tr("Tell apps on this computer when a meeting's transcript is ready. They get only the meeting's ID, through Hex's local API"),
+        ));
+    }
+    if caps.meetings {
+        rows.push(row(
+            Feature::MeetingPlatformIcons,
+            &BOOK,
+            tr("Meeting platform icons"),
+            tr("Show a small icon for the app or website each meeting was recorded from, beside its name"),
+        ));
+    }
+    if cfg!(target_os = "macos") {
+        rows.push(row(
+                Feature::HideMenuBarIcon,
+                &BOOK,
+                tr("Hide menu bar icon"),
+                tr("Hide Hex's icon from the menu bar. Shortcuts keep working; open Hex again from Finder or Spotlight for Settings"),
+            ));
+    }
+    if cfg!(target_os = "macos") {
+        rows.push(row(
+                Feature::NotchIndicator,
+                &WAVE,
+                tr("Notch indicator"),
+                tr("On a screen with a notch, the recording indicator grows out of the notch instead of sitting below the menu bar"),
+            ));
+    }
+    if caps.os == super::platform::Os::Linux {
+        rows.push(row(
+            Feature::GnomeClipboardRestore,
+            &BOOK,
+            tr("Restore clipboard on GNOME"),
+            tr("Put back what you copied before a dictation, through XWayland. Works only while XWayland is already running"),
+        ));
+    }
+    if caps.os == super::platform::Os::Linux {
+        rows.push(row(
+            Feature::GnomeMeetingCapsules,
+            &BOOK,
+            tr("Floating meeting capsules on GNOME"),
+            tr("Show the recording offer and recording indicator floating over your call, through XWayland. Works only while XWayland is already running"),
+        ));
+    }
+    if true {
+        rows.push(row(
+        Feature::KeepRecordings,
+        &BOOK,
+        tr("Keep recordings"),
+        tr("Keep the audio of dictations saved to History, so you can transcribe them again with another model"),
+    ));
+    }
     rows.push(row(Feature::ProviderFallback, &SPARKLES, tr("Provider quota fallback"), tr("Try the configured provider when rewriting hits a usage limit. Timeouts keep the previous text.")));
     rows
 }
 
 fn row_key(feature: Feature) -> &'static str {
     match feature {
+        Feature::MeetingPlatformIcons => "lab-meeting-platform-icons",
+        Feature::GnomeMeetingCapsules => "lab-gnome-meeting-capsules",
+        Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
+        Feature::NotchIndicator => "lab-notch-indicator",
+        Feature::MeetingNotesVocabulary => "lab-meeting-notes-vocabulary",
+        Feature::GnomeClipboardRestore => "lab-gnome-clipboard-restore",
+        Feature::MeetingSummaryModel => "lab-meeting-summary-model",
+        Feature::MovableMeetingCapsules => "lab-movable-meeting-capsules",
+        Feature::HideMenuBarIcon => "lab-hide-menu-bar-icon",
+        Feature::KeepRecordings => "lab-keep-recordings",
         Feature::Meetings => "lab-meetings",
         Feature::VoiceFilter => "lab-voice-filter",
         Feature::Playground => "lab-playground",
@@ -565,7 +655,7 @@ pub(super) fn page(ui: &Ui, p: Paint) -> El {
         .child(lede)
         .child(card(p, "labs", rows))
         .child(card(p, "labs-setup", vec![run_setup_row(p)]));
-    super::scroll_body("scroll", content)
+    super::scroll_body(p.k, "scroll", content)
 }
 
 fn feature_row(p: Paint, row: Row, flashing: bool) -> CardRow {
@@ -596,7 +686,7 @@ fn feature_row(p: Paint, row: Row, flashing: bool) -> CardRow {
         return item.into();
     }
     let feature = row.feature;
-    pressable_row(item)
+    pressable_row(item, row.on)
         .hover(p.k.c.hover)
         .on_press(move |ui: &mut Ui| flip(ui, feature))
         .into()

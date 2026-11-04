@@ -384,6 +384,21 @@ pub(super) const SCENES: &[Scene] = &[
         ui.picker.installed = Some(vec![TranscriptionModelId::CohereTranscribe]);
         vocabulary::fixture(ui, true);
     }),
+    // Whisper reads only the terms that fit its prompt: the sheet says how many.
+    ("vocabulary-budget", |ui| {
+        *ui = portal_fixture();
+        ui.settings.transcription.model = TranscriptionModelId::WhisperLargeV3Turbo;
+        ui.picker.installed = Some(vec![TranscriptionModelId::WhisperLargeV3Turbo]);
+        vocabulary::fixture(ui, true);
+        let entries: Vec<_> = (1..=52)
+            .map(|n| crate::dictation::vocabulary::VocabularyEntry {
+                term: format!("Project codename {n}"),
+                sounds_like: Vec::new(),
+            })
+            .collect();
+        ui.settings.vocabulary = entries;
+        ui.vocabulary.reload(&ui.settings.vocabulary);
+    }),
     ("mac-settings-recording", |ui| {
         *ui = mac_fixture();
         let held = crate::app_settings::HotkeyModifiers {
@@ -463,6 +478,14 @@ pub(super) const SCENES: &[Scene] = &[
         ui.meetings.view = meetings::View::Settings;
         ui.pane = Pane::Meetings;
     }),
+    // Labs › Choose meeting summary model: the picker in Advanced, then
+    // with OpenCode not running, the saved model kept.
+    ("meetings-summary-model", |ui| {
+        summary_model_scene(ui, models::Models::fixture())
+    }),
+    ("meetings-summary-model-not-running", |ui| {
+        summary_model_scene(ui, models::Models::fixture_not_running())
+    }),
     // System Audio not yet allowed: tap Allow to wait, again to grant.
     ("meetings-allow", |ui| {
         *ui = mac_fixture();
@@ -518,6 +541,12 @@ pub(super) const SCENES: &[Scene] = &[
     ("meetings-chapters", |ui| {
         *ui = mac_fixture();
         ui.meetings = meetings::MeetingsPane::chapters_fixture();
+        ui.pane = Pane::Meetings;
+    }),
+    ("meetings-platform-icons", |ui| {
+        *ui = mac_fixture();
+        ui.settings.labs.meeting_platform_icons = true;
+        ui.meetings = meetings::MeetingsPane::platforms_fixture();
         ui.pane = Pane::Meetings;
     }),
     ("meetings-empty", |ui| {
@@ -593,22 +622,11 @@ pub(super) const SCENES: &[Scene] = &[
         ui.platform.developer = true;
         ui.pane = Pane::HudLab;
     }),
-    ("mac-labs", |ui| {
-        *ui = mac_fixture();
-        #[cfg(hex_capture)]
-        {
-            ui.platform.scrawl = Some(platform::ScrawlView::preview());
-        }
-        ui.labs_open = true;
-    }),
+    ("mac-labs", labs_with_some_on),
     ("mac-labs-link", |ui| {
         *ui = mac_fixture();
         ui.labs_open = true;
-        // Far ahead, so the pulse holds for the render.
-        ui.lab_flash = Some((
-            crate::labs::Feature::VocabularyBiasing,
-            Instant::now() + Duration::from_secs(3600),
-        ));
+        ui.lab_flash = Some((crate::labs::Feature::VocabularyBiasing, Instant::now()));
     }),
     ("mac-production", |ui| {
         *ui = mac_fixture();
@@ -764,6 +782,20 @@ pub(super) fn mac_fixture() -> Ui {
     ui
 }
 
+/// Meetings › Settings with Advanced open, Summarize with OpenCode and Labs ›
+/// Choose meeting summary model on, a model saved, and `models` as the
+/// OpenCode catalog.
+fn summary_model_scene(ui: &mut Ui, models: models::Models) {
+    *ui = mac_fixture();
+    ui.settings.labs.meeting_summary_model = true;
+    ui.settings.meetings.summarize_with_opencode = true;
+    ui.settings.meetings.opencode_model = Some("anthropic/claude-sonnet-4-5".into());
+    ui.models = models;
+    ui.advanced = vec![Pane::Meetings];
+    ui.meetings.view = meetings::View::Settings;
+    ui.pane = Pane::Meetings;
+}
+
 fn shortcut_row(ui: &mut Ui, capture: Capture) {
     *ui = mac_fixture();
     ui.settings.dictation_hotkey = HotkeyBinding {
@@ -839,4 +871,22 @@ pub(super) fn fixture(shortcuts: DesktopShortcuts) -> Ui {
         editing: false,
     });
     ui
+}
+
+/// Labs with a few labs on: every store scene's fixture, so a lab reads
+/// the same in each.
+fn labs_with_some_on(ui: &mut Ui) {
+    *ui = mac_fixture();
+    for feature in [
+        crate::labs::Feature::LiveText,
+        crate::labs::Feature::SmartSpacing,
+        crate::labs::Feature::TapOrHold,
+    ] {
+        feature.set(&mut ui.settings, true);
+    }
+    #[cfg(hex_capture)]
+    {
+        ui.platform.scrawl = Some(platform::ScrawlView::preview());
+    }
+    ui.labs_open = true;
 }
