@@ -1425,7 +1425,9 @@ Labs › Meeting snapshots                         // meetings.snapshots
 
 The selector keeps recent comparisons across interruption and deletion, so
 resuming does not make an unchanged slide new. Two recent visual states suppress
-caret alternation. Settled large changes require 500 ms; small edits require
+caret alternation. Pixel comparisons use brightness and substantial color changes
+to tolerate video-decoding chroma noise around text; low-contrast digit edits
+remain eligible. Settled large changes require 500 ms; small edits require
 1500 ms. If content never settles, it saves a sparse representative after two
 seconds, then no more than once per 30 seconds, and records a coverage gap.
 These thresholds are initial policy, not measured slide-recall guarantees.

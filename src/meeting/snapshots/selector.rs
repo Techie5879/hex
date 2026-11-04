@@ -130,8 +130,18 @@ fn changed(a: &Frame, b: &Frame) -> usize {
         .0
         .iter()
         .zip(b.pixels.as_chunks::<4>().0.iter())
-        .filter(|(a, b)| (0..3).any(|channel| a[channel].abs_diff(b[channel]) >= 24))
+        .filter(|(a, b)| material_pixel_change(a, b))
         .count()
+}
+
+/// Video decoding and resampling can shift chroma at glyph edges without a
+/// meaningful brightness change. Compare both brightness and strong color
+/// changes, rather than letting one noisy RGB channel create a new slide.
+fn material_pixel_change(a: &[u8; 4], b: &[u8; 4]) -> bool {
+    let brightness =
+        |p: &[u8; 4]| 54 * i32::from(p[0]) + 183 * i32::from(p[1]) + 19 * i32::from(p[2]);
+    (brightness(a) - brightness(b)).abs() >= 16 * 256
+        || (0..3).any(|channel| a[channel].abs_diff(b[channel]) >= 48)
 }
 
 #[cfg(test)]
@@ -183,6 +193,59 @@ mod tests {
         assert!(!accept(&mut selector, noisy.clone(), 1000));
         assert!(!accept(&mut selector, noisy, 2500));
     }
+    #[test]
+    fn text_edge_chroma_noise_does_not_create_a_new_snapshot() {
+        let mut selector = Selector::default();
+        let mut original = frame();
+        for y in 20..40 {
+            for x in 10..80 {
+                if (x + y) % 3 == 0 {
+                    let p = (y * 100 + x) * 4;
+                    original.pixels[p..p + 4].copy_from_slice(&[20, 80, 110, 255]);
+                }
+            }
+        }
+        accept(&mut selector, original.clone(), 0);
+        assert!(accept(&mut selector, original.clone(), 500));
+        let mut noisy = original;
+        for p in noisy.pixels.chunks_exact_mut(4) {
+            if p[0] == 20 {
+                p.copy_from_slice(&[50, 74, 112, 255]);
+            }
+        }
+        selector.reset();
+        assert!(!accept(&mut selector, noisy.clone(), 1000));
+        assert!(!accept(&mut selector, noisy, 3000));
+    }
+
+    #[test]
+    fn low_contrast_digits_and_strong_equal_brightness_colors_remain_material() {
+        let mut selector = Selector::default();
+        let mut original = frame();
+        let two = [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b10000, 0b10000, 0b11111,
+        ];
+        let three = [
+            0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+        ];
+        let paint = |frame: &mut Frame, rows: [u8; 7]| {
+            for (y, row) in rows.iter().enumerate() {
+                for x in 0..5 {
+                    let grey = if row & (1 << x) == 0 { 0 } else { 20 };
+                    let p = ((20 + y) * 100 + 20 + x) * 4;
+                    frame.pixels[p..p + 4].copy_from_slice(&[grey, grey, grey, 255]);
+                }
+            }
+        };
+        paint(&mut original, two);
+        accept(&mut selector, original.clone(), 0);
+        assert!(accept(&mut selector, original.clone(), 500));
+        paint(&mut original, three);
+        assert!(!accept(&mut selector, original.clone(), 1000));
+        assert!(accept(&mut selector, original, 2500));
+        assert!(material_pixel_change(&[0, 90, 0, 255], &[255, 14, 0, 255]));
+    }
+
     #[test]
     fn failed_storage_does_not_suppress_a_retry() {
         let mut selector = Selector::default();
