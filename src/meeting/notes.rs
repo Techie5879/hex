@@ -245,6 +245,7 @@ pub(super) struct Summary {
 /// One call over a bounded excerpt. A prompt that still exceeds the context
 /// is retried once with half the excerpt; every call receives the time left
 /// before `deadline`.
+#[cfg(any(test, debug_assertions))]
 pub(super) fn summarize_entries(
     entries: &[TranscriptEntry],
     max_chars: usize,

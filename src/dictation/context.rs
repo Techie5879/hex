@@ -217,6 +217,7 @@ impl ContextSnapshot {
             .is_some_and(|current| application_names_equal(current, application))
     }
 
+    #[cfg(debug_assertions)]
     pub fn label(&self) -> String {
         match (&self.application, self.browser_host()) {
             (Some(application), Some(host)) => format!("{application} · {host}"),
