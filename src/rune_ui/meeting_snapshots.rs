@@ -23,7 +23,7 @@ pub(super) struct Images {
     expanded: bool,
     meeting: String,
     ready: usize,
-    synthetic: bool,
+    fixture: bool,
     pending: Option<Receiver<Result<(), String>>>,
     error: Option<String>,
 }
@@ -69,7 +69,7 @@ impl Images {
 pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
     let snapshots = &meeting.snapshots;
     let supported = ui.platform.caps.os == super::platform::Os::Macos;
-    if snapshots.images.is_empty() && !(supported && ui.settings.labs.meeting_snapshots) {
+    if snapshots.images.is_empty() && !snapshots.active {
         return None;
     }
     let state = &ui.meetings.snapshots;
@@ -163,6 +163,7 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
         ButtonKind::Secondary,
         |ui: &mut Ui, _| {
             ui.meetings.snapshots.expanded = !ui.meetings.snapshots.expanded;
+            fixture_page(ui);
         },
     ));
     if !state.expanded {
@@ -191,16 +192,7 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
             let mut thumbnails = state.thumbnails.borrow_mut();
             let image = thumbnails
                 .entry(snapshot.thumbnail.clone())
-                .or_insert_with(|| {
-                    if state.synthetic {
-                        {
-                            let (width, height) = fixture_dimensions(snapshot.id as u32);
-                            cache.rgba(width, height, fixture_pixels(snapshot.id as u32))
-                        }
-                    } else {
-                        cache.file(&snapshot.thumbnail, 160.0, 2.0)
-                    }
-                });
+                .or_insert_with(|| cache.file(&snapshot.thumbnail, 160.0, 2.0));
             if image.is_ready() && image.error().is_none() {
                 let (width, height) = preview_size(snapshot.width, snapshot.height);
                 preview = preview.child(
@@ -276,6 +268,7 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
                         ButtonKind::Secondary,
                         move |ui: &mut Ui, _| {
                             ui.meetings.snapshots.page = page.saturating_sub(1);
+                            fixture_page(ui);
                         },
                     )
                     .disabled(page == 0),
@@ -293,6 +286,7 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
                         ButtonKind::Secondary,
                         move |ui: &mut Ui, _| {
                             ui.meetings.snapshots.page = (page + 1).min(page_count - 1);
+                            fixture_page(ui);
                         },
                     )
                     .disabled(page + 1 == page_count),
@@ -332,6 +326,7 @@ fn action(ui: &mut Ui, id: String, action: SnapshotAction) {
                 }
             }
         }
+        fixture_page(ui);
         return;
     }
     let (sender, receiver) = mpsc::channel();
@@ -353,13 +348,13 @@ fn action(ui: &mut Ui, id: String, action: SnapshotAction) {
 /// Artificial diagram pixels, never a real meeting or private screen.
 pub(super) fn fixture(ui: &mut Ui) {
     let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
-    let mut thumbnails = HashMap::new();
     let meeting = ui
         .meetings
         .meetings
         .iter_mut()
         .find(|meeting| meeting.id == "preview-live")
         .unwrap();
+    meeting.snapshots.active = true;
     meeting.snapshots.status = Status::Capturing;
     meeting.snapshots.has_gaps = true;
     meeting.title = "Teams design review".into();
@@ -367,9 +362,6 @@ pub(super) fn fixture(ui: &mut Ui) {
     for id in 0..3 {
         let path = PathBuf::from(format!("fixture-snapshot-{id}.png"));
         let (width, height) = fixture_dimensions(id);
-        let image = cache.rgba(width, height, fixture_pixels(id));
-        let _ = image.wait();
-        thumbnails.insert(path.clone(), image);
         meeting
             .snapshots
             .images
@@ -385,11 +377,48 @@ pub(super) fn fixture(ui: &mut Ui) {
     }
     ui.meetings.snapshots.meeting = meeting.id.clone();
     ui.meetings.snapshots.cache = Some(cache);
-    ui.meetings.snapshots.synthetic = true;
+    ui.meetings.snapshots.fixture = true;
     ui.meetings.snapshots.expanded = true;
-    *ui.meetings.snapshots.thumbnails.borrow_mut() = thumbnails;
     ui.meetings.select("preview-live".into());
     ui.settings.labs.meeting_snapshots = true;
+    fixture_page(ui);
+}
+
+/// Seed the synthetic scene's current page before it draws. The drawing path
+/// always uses the regular image cache and never generates fixture pixels.
+pub(super) fn fixture_page(ui: &mut Ui) {
+    if !ui.meetings.snapshots.fixture || !ui.meetings.snapshots.expanded {
+        return;
+    }
+    let state = &ui.meetings.snapshots;
+    let Some(cache) = &state.cache else { return };
+    let Some(meeting) = ui
+        .meetings
+        .meetings
+        .iter()
+        .find(|meeting| Some(&meeting.id) == ui.meetings.selected.as_ref())
+    else {
+        return;
+    };
+    let page_count = meeting.snapshots.images.len().div_ceil(PAGE_SIZE).max(1);
+    let page = state.page.min(page_count - 1);
+    let mut thumbnails = state.thumbnails.borrow_mut();
+    thumbnails.clear();
+    for snapshot in meeting
+        .snapshots
+        .images
+        .iter()
+        .skip(page * PAGE_SIZE)
+        .take(PAGE_SIZE)
+    {
+        let image = cache.rgba(
+            snapshot.width,
+            snapshot.height,
+            fixture_pixels(snapshot.id as u32),
+        );
+        let _ = image.wait();
+        thumbnails.insert(snapshot.thumbnail.clone(), image);
+    }
 }
 
 fn preview_size(width: u32, height: u32) -> (f32, f32) {

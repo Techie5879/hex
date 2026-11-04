@@ -1422,6 +1422,16 @@ Labs › Meeting snapshots                         // meetings.snapshots
     └── Images collapsed until Show images; six per page, decoded on the image-cache worker
 ```
 
+The selector keeps recent comparisons across interruption and deletion, so
+resuming does not make an unchanged slide new. Two recent visual states suppress
+caret alternation. Settled large changes require 500 ms; small edits require
+1500 ms. If content never settles, it saves a sparse representative after two
+seconds, then no more than once per 30 seconds, and records a coverage gap.
+These thresholds are initial policy, not measured slide-recall guarantees.
+Comparison history advances only after storage succeeds, keeping failed writes
+retryable. PNG encoding and the meeting-list scan run off the UI thread.
+Empty sections are hidden unless the recording has an active snapshot session.
+
 Images stay on this computer. They are not sent to OpenCode, meeting summaries,
 or an external service; the meeting-mirror script excludes their folder.
 They follow the meeting's retention and disappear with
@@ -1433,7 +1443,8 @@ Sources: `meeting/snapshots.rs`, `meeting/snapshots/`,
 `rune_ui/meeting_snapshots.rs`, `rune_ui/meetings_host.rs`, `labs.rs`.
 Checks: Labs bit isolation and defaults, snapshot-store checks, translated status
 coverage, the `meetings-snapshots` synthetic scene, and pane tests for pause,
-permission, pagination, deletion, and browsing while disabled. The scene uses
+permission, pagination, deletion, browsing while disabled, retryable image writes,
+interruption history, blinking-caret suppression, and bounded motion sampling. The scene uses
 artificial diagram pixels. These checks do not prove capture of a live Teams
 share, macOS permission behavior, or native end-to-end capture. No live meeting
 or private screenshot is used in repository fixtures.

@@ -44,6 +44,7 @@ pub struct Snapshot {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct View {
+    pub active: bool,
     pub status: Status,
     pub images: Vec<Snapshot>,
     pub has_gaps: bool,
@@ -100,6 +101,9 @@ fn sessions() -> &'static Mutex<HashMap<String, Shared>> {
 fn lock<T>(value: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     value.lock().unwrap_or_else(|e| e.into_inner())
 }
+fn lookup(id: &str) -> Option<Shared> {
+    lock(sessions()).get(id).cloned()
+}
 fn directory(id: &str) -> Option<PathBuf> {
     if id.is_empty()
         || id.len() > 100
@@ -113,9 +117,11 @@ fn directory(id: &str) -> Option<PathBuf> {
 /// Reads the active manager's projection, or the same durable index after it
 /// closes. Called by the Meetings background reader, never the paint thread.
 pub fn read(id: &str) -> View {
-    if let Some(state) = lock(sessions()).get(id).cloned() {
+    if let Some(state) = lookup(id) {
         let state = lock(&state);
-        return state.store.view(state.status);
+        let mut view = state.store.view(state.status);
+        view.active = true;
+        return view;
     }
     let Some(directory) = directory(id) else {
         return View::default();
@@ -124,6 +130,7 @@ pub fn read(id: &str) -> View {
         Ok(store) => store.view(Status::Complete),
         Err(_) if !directory.join("snapshots").exists() => View::default(),
         Err(_) => View {
+            active: false,
             status: Status::Failed,
             images: Vec::new(),
             has_gaps: true,
@@ -133,7 +140,7 @@ pub fn read(id: &str) -> View {
 
 /// The recording capsule needs only the live state, not image paths or I/O.
 pub(crate) fn active_status(id: &str) -> Option<Status> {
-    let state = lock(sessions()).get(id).cloned()?;
+    let state = lookup(id)?;
     Some(lock(&state).status)
 }
 
@@ -171,9 +178,8 @@ pub(crate) fn disable_all() {
 /// Serializes with the worker. Publishing the index before removing an
 /// unreferenced image means an interrupted deletion never leaves a broken row.
 pub fn delete(id: &str, image_id: u64) -> std::result::Result<(), String> {
-    let registry = lock(sessions());
-    if let Some(state) = registry.get(id) {
-        let mut state = lock(state);
+    if let Some(state) = lookup(id) {
+        let mut state = lock(&state);
         state.store.delete(image_id).map_err(|e| e.to_string())?;
         state.generation += 1;
         if state.status == Status::LimitReached && !state.disabled {
@@ -185,6 +191,8 @@ pub fn delete(id: &str, image_id: u64) -> std::result::Result<(), String> {
         }
         return Ok(());
     }
+    static COMPLETED_WRITES: Mutex<()> = Mutex::new(());
+    let _guard = lock(&COMPLETED_WRITES);
     let directory = directory(id).ok_or("Invalid meeting")?;
     store::Store::load(&directory)
         .and_then(|mut store| store.delete(image_id))
@@ -304,7 +312,9 @@ fn run(shared: Shared, stop: Arc<AtomicBool>, clock: Instant) {
         // Dictation always wins. Skipped screenshot work is not queued.
         if crate::transcription::engine::dictation_busy() {
             selector.reset();
-            lock(&shared).store.mark_gap();
+            if pinned_window.is_some() {
+                lock(&shared).store.mark_gap();
+            }
             wait(&stop);
             continue;
         }
@@ -312,7 +322,7 @@ fn run(shared: Shared, stop: Arc<AtomicBool>, clock: Instant) {
         let at = clock.elapsed().as_millis() as u64;
         let mut state = lock(&shared);
         let dictating = crate::transcription::engine::dictation_busy();
-        if dictating {
+        if dictating && pinned_window.is_some() {
             state.store.mark_gap();
         }
         if stop.load(Ordering::Acquire)
@@ -330,10 +340,41 @@ fn run(shared: Shared, stop: Arc<AtomicBool>, clock: Instant) {
                 if pinned_window.is_none_or(|window| window == (frame.window, frame.binding)) =>
             {
                 pinned_window = Some((frame.window, frame.binding));
-                state.status = Status::Capturing;
-                if let Some((frame, since)) = selector.observe(frame, at) {
-                    match state.store.add(&frame, since, at) {
-                        Ok(true) => {}
+                state.status = if state.store.has_images() {
+                    Status::Capturing
+                } else {
+                    Status::Waiting
+                };
+                // Selection and PNG encoding are CPU work, not state mutation.
+                // Release the state mutex and revalidate publication afterwards.
+                drop(state);
+                let chosen = selector.observe(frame, at);
+                let prepared = chosen
+                    .as_ref()
+                    .map(|chosen| store::Prepared::new(&chosen.frame));
+                state = lock(&shared);
+                if stop.load(Ordering::Acquire)
+                    || !state.may_publish(generation)
+                    || !crate::labs::meeting_snapshots()
+                    || crate::transcription::engine::dictation_busy()
+                {
+                    selector.reset();
+                } else if let Some(chosen) = chosen {
+                    let result = prepared
+                        .expect("chosen frame was prepared")
+                        .and_then(|prepared| state.store.add_prepared(&prepared, chosen.since, at));
+                    match result {
+                        Ok(true) => {
+                            if chosen.sparse {
+                                state.store.mark_gap();
+                            }
+                            selector.remember(chosen.frame, at);
+                            state.status = if state.store.has_images() {
+                                Status::Capturing
+                            } else {
+                                Status::Waiting
+                            };
+                        }
                         Ok(false) => {
                             state.store.mark_gap();
                             state.status = Status::LimitReached;

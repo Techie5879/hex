@@ -2143,6 +2143,7 @@ fn meeting_snapshots_page_and_keep_retained_images_when_disabled() {
         image.thumbnail = image.path.clone();
         meeting.snapshots.images.push(image);
     }
+    super::super::meeting_snapshots::fixture_page(&mut rt.state);
     refresh(&mut rt);
     assert!(rt.find("snapshot-0-open").is_some());
     assert!(rt.find("snapshot-5-open").is_some());
@@ -2175,6 +2176,14 @@ fn meeting_snapshots_page_and_keep_retained_images_when_disabled() {
     settle(&mut rt);
     assert!(rt.find("snapshot-0-open").is_none());
     assert!(rt.find("snapshot-6-open").is_some());
+    rt.state
+        .meetings
+        .meetings
+        .iter_mut()
+        .find(|meeting| meeting.id == "preview-live")
+        .unwrap()
+        .snapshots
+        .active = false;
     rt.state.settings.labs.meeting_snapshots = false;
     refresh(&mut rt);
     assert!(
@@ -2210,4 +2219,35 @@ fn meeting_snapshots_pause_and_permission_actions_follow_status() {
     refresh(&mut rt);
     assert!(rt.find("snapshots-pause").is_none());
     assert!(rt.find("snapshots-permission").is_some());
+}
+
+#[test]
+fn meeting_snapshots_show_only_for_a_session_or_saved_images() {
+    let mut rt = runtime("meetings-recording", true, PANE_SIZE);
+    rt.state.settings.labs.meeting_snapshots = true;
+    refresh(&mut rt);
+    assert!(
+        rt.find("meeting-snapshots").is_none(),
+        "an unrelated live meeting has no snapshot session"
+    );
+    let meeting = rt
+        .state
+        .meetings
+        .meetings
+        .iter_mut()
+        .find(|meeting| meeting.id == "preview-live")
+        .unwrap();
+    meeting.snapshots.active = true;
+    meeting.snapshots.status = crate::meeting::snapshots::Status::Waiting;
+    refresh(&mut rt);
+    assert!(
+        rt.find("meeting-snapshots").is_some(),
+        "an active session shows its waiting status"
+    );
+    rt.state.meetings.select("preview-notes".into());
+    refresh(&mut rt);
+    assert!(
+        rt.find("meeting-snapshots").is_none(),
+        "old empty meetings have no snapshot section"
+    );
 }

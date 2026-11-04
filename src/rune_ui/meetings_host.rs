@@ -2,8 +2,8 @@
 //! and the meeting requests the Linux and Windows windows perform in their
 //! own process (macOS's go through `macos_host`).
 
-#[cfg(not(target_os = "macos"))]
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use super::meetings::{Chapter, Meeting, Status, Transcript, Turn};
@@ -85,47 +85,105 @@ impl LocalMeetings {
     }
 }
 
-/// The Meetings pane's listing from the read-only store query, rescanned at
-/// most once a second; unchanged meeting folders come from its cache.
+/// A nonblocking feed. The one worker owns both the query cache and all disk reads.
 #[derive(Default)]
 pub(super) struct MeetingFeed {
-    library: Option<crate::meeting::query::Library>,
+    worker: Option<ScanWorker>,
+    root: Option<PathBuf>,
     scan_at: Option<Instant>,
+    pending: bool,
     shown: Option<Result<Vec<Meeting>, String>>,
+}
+
+struct ScanWorker {
+    requests: SyncSender<()>,
+    results: Receiver<Result<Vec<Meeting>, String>>,
+}
+
+impl ScanWorker {
+    fn start(root: Option<PathBuf>) -> Result<Self, String> {
+        let (requests, jobs) = mpsc::sync_channel(1);
+        let (completed, results) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("hex-meeting-feed".into())
+            .spawn(move || {
+                let mut library = None;
+                while jobs.recv().is_ok() {
+                    let listed = scan(&mut library, root.as_deref());
+                    if completed.send(listed).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(Self { requests, results })
+    }
 }
 
 impl MeetingFeed {
     pub(super) fn poll(&mut self) -> Option<Result<Vec<Meeting>, String>> {
-        let now = Instant::now();
-        if self.scan_at.is_some_and(|at| now < at) {
-            return None;
+        let mut completed = None;
+        if let Some(worker) = &self.worker {
+            match worker.results.try_recv() {
+                Ok(listed) => {
+                    self.pending = false;
+                    completed = Some(listed);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.worker = None;
+                    self.pending = false;
+                    completed = Some(Err("Meeting listing worker stopped".into()));
+                }
+            }
         }
-        self.scan_at = Some(now + RESCAN);
-        let listed = self.scan();
+        let now = Instant::now();
+        if !self.pending && self.scan_at.is_none_or(|at| now >= at) {
+            self.scan_at = Some(now + RESCAN);
+            if self.worker.is_none() {
+                match ScanWorker::start(self.root.clone()) {
+                    Ok(worker) => self.worker = Some(worker),
+                    Err(error) => completed = Some(Err(error)),
+                }
+            }
+            if let Some(worker) = &self.worker {
+                match worker.requests.try_send(()) {
+                    Ok(()) => self.pending = true,
+                    Err(error) => completed = Some(Err(error.to_string())),
+                }
+            }
+        }
+        let listed = completed?;
         if self.shown.as_ref() == Some(&listed) {
             return None;
         }
         self.shown = Some(listed.clone());
         Some(listed)
     }
+}
 
-    fn scan(&mut self) -> Result<Vec<Meeting>, String> {
-        let library = match &self.library {
-            Some(library) => library,
-            None => {
-                let root = crate::meeting::root().map_err(|error| format!("{error:#}"))?;
-                self.library
-                    .insert(crate::meeting::query::Library::new(root))
-            }
-        };
-        let scan = library.scan().map_err(|error| format!("{error:#}"))?;
-        let now_ms = crate::desktop::events::now_ms();
-        Ok(scan
-            .meetings
-            .iter()
-            .map(|meeting| pane_meeting(meeting, now_ms))
-            .collect())
-    }
+/// Runs only on the feed worker, including snapshot indexes and image metadata.
+fn scan(
+    library: &mut Option<crate::meeting::query::Library>,
+    root: Option<&std::path::Path>,
+) -> Result<Vec<Meeting>, String> {
+    let library = match library {
+        Some(library) => library,
+        None => {
+            let root = match root {
+                Some(root) => root.to_path_buf(),
+                None => crate::meeting::root().map_err(|error| format!("{error:#}"))?,
+            };
+            library.insert(crate::meeting::query::Library::new(root))
+        }
+    };
+    let scan = library.scan().map_err(|error| format!("{error:#}"))?;
+    let now_ms = crate::desktop::events::now_ms();
+    Ok(scan
+        .meetings
+        .iter()
+        .map(|meeting| pane_meeting(meeting, now_ms))
+        .collect())
 }
 
 /// A stored meeting as the pane shows it.
@@ -217,10 +275,19 @@ mod tests {
     fn the_meeting_feed_lists_stored_meetings_once_until_they_change() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/meetings");
         let mut feed = MeetingFeed {
-            library: Some(crate::meeting::query::Library::new(root)),
+            root: Some(root),
             ..MeetingFeed::default()
         };
-        let meetings = feed.poll().expect("the first poll lists").unwrap();
+        // Poll never waits for the filesystem worker.
+        assert!(feed.poll().is_none());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let meetings = loop {
+            if let Some(listed) = feed.poll() {
+                break listed.unwrap();
+            }
+            assert!(Instant::now() < deadline, "listing worker did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        };
         let ids: Vec<_> = meetings.iter().map(|meeting| meeting.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -241,10 +308,36 @@ mod tests {
         assert!(!turns[0].mine && turns[1].mine);
         assert_eq!(turns.last().unwrap().pause_before_ms, Some(42_000));
         feed.scan_at = None;
-        assert!(
-            feed.poll().is_none(),
-            "an unchanged listing is not sent again"
-        );
+        assert!(feed.poll().is_none());
+        while feed.pending {
+            assert!(feed.poll().is_none(), "unchanged listing is not sent again");
+            assert!(Instant::now() < deadline, "rescan worker did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn polling_does_not_wait_or_queue_overlapping_scans() {
+        let (requests, jobs) = mpsc::sync_channel(1);
+        let (completed, results) = mpsc::sync_channel(1);
+        let mut feed = MeetingFeed {
+            worker: Some(ScanWorker { requests, results }),
+            ..Default::default()
+        };
+        assert!(feed.poll().is_none());
+        jobs.try_recv().expect("one job starts");
+        assert!(feed.pending);
+        // Even when another scan is due, a slow worker receives no second job.
+        feed.scan_at = None;
+        for _ in 0..100 {
+            assert!(feed.poll().is_none());
+        }
+        assert!(matches!(jobs.try_recv(), Err(TryRecvError::Empty)));
+        completed.send(Ok(Vec::new())).unwrap();
+        assert_eq!(feed.poll(), Some(Ok(Vec::new())));
+        jobs.try_recv()
+            .expect("next due job starts only after completion");
+        assert!(feed.pending);
     }
 
     #[test]

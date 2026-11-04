@@ -4,7 +4,7 @@ typedef struct {
     int32_t status;
     uint32_t width;
     uint32_t height;
-    uint32_t reserved;
+    uint32_t window;
     uint64_t source;
     uint8_t *rgba;
     size_t length;

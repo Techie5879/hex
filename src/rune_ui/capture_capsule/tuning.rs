@@ -5,6 +5,7 @@
 // Only the macOS playground reads much of this.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
+#[cfg(not(test))]
 use std::sync::RwLock;
 
 use rune::Spring;
@@ -138,38 +139,50 @@ pub(crate) const DEFAULT: Tuning = Tuning {
     flow: CapsuleFlow::List,
 };
 
+#[cfg(not(test))]
 static CURRENT: RwLock<Tuning> = RwLock::new(DEFAULT);
 
 #[cfg(test)]
 thread_local! {
-    /// A test's flow, on its own thread only, so tests in parallel never
-    /// see each other's.
-    static TEST_FLOW: std::cell::Cell<Option<CapsuleFlow>> = const { std::cell::Cell::new(None) };
+    // A playground test can change every field, not just the flow. Keep the
+    // complete value local so parallel renderer tests cannot inherit it.
+    static CURRENT: std::cell::Cell<Tuning> = const { std::cell::Cell::new(DEFAULT) };
 }
 
-/// Runs `body` with `flow` in use on this thread.
+/// Runs `body` with `flow` in use on this thread, restoring even after a panic.
 #[cfg(test)]
 pub(crate) fn with_flow<T>(flow: CapsuleFlow, body: impl FnOnce() -> T) -> T {
-    let before = TEST_FLOW.replace(Some(flow));
-    let out = body();
-    TEST_FLOW.set(before);
-    out
+    struct Restore(Tuning);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set(self.0);
+        }
+    }
+    let before = get();
+    let _restore = Restore(before);
+    set(Tuning { flow, ..before });
+    body()
 }
 
 /// The values in use: [`DEFAULT`] unless the playground changed them.
 pub(crate) fn get() -> Tuning {
     #[cfg(test)]
-    if let Some(flow) = TEST_FLOW.get() {
-        return Tuning {
-            flow,
-            ..*CURRENT.read().unwrap_or_else(|e| e.into_inner())
-        };
+    {
+        CURRENT.get()
     }
-    *CURRENT.read().unwrap_or_else(|e| e.into_inner())
+    #[cfg(not(test))]
+    {
+        *CURRENT.read().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 pub(crate) fn set(tuning: Tuning) {
-    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = tuning;
+    #[cfg(test)]
+    CURRENT.set(tuning);
+    #[cfg(not(test))]
+    {
+        *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = tuning;
+    }
 }
 
 impl Tuning {
@@ -215,6 +228,36 @@ impl Tuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_tuning_is_local_to_each_test_thread() {
+        let original = get();
+        let changed = Tuning {
+            flow: CapsuleFlow::Notch,
+            content_blur: 1.0,
+            ..original
+        };
+        set(changed);
+        assert_eq!(std::thread::spawn(get).join().unwrap(), DEFAULT);
+        assert_eq!(get(), changed);
+        set(original);
+    }
+
+    #[test]
+    fn scoped_flow_restores_full_tuning_after_a_panic() {
+        let original = get();
+        let result = std::panic::catch_unwind(|| {
+            with_flow(CapsuleFlow::Notch, || {
+                set(Tuning {
+                    content_blur: 1.0,
+                    ..get()
+                });
+                panic!("synthetic test panic");
+            })
+        });
+        assert!(result.is_err());
+        assert_eq!(get(), original);
+    }
 
     #[test]
     fn the_copied_values_name_every_field() {

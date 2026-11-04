@@ -37,6 +37,42 @@ pub(super) struct Store {
     directory: PathBuf,
     index: Index,
 }
+pub(super) struct Prepared {
+    asset: String,
+    width: u32,
+    height: u32,
+    encoded: Vec<u8>,
+    thumb: Vec<u8>,
+    thumb_width: u32,
+    thumb_height: u32,
+}
+impl Prepared {
+    /// CPU-heavy encoding runs on the capture worker before it locks state.
+    pub fn new(frame: &Frame) -> Result<Self> {
+        if !frame.valid() {
+            return Err(eyre!("invalid snapshot dimensions"));
+        }
+        let mut hash = Sha256::new();
+        hash.update(frame.width.to_le_bytes());
+        hash.update(frame.height.to_le_bytes());
+        hash.update(&frame.pixels);
+        let asset = hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let (w, h, pixels) = thumbnail_pixels(frame);
+        Ok(Self {
+            asset,
+            width: frame.width,
+            height: frame.height,
+            encoded: encode(frame.width, frame.height, &frame.pixels)?,
+            thumb: encode(w, h, &pixels)?,
+            thumb_width: w,
+            thumb_height: h,
+        })
+    }
+}
 impl Store {
     pub fn unavailable(meeting: &Path) -> Self {
         Self {
@@ -83,33 +119,38 @@ impl Store {
         super::super::set_owner_only(&path, false)?;
         Ok(())
     }
-    pub fn add(&mut self, frame: &Frame, at_ms: u64, until_ms: u64) -> Result<bool> {
-        self.add_with_writer(frame, at_ms, until_ms, write_asset)
+    pub fn has_images(&self) -> bool {
+        !self.index.entries.is_empty()
     }
-
+    #[cfg(test)]
+    pub fn add(&mut self, frame: &Frame, at_ms: u64, until_ms: u64) -> Result<bool> {
+        self.add_prepared(&Prepared::new(frame)?, at_ms, until_ms)
+    }
+    pub fn add_prepared(&mut self, prepared: &Prepared, at_ms: u64, until_ms: u64) -> Result<bool> {
+        self.publish(prepared, at_ms, until_ms, write_asset)
+    }
+    #[cfg(test)]
     fn add_with_writer(
         &mut self,
         frame: &Frame,
         at_ms: u64,
         until_ms: u64,
+        write: impl FnMut(&Path, &[u8]) -> Result<()>,
+    ) -> Result<bool> {
+        self.publish(&Prepared::new(frame)?, at_ms, until_ms, write)
+    }
+    fn publish(
+        &mut self,
+        prepared: &Prepared,
+        at_ms: u64,
+        until_ms: u64,
         mut write: impl FnMut(&Path, &[u8]) -> Result<()>,
     ) -> Result<bool> {
-        if !frame.valid() {
-            return Err(eyre!("invalid snapshot dimensions"));
-        }
         if self.index.entries.len() >= MAX_IMAGES {
             return Ok(false);
         }
-        let mut hash = Sha256::new();
-        hash.update(frame.width.to_le_bytes());
-        hash.update(frame.height.to_le_bytes());
-        hash.update(&frame.pixels);
-        let asset: String = hash
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        if self.index.deleted_assets.contains(&asset) {
+        let asset = &prepared.asset;
+        if self.index.deleted_assets.contains(asset) {
             return Ok(true);
         }
         if self.index.deleted_assets.len() >= MAX_IMAGES {
@@ -117,15 +158,13 @@ impl Store {
         }
         let path = self.directory.join(format!("{asset}.png"));
         let thumbnail = self.directory.join(format!("{asset}-thumb.png"));
-        let (w, h, pixels) = thumbnail_pixels(frame);
-        if !complete_png(&path, frame.width, frame.height) || !complete_png(&thumbnail, w, h) {
-            let encoded = encode(frame.width, frame.height, &frame.pixels)?;
-            let thumb = encode(w, h, &pixels)?;
+        if !complete_png(&path, prepared.width, prepared.height)
+            || !complete_png(&thumbnail, prepared.thumb_width, prepared.thumb_height)
+        {
             let total = fs::read_dir(&self.directory)?.try_fold(
                 0u64,
                 |total, entry| -> std::io::Result<u64> {
                     let entry = entry?;
-                    // Existing incomplete versions are replaced, not added.
                     let bytes = if entry.path() == path || entry.path() == thumbnail {
                         0
                     } else {
@@ -135,23 +174,23 @@ impl Store {
                 },
             )?;
             if total
-                .saturating_add(encoded.len() as u64)
-                .saturating_add(thumb.len() as u64)
+                .saturating_add(prepared.encoded.len() as u64)
+                .saturating_add(prepared.thumb.len() as u64)
                 > MAX_BYTES
             {
                 return Ok(false);
             }
-            write(&path, &encoded)?;
-            write(&thumbnail, &thumb)?;
+            write(&path, &prepared.encoded)?;
+            write(&thumbnail, &prepared.thumb)?;
         }
         let mut next = self.index.clone();
         next.entries.push(Entry {
             id: next.next,
             at_ms,
             until_ms,
-            asset,
-            width: frame.width,
-            height: frame.height,
+            asset: asset.clone(),
+            width: prepared.width,
+            height: prepared.height,
         });
         next.next += 1;
         self.persist(&next)?;
@@ -272,6 +311,7 @@ fn regular(path: &Path) -> bool {
 }
 fn project(directory: &Path, index: &Index, status: Status) -> View {
     View {
+        active: false,
         status,
         has_gaps: index.has_gaps,
         images: index

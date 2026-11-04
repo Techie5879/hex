@@ -414,7 +414,7 @@ public func hexTeamsSnapshotCapture(_ output: UnsafeMutablePointer<HexTeamsSnaps
             guard CGPreflightScreenCaptureAccess(), try state().same(as: before) else { throw SnapshotStatus.captureFailure }
             output.pointee.width = UInt32(width)
             output.pointee.height = UInt32(height)
-            output.pointee.reserved = window.windowID
+            output.pointee.window = window.windowID
             output.pointee.source = fingerprint(before, window.windowID)
             output.pointee.rgba = rgba
             output.pointee.length = width * height * 4
