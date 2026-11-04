@@ -1861,7 +1861,7 @@ smoke tests on Windows 10 and on ARM64 hardware have not been run.
 Linux updates                            // maintain.linux-updates
 ├── Direct install (versions/ + install.json receipt) -> release service -> staged -> sidebar footer: Restart to update
 ├── Source install (source-build marker) -> Sidebar footer: Updated from your source checkout
-├── Local build (HEX_LOCAL_BUILD=1) -> Sidebar footer: Local build · updates off; Version 2.3.1 (local <commit>); no checks, no channel row
+├── Local build (HEX_LOCAL_BUILD=1) -> Sidebar footer: Version on the first line, Local badge + commit below, then Local build · updates off; no checks, no channel row
 ├── pacman (AUR hex-bin: /usr/bin, root-owned) or Nix store -> Sidebar footer: Updated by your package manager
 └── Anything else (a downloaded executable) -> Sidebar footer: Download update
 ```
@@ -1869,6 +1869,11 @@ Linux updates                            // maintain.linux-updates
 The install kind comes from `updater/linux.rs`. The 2026-10-23 apollo
 observation (a staged update and the sidebar button) predates the release
 service and is not evidence for it.
+
+The local-build footer layout is shared across platforms. Its synthetic
+`mac-local-build` scene includes a commit, and
+`local_build_details_fit_below_the_version` checks that the version, badge,
+and commit fit inside the sidebar. The scene is not a native macOS check.
 
 No Linux meetings. Wayland shortcuts need either the desktop's GlobalShortcuts portal
 or the user's own keybindings for the `hex` commands; Hex reads no input

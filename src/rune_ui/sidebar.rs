@@ -336,46 +336,71 @@ fn footer(ui: &Ui, p: Paint) -> El {
         .child(version_line(
             ui,
             p,
-            line("version", &version_label(), p.faint()),
+            line("version", &version_label(ui), p.faint()),
         ))
         .children(status)
 }
 
-/// A local or test build marks itself beside the version, quietly: an outline
-/// pill with a dot, in muted theme tokens.
+/// Local builds put their badge and commit below the version so the footer
+/// fits the sidebar. Test builds keep their badge beside the version.
 fn version_line(ui: &Ui, p: Paint, version: El) -> El {
-    let badge = match ui.build_preview.unwrap_or_else(build_kind) {
+    let kind = ui.build_preview.unwrap_or_else(build_kind);
+    let badge = match kind {
         BuildKind::Release => return version,
         BuildKind::Local => tr("Local"),
         BuildKind::Test => tr("Test"),
     };
     let c = &p.k.c;
+    let badge = row()
+        .key("build-badge")
+        .h(16.0)
+        .px(6.0)
+        .gap(4.0)
+        .center_y()
+        .radius(8.0)
+        .border(p.hair.max(0.5), c.border_muted)
+        .child(
+            controls::status_dot(c.text_faint)
+                .size(5.0, 5.0)
+                .radius(2.5),
+        )
+        .child(
+            text(badge)
+                .key("label")
+                .font(p.k.ty.small)
+                .color(c.text_muted),
+        );
+    if kind == BuildKind::Local {
+        let commit = if cfg!(test) {
+            Some("1234567")
+        } else {
+            option_env!("HEX_COMMIT")
+        };
+        return col()
+            .key("version-row")
+            .child(version.key("version"))
+            .child(
+                row()
+                    .key("local-build-details")
+                    .h(FOOTER_LINE)
+                    .pl(6.0)
+                    .gap(6.0)
+                    .center_y()
+                    .child(badge)
+                    .children(commit.map(|commit| {
+                        text(commit)
+                            .key("build-commit")
+                            .font(p.k.ty.small)
+                            .color(p.faint())
+                    })),
+            );
+    }
     row()
         .key("version-row")
         .gap(2.0)
         .center_y()
         .child(version.key("version"))
-        .child(
-            row()
-                .key("build-badge")
-                .h(16.0)
-                .px(6.0)
-                .gap(4.0)
-                .center_y()
-                .radius(8.0)
-                .border(p.hair.max(0.5), c.border_muted)
-                .child(
-                    controls::status_dot(c.text_faint)
-                        .size(5.0, 5.0)
-                        .radius(2.5),
-                )
-                .child(
-                    text(badge)
-                        .key("label")
-                        .font(p.k.ty.small)
-                        .color(c.text_muted),
-                ),
-        )
+        .child(badge)
 }
 
 /// What kind of build this is, for the footer's badge. The scenes preview
@@ -402,9 +427,12 @@ pub(super) const FOOTER_LINE: f32 = 20.0;
 
 /// Test and local builds also name their commit: main moves past a release without
 /// changing the version.
-fn version_label() -> String {
+fn version_label(ui: &Ui) -> String {
     // Goldens render a fixed version: a local build's names its commit.
     let version = if cfg!(test) { "0.0.0" } else { crate::VERSION };
+    if ui.build_preview.unwrap_or_else(build_kind) == BuildKind::Local {
+        return tr_fill("Version {}", version);
+    }
     match option_env!("HEX_COMMIT") {
         Some(commit) => {
             let kind = if crate::app_paths::is_local_build() {
