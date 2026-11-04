@@ -513,7 +513,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
             Feature::MeetingSnapshots,
             &BOOK,
             tr("Meeting snapshots"),
-            tr("Save shared content from native Teams meetings on this Mac. Requires Screen Recording permission. Starts with the next recording."),
+            tr("Save shared content from native Teams meetings on this Mac. English Teams UI only. Requires Screen Recording permission. Starts with the next recording."),
         ));
     }
     if caps.meetings {

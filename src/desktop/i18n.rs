@@ -339,7 +339,7 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Hide images", ["Ukryj obrazy", "隐藏图片", "画像を隠す", "Bilder ausblenden", "Ocultar imágenes", "Сховати зображення"]),
     ("Some content may be missing because snapshot capture was paused or interrupted.", ["Niektórych treści może brakować, ponieważ zapisywanie migawek zostało wstrzymane lub przerwane.", "部分内容可能缺失，因为快照拍摄曾暂停或中断。", "スナップショットの撮影が一時停止または中断されたため、一部の内容が欠けている可能性があります。", "Einige Inhalte fehlen möglicherweise, weil die Aufnahme von Schnappschüssen pausiert oder unterbrochen wurde.", "Puede faltar contenido porque las capturas se pausaron o interrumpieron.", "Частина вмісту може бути відсутня, оскільки створення знімків було призупинено або перервано."]),
     ("Meeting snapshots", ["Migawki spotkań", "会议快照", "会議のスナップショット", "Meeting-Schnappschüsse", "Capturas de reuniones", "Знімки зустрічей"]),
-    ("Save shared content from native Teams meetings on this Mac. Requires Screen Recording permission. Starts with the next recording.", ["Zapisuj udostępnianą zawartość spotkań w aplikacji Teams na tym Macu. Wymaga dostępu do nagrywania ekranu. Od następnego nagrania.", "在此 Mac 上保存 Teams 原生应用会议中的共享内容。需要屏幕录制权限。从下次录制开始。", "このMacでTeamsアプリの会議の共有内容を保存します。画面収録の許可が必要です。次の録音から開始します。", "Geteilte Inhalte aus Meetings der Teams-App auf diesem Mac speichern. Erfordert die Berechtigung zur Bildschirmaufnahme. Ab der nächsten Aufnahme.", "Guarda el contenido compartido de reuniones de la app Teams en este Mac. Requiere permiso de grabación de pantalla. Empieza con la próxima grabación.", "Зберігати спільний вміст зустрічей у програмі Teams на цьому Mac. Потрібен дозвіл на запис екрана. Починаючи з наступного запису."]),
+    ("Save shared content from native Teams meetings on this Mac. English Teams UI only. Requires Screen Recording permission. Starts with the next recording.", ["Zapisuj udostępnianą zawartość spotkań w aplikacji Teams na tym Macu. Wymaga dostępu do nagrywania ekranu. Od następnego nagrania. Tylko angielski interfejs Teams.", "在此 Mac 上保存 Teams 原生应用会议中的共享内容。需要屏幕录制权限。从下次录制开始。 仅支持英文 Teams 界面。", "このMacでTeamsアプリの会議の共有内容を保存します。画面収録の許可が必要です。次の録音から開始します。 Teamsの英語UIのみ対応。", "Geteilte Inhalte aus Meetings der Teams-App auf diesem Mac speichern. Erfordert die Berechtigung zur Bildschirmaufnahme. Ab der nächsten Aufnahme. Nur mit englischer Teams-Oberfläche.", "Guarda el contenido compartido de reuniones de la app Teams en este Mac. Requiere permiso de grabación de pantalla. Empieza con la próxima grabación. Solo con la interfaz de Teams en inglés.", "Зберігати спільний вміст зустрічей у програмі Teams на цьому Mac. Потрібен дозвіл на запис екрана. Починаючи з наступного запису. Лише англійський інтерфейс Teams."]),
     ("Resume snapshots", ["Wznów migawki", "继续快照", "スナップショットを再開", "Schnappschüsse fortsetzen", "Reanudar capturas", "Відновити знімки"]),
     ("Pause snapshots", ["Wstrzymaj migawki", "暂停快照", "スナップショットを一時停止", "Schnappschüsse pausieren", "Pausar capturas", "Призупинити знімки"]),
     ("Allow Screen Recording", ["Zezwól na nagrywanie ekranu", "允许屏幕录制", "画面収録を許可", "Bildschirmaufnahme erlauben", "Permitir grabación de pantalla", "Дозволити запис екрана"]),
@@ -351,6 +351,7 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Previous images", ["Poprzednie obrazy", "上一页图片", "前の画像", "Vorherige Bilder", "Imágenes anteriores", "Попередні зображення"]),
     ("Next images", ["Następne obrazy", "下一页图片", "次の画像", "Nächste Bilder", "Imágenes siguientes", "Наступні зображення"]),
     ("Snapshots start with the next recording", ["Migawki od następnego nagrania", "快照从下次录制开始", "スナップショットは次の録音から開始", "Schnappschüsse ab der nächsten Aufnahme", "Las capturas empiezan con la próxima grabación", "Знімки почнуться з наступного запису"]),
+    ("Teams window changed; start a new recording for snapshots", ["Okno Teams zmieniło się; rozpocznij nowe nagranie, aby robić migawki", "Teams 窗口已改变；请开始新的录制以拍摄快照", "Teamsウィンドウが変わりました。スナップショットには新しい録音を開始してください", "Teams-Fenster geändert; für Schnappschüsse eine neue Aufnahme starten", "La ventana de Teams cambió; inicia una nueva grabación para tomar capturas", "Вікно Teams змінилося; почніть новий запис для знімків"]),
     ("Waiting for a Teams screen share", ["Oczekiwanie na udostępnienie ekranu w Teams", "等待 Teams 屏幕共享", "Teamsの画面共有を待っています", "Warten auf eine Teams-Bildschirmfreigabe", "Esperando una pantalla compartida en Teams", "Очікування спільного екрана Teams"]),
     ("Taking snapshots", ["Zapisywanie migawek", "正在拍摄快照", "スナップショットを撮影中", "Schnappschüsse werden aufgenommen", "Tomando capturas", "Створення знімків"]),
     ("Snapshots paused", ["Migawki wstrzymane", "快照已暂停", "スナップショットは一時停止中", "Schnappschüsse pausiert", "Capturas en pausa", "Знімки призупинено"]),
@@ -1697,6 +1698,7 @@ mod tests {
             Status::PermissionRequired,
             Status::LimitReached,
             Status::Failed,
+            Status::WindowChanged,
             Status::Complete,
         ] {
             assert!(

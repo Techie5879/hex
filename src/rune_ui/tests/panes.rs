@@ -2217,7 +2217,7 @@ fn meeting_snapshots_pause_and_permission_actions_follow_status() {
         .unwrap();
     meeting.snapshots.status = crate::meeting::snapshots::Status::PermissionRequired;
     refresh(&mut rt);
-    assert!(rt.find("snapshots-pause").is_none());
+    assert!(rt.find("snapshots-pause").is_some());
     assert!(rt.find("snapshots-permission").is_some());
 }
 

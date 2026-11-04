@@ -81,10 +81,7 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
     let controllable = supported
         && ui.settings.labs.meeting_snapshots
         && meeting.status.is_active()
-        && matches!(
-            snapshots.status,
-            Status::Waiting | Status::Capturing | Status::Paused
-        );
+        && snapshots.can_pause;
     if controllable {
         let paused = snapshots.status == Status::Paused;
         let id = meeting.id.clone();
@@ -355,6 +352,7 @@ pub(super) fn fixture(ui: &mut Ui) {
         .find(|meeting| meeting.id == "preview-live")
         .unwrap();
     meeting.snapshots.active = true;
+    meeting.snapshots.can_pause = true;
     meeting.snapshots.status = Status::Capturing;
     meeting.snapshots.has_gaps = true;
     meeting.title = "Teams design review".into();

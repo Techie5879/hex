@@ -303,7 +303,7 @@ private func image(_ window: SCWindow, _ state: TeamsState, _ deadline: Deadline
     config.width = max(1, Int((nativeWidth * scale).rounded(.down)))
     config.height = max(1, Int((nativeHeight * scale).rounded(.down)))
     config.preservesAspectRatio = true
-    config.scalesToFit = false
+    config.scalesToFit = true
     config.capturesAudio = false
     config.captureMicrophone = false
     config.showsCursor = false
@@ -335,7 +335,9 @@ private func fingerprint(_ state: TeamsState, _ windowID: CGWindowID) -> UInt64 
     number(UInt64(windowID))
     number(UInt64(state.presenter.utf8.count))
     for b in state.presenter.utf8 { byte(b) }
-    for r in [state.frame, state.stage] {
+    let relativeStage = state.stage.offsetBy(dx: -state.frame.minX, dy: -state.frame.minY)
+    let size = CGRect(origin: .zero, size: state.frame.size)
+    for r in [size, relativeStage] {
         for value in [r.minX, r.minY, r.width, r.height] { number(Double(value == 0 ? 0 : value).bitPattern) }
     }
     return hash
@@ -374,12 +376,16 @@ private func pixels(_ image: CGImage, _ state: TeamsState) throws -> (UnsafeMuta
     }
     context.setBlendMode(.copy)
     context.draw(stage, in: CGRect(x: 0, y: 0, width: width, height: height))
-    // Return conventional straight RGBA even if SCK supplies translucent pixels.
-    for i in stride(from: 0, to: width * height * 4, by: 4) {
-        let alpha = Int(buffer[i + 3])
-        if alpha == 0 { buffer[i] = 0; buffer[i + 1] = 0; buffer[i + 2] = 0 }
-        else if alpha < 255 {
-            for channel in 0..<3 { buffer[i + channel] = UInt8(min(255, (Int(buffer[i + channel]) * 255 + alpha / 2) / alpha)) }
+    // Opaque SCK output needs no alpha conversion. Translucent output still
+    // returns conventional straight RGBA for the Rust encoder.
+    let opaque = [CGImageAlphaInfo.none, .noneSkipFirst, .noneSkipLast].contains(stage.alphaInfo)
+    if !opaque {
+        for i in stride(from: 0, to: width * height * 4, by: 4) {
+            let alpha = Int(buffer[i + 3])
+            if alpha == 0 { buffer[i] = 0; buffer[i + 1] = 0; buffer[i + 2] = 0 }
+            else if alpha < 255 {
+                for channel in 0..<3 { buffer[i + channel] = UInt8(min(255, (Int(buffer[i + channel]) * 255 + alpha / 2) / alpha)) }
+            }
         }
     }
     return (buffer, width, height)
@@ -404,7 +410,7 @@ public func hexTeamsSnapshotCapture(_ output: UnsafeMutablePointer<HexTeamsSnaps
             guard windows.count <= 1 else { throw SnapshotStatus.ambiguous }
             guard let window = windows.first else { throw SnapshotStatus.captureFailure }
             let captured = try image(window, before, deadline)
-            guard try state().same(as: before) else { throw SnapshotStatus.captureFailure }
+            // The final state check below brackets capture and conversion.
             let after = try content(deadline).windows.filter { matches($0, before) }
             guard after.count == 1, after[0].windowID == window.windowID else { throw SnapshotStatus.captureFailure }
             let (rgba, width, height) = try pixels(captured, before)

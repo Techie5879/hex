@@ -517,27 +517,29 @@ pub fn record(
             take_updates(&mut manifest);
             thread::sleep(Duration::from_millis(100));
         }
+        if let Some(snapshots) = &snapshots {
+            snapshots.request_stop();
+        }
+        drop(flush_registration);
+        drop(system_capture);
+        drop(microphone_capture);
+        drop(sender);
+        drop(sleep_prevention);
+        manifest.ended_at_ms = Some(now_ms());
+        manifest.duration_ms = Some(started.elapsed().as_millis() as u64);
         take_updates(&mut manifest);
         if let Some(chapters) = live_chapters.as_ref().and_then(|live| live.finish()) {
             record_chapters(&meeting_dir, &mut manifest, chapters, updates.as_ref());
         }
         drop(titles);
         drop(live_chapters);
-        drop(snapshots);
         keep_rename(&meeting_dir, &mut manifest);
-        drop(flush_registration);
-        drop(system_capture);
-        drop(microphone_capture);
-        drop(sender);
-        drop(sleep_prevention);
-
-        manifest.ended_at_ms = Some(now_ms());
-        manifest.duration_ms = Some(started.elapsed().as_millis() as u64);
         let mut stats = join_audio_writer(writer)?;
         stats.system.dropped_packets = system_drops.load(Ordering::Relaxed);
         stats.microphone.dropped_packets = microphone_drops.load(Ordering::Relaxed);
         manifest.system = stats.system;
         manifest.microphone = stats.microphone;
+        drop(snapshots);
         if crate::desktop::process_exit::quitting() && has_recorded_audio(&manifest) {
             // Final transcription would outlast quitting's drain.
             drop(rolling.finish());

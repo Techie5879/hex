@@ -299,7 +299,7 @@ fn compile_swift_bridge(name: &str, module: &str, without_autolink: &[&str]) {
     if name == "meeting_snapshots" {
         let header = manifest_dir.join("native/teams_snapshots.h");
         println!("cargo:rerun-if-changed={}", header.display());
-        swift.arg("-import-objc-header").arg(header);
+        swift.arg("-O").arg("-import-objc-header").arg(header);
     }
     for framework in without_autolink {
         swift.args([

@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub(super) const MAX_IMAGES: usize = 400;
+const MAX_DELETED: usize = MAX_IMAGES * 2;
 const MAX_BYTES: u64 = 200 * 1024 * 1024;
 const MAX_INDEX: u64 = 1024 * 1024;
 
@@ -210,6 +211,9 @@ impl Store {
         let mut next = self.index.clone();
         next.entries.retain(|entry| entry.id != id);
         if !next.deleted_assets.contains(&entry.asset) {
+            if next.deleted_assets.len() >= MAX_DELETED {
+                return Err(eyre!("snapshot deletion limit"));
+            }
             next.deleted_assets.push(entry.asset.clone());
         }
         self.persist(&next)?;
@@ -248,7 +252,7 @@ impl Store {
         let mut ids = HashSet::new();
         if index.version != 1
             || index.entries.len() > MAX_IMAGES
-            || index.deleted_assets.len() > MAX_IMAGES
+            || index.deleted_assets.len() > MAX_DELETED
             || index
                 .deleted_assets
                 .iter()
@@ -312,6 +316,7 @@ fn regular(path: &Path) -> bool {
 fn project(directory: &Path, index: &Index, status: Status) -> View {
     View {
         active: false,
+        can_pause: false,
         status,
         has_gaps: index.has_gaps,
         images: index
@@ -385,6 +390,23 @@ mod tests {
             binding: 1,
         }
     }
+    #[test]
+    fn deleting_after_the_admission_limit_keeps_remaining_images_readable() {
+        let p = directory();
+        let mut store = Store::new(&p).unwrap();
+        let mut other = frame();
+        store.add(&other, 1, 2).unwrap();
+        other.pixels[0] = 50;
+        store.add(&other, 3, 4).unwrap();
+        store.index.deleted_assets = (0..MAX_IMAGES).map(|n| format!("{n:064x}")).collect();
+        store.persist(&store.index).unwrap();
+        store.delete(1).unwrap();
+        let restored = Store::load(&p).unwrap();
+        assert_eq!(restored.index.deleted_assets.len(), MAX_IMAGES + 1);
+        assert_eq!(restored.view(Status::Complete).images.len(), 1);
+        fs::remove_dir_all(p).unwrap();
+    }
+
     #[test]
     fn exact_revisits_share_files_but_keep_separate_timestamps() {
         let p = directory();

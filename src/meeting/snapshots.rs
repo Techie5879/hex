@@ -13,6 +13,7 @@ pub enum Status {
     PermissionRequired,
     LimitReached,
     Failed,
+    WindowChanged,
     Complete,
 }
 
@@ -26,6 +27,7 @@ impl Status {
             Self::PermissionRequired => "Allow Screen Recording to take snapshots",
             Self::LimitReached => "Snapshot storage limit reached",
             Self::Failed => "Snapshots unavailable",
+            Self::WindowChanged => "Teams window changed; start a new recording for snapshots",
             Self::Complete => "Saved snapshots",
         }
     }
@@ -45,6 +47,7 @@ pub struct Snapshot {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct View {
     pub active: bool,
+    pub can_pause: bool,
     pub status: Status,
     pub images: Vec<Snapshot>,
     pub has_gaps: bool,
@@ -89,7 +92,7 @@ impl SessionState {
 
     fn rejected_binding(&mut self) {
         self.store.mark_gap();
-        self.status = Status::Waiting;
+        self.status = Status::WindowChanged;
     }
 }
 
@@ -121,6 +124,7 @@ pub fn read(id: &str) -> View {
         let state = lock(&state);
         let mut view = state.store.view(state.status);
         view.active = true;
+        view.can_pause = !state.disabled;
         return view;
     }
     let Some(directory) = directory(id) else {
@@ -131,6 +135,7 @@ pub fn read(id: &str) -> View {
         Err(_) if !directory.join("snapshots").exists() => View::default(),
         Err(_) => View {
             active: false,
+            can_pause: false,
             status: Status::Failed,
             images: Vec::new(),
             has_gaps: true,
@@ -205,6 +210,12 @@ pub(super) struct Session {
     worker: Option<JoinHandle<()>>,
 }
 impl Session {
+    /// Signal immediately at the audio stop boundary; joining is deferred
+    /// until the WAV writer has drained.
+    pub(super) fn request_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+    }
+
     /// The gate is checked here and again before each native capture and write.
     /// Enabling it part-way through a recording takes effect on the next one.
     pub(super) fn start(
@@ -274,10 +285,18 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.request_stop();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            // Quit can begin while an ordinary Stop is waiting here.
+            while !worker.is_finished() && !crate::desktop::process_exit::quitting() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if worker.is_finished() {
+                let _ = worker.join();
+            }
         }
+        // During process shutdown the owned Arc keeps an in-flight native
+        // call safe; it cannot publish after stop, and must not delay WAV recovery.
         lock(sessions()).remove(&self.id);
     }
 }
@@ -414,6 +433,23 @@ fn wait(stop: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stopping_signals_a_busy_worker_before_joining_it() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (release, blocked) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || blocked.recv().unwrap());
+        let session = Session {
+            id: "synthetic-stop-test".into(),
+            stop: stop.clone(),
+            worker: Some(worker),
+        };
+        session.request_stop();
+        assert!(stop.load(Ordering::Acquire));
+        assert!(!session.worker.as_ref().unwrap().is_finished());
+        release.send(()).unwrap();
+        drop(session);
+    }
+
     #[test]
     fn a_disabled_session_never_publishes_a_pending_frame_after_reenable() {
         let directory =
