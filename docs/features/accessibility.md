@@ -65,6 +65,9 @@ focus action, or a control role, has a non-empty name),
 `the_pane_title_is_its_heading`. They run on every OS in CI. They read the tree
 Rune would send; they don't prove what a screen reader says.
 
+The flat Labs sidebar target is named Labs. A locked Voice Filter switch keeps
+its feature name while disabled. The scene-wide naming check covers both.
+
 ## HUD and capsules
 
 ```ts

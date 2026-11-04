@@ -1868,6 +1868,8 @@ fn a_labs_link_to_an_unknown_name_opens_labs_without_a_pulse() {
 fn labs_run_setup_again_opens_the_first_run() {
     let mut rt = runtime("mac-labs", true, (980.0, 2000.0));
     assert!(rt.state.first_run.is_none());
+    rt.update(|_, tx| tx.scroll_center("restart-onboarding"));
+    settle(&mut rt);
     tap(&mut rt, "restart-onboarding");
     assert!(rt.state.error.is_none(), "{:?}", rt.state.error);
     assert!(rt.state.first_run.is_some(), "the first run opens at once");
@@ -1878,6 +1880,8 @@ fn run_setup_again_opens_the_first_run_on_linux_and_windows() {
     for scene in ["portal", "windows-settings"] {
         let mut rt = runtime(scene, true, (980.0, 2000.0));
         tap(&mut rt, "nav-labs");
+        rt.update(|_, tx| tx.scroll_center("restart-onboarding"));
+        settle(&mut rt);
         tap(&mut rt, "restart-onboarding");
         assert!(rt.state.error.is_none(), "{scene}: {:?}", rt.state.error);
         assert!(rt.state.first_run.is_some(), "{scene}: the first run opens");

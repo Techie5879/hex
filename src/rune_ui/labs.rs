@@ -68,6 +68,7 @@ fn nav_row(p: Paint, key: &'static str, icon: &'static Icon, label: &'static str
     }
     row()
         .key(format!("{key}-slot"))
+        .label(label)
         .pt(NAV_ROW_GAP / 2.0)
         .pb(NAV_ROW_GAP / 2.0)
         .child(item.grow(1.0))
@@ -664,6 +665,7 @@ fn feature_row(p: Paint, row: Row, flashing: bool) -> CardRow {
             .disabled(true)
             .build(p.k)
             .key("switch")
+            .label(row.title)
             .focusable(false)
     } else {
         row_switch(p, row.on)
