@@ -127,6 +127,7 @@ enum LiveCopy {
 /// The recording's in-call transcript as the ticker last read it.
 #[derive(Default)]
 struct Live {
+    snapshots: Option<meeting::snapshots::Status>,
     entries: Vec<TranscriptEntry>,
     /// Speaker turns not yet copied or pasted.
     pending: usize,
@@ -707,6 +708,13 @@ impl MeetingCapsules {
             let mut reader = meeting::TranscriptReader::default();
             while ticking.lock().unwrap().as_deref() == Some(ticker_id.as_str()) {
                 std::thread::sleep(Duration::from_secs(1));
+                let snapshot_status = meeting::snapshots::active_status(&ticker_id);
+                let snapshot_id = ticker_id.clone();
+                recording.update(move |capsule, _| {
+                    if matches!(&capsule.kind, Some(Kind::Recording { id, .. }) if *id == snapshot_id) {
+                        capsule.live.snapshots = snapshot_status;
+                    }
+                });
                 let entries = match reader.read(&ticker_id) {
                     Ok(entries) => entries,
                     Err(error) => {
@@ -1088,6 +1096,12 @@ fn recording(p: Paint, capsule: &Capsule, title: &str, started: Instant, automat
     } else {
         elapsed
     };
+    let subtitle = match live.snapshots {
+        Some(status) if status != meeting::snapshots::Status::Off => {
+            format!("{} · {subtitle}", tr(status.label()))
+        }
+        _ => subtitle,
+    };
     let copied_new = live.copied(LiveCopy::New);
     let copy_new = Button::new(if live.copying {
         tr("Transcribing…").to_owned()
@@ -1422,6 +1436,25 @@ mod tests {
         let earlier = Instant::now() - AUTOMATIC_LABEL - Duration::from_secs(1);
         let (rt, _, _) = runtime(recording(earlier), false, true, RECORDING);
         assert!(!texts(&rt).iter().any(|text| text.contains("automatically")));
+    }
+
+    #[test]
+    fn the_recording_indicator_names_active_snapshot_capture() {
+        let kind = Kind::Recording {
+            id: "snapshot-fixture".into(),
+            title: "Teams test".into(),
+            started: Instant::now(),
+            automatic: false,
+        };
+        let (mut rt, _, _) = runtime(kind, true, true, RECORDING);
+        rt.state.live.snapshots = Some(meeting::snapshots::Status::Capturing);
+        rt.invalidate();
+        rt.frame(0.0);
+        assert!(
+            texts(&rt)
+                .iter()
+                .any(|text| text.contains("Taking snapshots"))
+        );
     }
 
     #[test]

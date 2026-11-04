@@ -1401,3 +1401,57 @@ Granola import: see [granola-import.md](../plans/granola-import.md).
   tuned on that transcript; the model's same-topic flag is unreliable, and a
   short detour can still become its own chapter. The boundary pass runs only
   when meeting notes run, after publication.
+
+
+## Local Teams snapshots
+
+```ts
+Labs › Meeting snapshots                         // meetings.snapshots
+├── Off by default; macOS native Teams only; initially English Teams UI
+├── On before recording starts -> watch for a verified shared-content region
+│   ├── Screen Recording permission missing -> explicit Allow Screen Recording button
+│   ├── Share verified -> retain selected snapshots in the meeting folder
+│   │   └── Image is the verified region, including any black bars inside it
+│   ├── No verified share -> wait; never capture the whole desktop as a fallback
+│   └── Bound Teams window changes -> record a gap; start a new recording to bind it again
+├── On during recording -> wait until the next recording
+├── Pause / resume in the meeting detail -> control new snapshots, including during permission/errors
+├── Recording capsule -> the same live snapshot status, refreshed by its background ticker
+├── Off -> stop new snapshot writes; keep saved images browsable
+└── Meeting detail -> status, thumbnails, timestamps, Show image, Delete image
+    ├── A saved gap note marks pauses, interruptions, and capture limits
+    └── Images collapsed until Show images; six per page, decoded on the image-cache worker
+```
+
+The selector keeps recent comparisons across interruption and deletion, so
+resuming does not make an unchanged slide new. Two recent visual states suppress
+caret alternation. Pixel comparisons use brightness and substantial color changes
+to tolerate video-decoding chroma noise around text; low-contrast digit edits
+remain eligible. Settled large changes require 500 ms; small edits require
+1500 ms. If content never settles, it saves a sparse representative after two
+seconds, then no more than once per 30 seconds, and records a coverage gap.
+These thresholds are initial policy, not measured slide-recall guarantees.
+Comparison history advances only after storage succeeds, keeping failed writes
+retryable. PNG encoding and the meeting-list scan run off the UI thread.
+Empty sections are hidden unless the recording has an active snapshot session.
+Stop signals screenshot cancellation before closing the audio sources; WAV
+writers drain before a normal screenshot-worker join. Process shutdown does
+not wait for a native screenshot call that cannot be cancelled. Window moves
+do not change the content identity; resizing or changing the stage does.
+
+Images stay on this computer. They are not sent to OpenCode, meeting summaries,
+or an external service; the meeting-mirror script excludes their folder.
+They follow the meeting's retention: moving a meeting to Trash moves its
+images too. They remain in Trash until it is emptied. The toggle is `labs.meeting_snapshots`, also exposed as
+`hex labs on|off meeting-snapshots` on macOS. Other operating systems retain the
+saved setting without executing capture.
+
+Sources: `meeting/snapshots.rs`, `meeting/snapshots/`,
+`rune_ui/meeting_snapshots.rs`, `rune_ui/meetings_host.rs`, `labs.rs`.
+Checks: Labs bit isolation and defaults, snapshot-store checks, translated status
+coverage, the `meetings-snapshots` synthetic scene, and pane tests for pause,
+permission, pagination, deletion, browsing while disabled, retryable image writes,
+interruption history, blinking-caret suppression, and bounded motion sampling. The scene uses
+artificial diagram pixels. These checks do not prove capture of a live Teams
+share, macOS permission behavior, or native end-to-end capture. No live meeting
+or private screenshot is used in repository fixtures.

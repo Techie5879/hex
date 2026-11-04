@@ -109,10 +109,11 @@ pub enum Feature {
     MeetingFinishedEvent,
     GnomeMeetingCapsules,
     MeetingPlatformIcons,
+    MeetingSnapshots,
 }
 
 impl Feature {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -163,6 +164,7 @@ impl Feature {
         Self::MeetingFinishedEvent,
         Self::GnomeMeetingCapsules,
         Self::MeetingPlatformIcons,
+        Self::MeetingSnapshots,
     ];
 
     /// The features this OS and build have.
@@ -235,6 +237,7 @@ impl Feature {
             | Self::MeetingFinishedEvent
             | Self::GnomeMeetingCapsules
             | Self::MeetingPlatformIcons
+            | Self::MeetingSnapshots
             | Self::NotchIndicator => Audience::Everyone,
         }
     }
@@ -266,7 +269,8 @@ impl Feature {
             | Self::LiveChapters
             | Self::SubtitleExport
             | Self::StopWhenCallEnds
-            | Self::MovableMeetingCapsules => cfg!(target_os = "macos"),
+            | Self::MovableMeetingCapsules
+            | Self::MeetingSnapshots => cfg!(target_os = "macos"),
             Self::VoiceFilter => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::TerminalPaste | Self::ShareShortcut => cfg!(target_os = "windows"),
             Self::LocalPolish | Self::SaveDictationAudio | Self::ProfileSync => {
@@ -368,6 +372,7 @@ impl Feature {
             Self::MeetingFinishedEvent => "meeting-finished-event",
             Self::GnomeMeetingCapsules => "gnome-meeting-capsules",
             Self::MeetingPlatformIcons => "meeting-platform-icons",
+            Self::MeetingSnapshots => "meeting-snapshots",
         }
     }
 
@@ -424,6 +429,7 @@ impl Feature {
             Self::MeetingFinishedEvent => "labs.meeting_finished_event",
             Self::GnomeMeetingCapsules => "labs.gnome_meeting_capsules",
             Self::MeetingPlatformIcons => "labs.meeting_platform_icons",
+            Self::MeetingSnapshots => "labs.meeting_snapshots",
         }
     }
 
@@ -559,6 +565,9 @@ impl Feature {
             Self::GnomeMeetingCapsules => {
                 "Show the meeting capsules (recording offer, recording indicator) floating over your call on GNOME Wayland, through XWayland while XWayland is running"
             }
+            Self::MeetingSnapshots => {
+                "Save local snapshots of shared content during native Teams meetings, starting with the next recording (macOS)"
+            }
             Self::MeetingPlatformIcons => {
                 "Show a small icon for the app or website each meeting was recorded from, beside its name in Meetings"
             }
@@ -622,6 +631,7 @@ impl Feature {
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event,
             Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules,
             Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons,
+            Self::MeetingSnapshots => settings.labs.meeting_snapshots,
         }
     }
 
@@ -680,6 +690,7 @@ impl Feature {
             &mut labs.meeting_finished_event,
             &mut labs.gnome_meeting_capsules,
             &mut labs.meeting_platform_icons,
+            &mut labs.meeting_snapshots,
         ]
     }
 
@@ -738,6 +749,7 @@ impl Feature {
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event = on,
             Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules = on,
             Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons = on,
+            Self::MeetingSnapshots => settings.labs.meeting_snapshots = on,
             // Off, no shortcut keeps a key only the feature allows.
             Self::StandaloneSpecialKeys => {
                 settings.labs.standalone_special_keys = on;
@@ -788,6 +800,12 @@ const MINUTES_MASK: u64 = (1 << 11) - 1;
 const LOCAL_POLISH: u64 = 1 << 30;
 const PROVIDER_FALLBACK: u64 = 1 << 31;
 const SAVE_DICTATION_AUDIO: u64 = 1 << 32;
+const MEETING_SNAPSHOTS: u64 = 1 << 33;
+
+/// Capture is supported only by native macOS Teams. Saved settings travel across OSes.
+pub(crate) fn meeting_snapshots() -> bool {
+    cfg!(target_os = "macos") && on(MEETING_SNAPSHOTS)
+}
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 /// Whether profile sync is enabled for the desktop app and its client commands.
@@ -1030,6 +1048,9 @@ fn unload_idle_from(state: u64) -> Option<std::time::Duration> {
 /// Records the switches the loaded or saved settings hold.
 pub(crate) fn apply(settings: &LabsSettings) {
     STATE.store(encode(settings), Ordering::Release);
+    if !settings.meeting_snapshots {
+        crate::meeting::snapshots::disable_all();
+    }
 }
 
 fn encode(settings: &LabsSettings) -> u64 {
@@ -1054,6 +1075,11 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             Feature::ProviderFallback,
             settings.provider_fallback,
             PROVIDER_FALLBACK,
+        ),
+        (
+            Feature::MeetingSnapshots,
+            settings.meeting_snapshots,
+            MEETING_SNAPSHOTS,
         ),
         (Feature::LiveText, settings.live_text, LIVE_TEXT),
         (Feature::LiveChapters, settings.live_chapters, LIVE_CHAPTERS),
@@ -1328,6 +1354,26 @@ pub fn run_retired_experiments() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn meeting_snapshots_are_off_by_default_and_do_not_overlap_other_bits() {
+        let mut labs = LabsSettings::default();
+        assert_eq!(encode_where(&labs, |_| true) & MEETING_SNAPSHOTS, 0);
+        labs.meeting_snapshots = true;
+        labs.unload_idle_minutes = 1440;
+        let bits = encode_where(&labs, |_| true);
+        assert_eq!(bits & MEETING_SNAPSHOTS, MEETING_SNAPSHOTS);
+        assert_eq!(MEETING_SNAPSHOTS & (MINUTES_MASK << MINUTES_SHIFT), 0);
+        assert_eq!(
+            bits & (SAVE_DICTATION_AUDIO | PROVIDER_FALLBACK | LOCAL_POLISH),
+            0
+        );
+        assert_eq!((bits >> MINUTES_SHIFT) & MINUTES_MASK, 1440);
+        assert_eq!(
+            Feature::MeetingSnapshots.on_this_os(),
+            cfg!(target_os = "macos")
+        );
+    }
+
     #[test]
     fn fork_flags_do_not_overlap_upstream_flags_or_idle_minutes() {
         for minutes in [1, 5, 15, 60, 1440] {

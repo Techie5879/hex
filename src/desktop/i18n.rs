@@ -335,6 +335,30 @@ fn tables() -> &'static [HashMap<&'static str, &'static str>; 6] {
 /// Columns: Polish, Chinese (Simplified), Japanese, German, Spanish, Ukrainian.
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, [&str; 6])] = &[
+    ("Show images", ["Pokaż obrazy", "显示图片", "画像を表示", "Bilder anzeigen", "Mostrar imágenes", "Показати зображення"]),
+    ("Hide images", ["Ukryj obrazy", "隐藏图片", "画像を隠す", "Bilder ausblenden", "Ocultar imágenes", "Сховати зображення"]),
+    ("Some content may be missing because snapshot capture was paused or interrupted.", ["Niektórych treści może brakować, ponieważ zapisywanie migawek zostało wstrzymane lub przerwane.", "部分内容可能缺失，因为快照拍摄曾暂停或中断。", "スナップショットの撮影が一時停止または中断されたため、一部の内容が欠けている可能性があります。", "Einige Inhalte fehlen möglicherweise, weil die Aufnahme von Schnappschüssen pausiert oder unterbrochen wurde.", "Puede faltar contenido porque las capturas se pausaron o interrumpieron.", "Частина вмісту може бути відсутня, оскільки створення знімків було призупинено або перервано."]),
+    ("Meeting snapshots", ["Migawki spotkań", "会议快照", "会議のスナップショット", "Meeting-Schnappschüsse", "Capturas de reuniones", "Знімки зустрічей"]),
+    ("Save shared content from native Teams meetings on this Mac. English Teams UI only. Requires Screen Recording permission. Starts with the next recording.", ["Zapisuj udostępnianą zawartość spotkań w aplikacji Teams na tym Macu. Wymaga dostępu do nagrywania ekranu. Od następnego nagrania. Tylko angielski interfejs Teams.", "在此 Mac 上保存 Teams 原生应用会议中的共享内容。需要屏幕录制权限。从下次录制开始。 仅支持英文 Teams 界面。", "このMacでTeamsアプリの会議の共有内容を保存します。画面収録の許可が必要です。次の録音から開始します。 Teamsの英語UIのみ対応。", "Geteilte Inhalte aus Meetings der Teams-App auf diesem Mac speichern. Erfordert die Berechtigung zur Bildschirmaufnahme. Ab der nächsten Aufnahme. Nur mit englischer Teams-Oberfläche.", "Guarda el contenido compartido de reuniones de la app Teams en este Mac. Requiere permiso de grabación de pantalla. Empieza con la próxima grabación. Solo con la interfaz de Teams en inglés.", "Зберігати спільний вміст зустрічей у програмі Teams на цьому Mac. Потрібен дозвіл на запис екрана. Починаючи з наступного запису. Лише англійський інтерфейс Teams."]),
+    ("Resume snapshots", ["Wznów migawki", "继续快照", "スナップショットを再開", "Schnappschüsse fortsetzen", "Reanudar capturas", "Відновити знімки"]),
+    ("Pause snapshots", ["Wstrzymaj migawki", "暂停快照", "スナップショットを一時停止", "Schnappschüsse pausieren", "Pausar capturas", "Призупинити знімки"]),
+    ("Allow Screen Recording", ["Zezwól na nagrywanie ekranu", "允许屏幕录制", "画面収録を許可", "Bildschirmaufnahme erlauben", "Permitir grabación de pantalla", "Дозволити запис екрана"]),
+    ("Images stay on this computer and follow this meeting's retention. They are not sent to OpenCode.", ["Obrazy pozostają na tym komputerze i są przechowywane tak długo jak spotkanie. Nie są wysyłane do OpenCode.", "图片保留在此电脑上，遵循此会议的保留期限，不会发送到 OpenCode。", "画像はこのコンピュータに保存され、この会議の保存期間に従います。OpenCodeには送信されません。", "Bilder bleiben auf diesem Computer und werden so lange wie dieses Meeting aufbewahrt. Sie werden nicht an OpenCode gesendet.", "Las imágenes permanecen en este ordenador y siguen la retención de esta reunión. No se envían a OpenCode.", "Зображення залишаються на цьому комп’ютері та зберігаються протягом терміну зберігання зустрічі. Вони не надсилаються до OpenCode."]),
+    ("Snapshot could not be updated.", ["Nie udało się zaktualizować migawki.", "无法更新快照。", "スナップショットを更新できませんでした。", "Schnappschuss konnte nicht aktualisiert werden.", "No se pudo actualizar la captura.", "Не вдалося оновити знімок."]),
+    ("Preview unavailable", ["Podgląd niedostępny", "预览不可用", "プレビューを表示できません", "Vorschau nicht verfügbar", "Vista previa no disponible", "Перегляд недоступний"]),
+    ("Show image at {}", ["Pokaż obraz z {}", "显示 {} 的图片", "{}の画像を表示", "Bild bei {} anzeigen", "Mostrar imagen en {}", "Показати зображення на {}"]),
+    ("Delete image at {}", ["Usuń obraz z {}", "删除 {} 的图片", "{}の画像を削除", "Bild bei {} löschen", "Eliminar imagen en {}", "Видалити зображення на {}"]),
+    ("Previous images", ["Poprzednie obrazy", "上一页图片", "前の画像", "Vorherige Bilder", "Imágenes anteriores", "Попередні зображення"]),
+    ("Next images", ["Następne obrazy", "下一页图片", "次の画像", "Nächste Bilder", "Imágenes siguientes", "Наступні зображення"]),
+    ("Snapshots start with the next recording", ["Migawki od następnego nagrania", "快照从下次录制开始", "スナップショットは次の録音から開始", "Schnappschüsse ab der nächsten Aufnahme", "Las capturas empiezan con la próxima grabación", "Знімки почнуться з наступного запису"]),
+    ("Teams window changed; start a new recording for snapshots", ["Okno Teams zmieniło się; rozpocznij nowe nagranie, aby robić migawki", "Teams 窗口已改变；请开始新的录制以拍摄快照", "Teamsウィンドウが変わりました。スナップショットには新しい録音を開始してください", "Teams-Fenster geändert; für Schnappschüsse eine neue Aufnahme starten", "La ventana de Teams cambió; inicia una nueva grabación para tomar capturas", "Вікно Teams змінилося; почніть новий запис для знімків"]),
+    ("Waiting for a Teams screen share", ["Oczekiwanie na udostępnienie ekranu w Teams", "等待 Teams 屏幕共享", "Teamsの画面共有を待っています", "Warten auf eine Teams-Bildschirmfreigabe", "Esperando una pantalla compartida en Teams", "Очікування спільного екрана Teams"]),
+    ("Taking snapshots", ["Zapisywanie migawek", "正在拍摄快照", "スナップショットを撮影中", "Schnappschüsse werden aufgenommen", "Tomando capturas", "Створення знімків"]),
+    ("Snapshots paused", ["Migawki wstrzymane", "快照已暂停", "スナップショットは一時停止中", "Schnappschüsse pausiert", "Capturas en pausa", "Знімки призупинено"]),
+    ("Allow Screen Recording to take snapshots", ["Zezwól na nagrywanie ekranu, aby zapisywać migawki", "允许屏幕录制以拍摄快照", "スナップショットを撮影するには画面収録を許可してください", "Bildschirmaufnahme erlauben, um Schnappschüsse zu erstellen", "Permite grabar la pantalla para tomar capturas", "Дозвольте запис екрана для створення знімків"]),
+    ("Snapshot storage limit reached", ["Osiągnięto limit miejsca na migawki", "已达到快照存储上限", "スナップショットの保存上限に達しました", "Speicherlimit für Schnappschüsse erreicht", "Se alcanzó el límite de almacenamiento de capturas", "Досягнуто ліміту сховища знімків"]),
+    ("Snapshots unavailable", ["Migawki niedostępne", "快照不可用", "スナップショットを利用できません", "Schnappschüsse nicht verfügbar", "Capturas no disponibles", "Знімки недоступні"]),
+    ("Saved snapshots", ["Zapisane migawki", "已保存的快照", "保存済みスナップショット", "Gespeicherte Schnappschüsse", "Capturas guardadas", "Збережені знімки"]),
     ("Provider quota fallback", ["Dostawca zapasowy po wyczerpaniu limitu", "提供商配额回退", "プロバイダーの利用上限時の切り替え", "Ersatzanbieter bei Nutzungslimit", "Proveedor alternativo al agotar la cuota", "Резервний провайдер після вичерпання ліміту"]),
     ("Try the configured provider when rewriting hits a usage limit. Timeouts keep the previous text.", ["Po osiągnięciu limitu użycia spróbuj skonfigurowanego dostawcy. Przekroczenie czasu zachowuje poprzedni tekst.", "改写达到使用上限时尝试配置的提供商。超时则保留之前的文本。", "書き換えが利用上限に達したら設定済みのプロバイダーを試します。タイムアウト時は直前のテキストを保持します。", "Bei Erreichen des Nutzungslimits den konfigurierten Anbieter versuchen. Bei Zeitüberschreitung bleibt der vorherige Text erhalten.", "Prueba el proveedor configurado al alcanzar el límite de uso. Si se agota el tiempo, conserva el texto anterior.", "Після досягнення ліміту використання спробувати налаштованого провайдера. У разі тайм-ауту зберігається попередній текст."]),
     ("Hex picks a fast model", ["Hex wybiera szybki model", "由 Hex 选择快速模型", "Hex が高速なモデルを選ぶ", "Hex wählt ein schnelles Modell", "Hex elige un modelo rápido", "Hex вибирає швидку модель"]),
@@ -1574,6 +1598,7 @@ mod tests {
         include_str!("../rune_ui/macos_host.rs"),
         include_str!("../rune_ui/meeting_capsules.rs"),
         include_str!("../rune_ui/meetings.rs"),
+        include_str!("../rune_ui/meeting_snapshots.rs"),
         include_str!("../rune_ui/models.rs"),
         include_str!("../rune_ui/found.rs"),
         include_str!("../rune_ui/found_choice.rs"),
@@ -1659,6 +1684,33 @@ mod tests {
             }
         }
         assert!(checked > 300, "only {checked} translated strings found");
+    }
+
+    #[test]
+    fn every_meeting_snapshot_status_has_every_language() {
+        use crate::meeting::snapshots::Status;
+        let table: std::collections::HashMap<_, _> = TRANSLATIONS.iter().copied().collect();
+        for status in [
+            Status::Off,
+            Status::Waiting,
+            Status::Capturing,
+            Status::Paused,
+            Status::PermissionRequired,
+            Status::LimitReached,
+            Status::Failed,
+            Status::WindowChanged,
+            Status::Complete,
+        ] {
+            assert!(
+                table
+                    .get(status.label())
+                    .is_some_and(|translations| translations
+                        .iter()
+                        .all(|translation| !translation.is_empty())),
+                "{}",
+                status.label()
+            );
+        }
     }
 
     /// The sound picker translates each set's name and character and each

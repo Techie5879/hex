@@ -71,6 +71,9 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        final meeting titles and summaries (and Regenerate summary) read the vocabulary ahead of the transcript (#1154)
 ├── Meeting finished event no labs.meeting_finished_event (every OS with Meetings)
 │                                        the local API's GET /meetings/events sends each finished meeting's id once its final transcript is written (#964)
+├── Meeting snapshots no labs.meeting_snapshots (macOS)
+│                                        local snapshots of shared content in native Teams meetings, starting with the next recording; Screen Recording permission required
+│                                        pause/resume, browse, and delete images in the meeting detail; see meetings.md
 ├── Meeting platform icons no labs.meeting_platform_icons (every OS with Meetings)
 │                                        each recording in the Meetings list shows its call service's icon (Zoom, Google Meet, Teams, Slack, Webex)
 │                                        before its title, a neutral call icon otherwise (#1290)

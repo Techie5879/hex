@@ -1581,6 +1581,7 @@ fn platform_goldens() {
     let _goldens = Goldens::collect();
     for dark in [true, false] {
         check_golden("meetings-calendar", dark, (980.0, 1800.0));
+        check_golden("meetings-snapshots", dark, (980.0, 1800.0));
         check_golden("meetings-summary-model", dark, (980.0, 1800.0));
         check_golden("meetings-summary-model-not-running", dark, (980.0, 1800.0));
         for scene in [
@@ -2119,4 +2120,134 @@ fn a_long_transcript_scrolls_by_dragging_its_scroll_bar() {
         "dragging the thumb scrolled the transcript"
     );
     assert!(at(&rt, "meeting-transcript-area/scroll-bar/thumb")[1] > thumb[1] + 59.0);
+}
+
+#[test]
+fn meeting_snapshots_page_and_keep_retained_images_when_disabled() {
+    let mut rt = runtime("meetings-snapshots", true, (980.0, 1800.0));
+    // The golden has three images; only this pagination test needs a longer list.
+    let meeting = rt
+        .state
+        .meetings
+        .meetings
+        .iter_mut()
+        .find(|meeting| meeting.id == "preview-live")
+        .unwrap();
+    let template = meeting.snapshots.images[0].clone();
+    for id in 3..9 {
+        let mut image = template.clone();
+        image.id = id;
+        image.at_ms = id * 30_000;
+        image.until_ms = (id + 1) * 30_000;
+        image.path = std::path::PathBuf::from(format!("fixture-snapshot-{id}.png"));
+        image.thumbnail = image.path.clone();
+        meeting.snapshots.images.push(image);
+    }
+    super::super::meeting_snapshots::fixture_page(&mut rt.state);
+    refresh(&mut rt);
+    assert!(rt.find("snapshot-0-open").is_some());
+    assert!(rt.find("snapshot-5-open").is_some());
+    assert!(rt.find("snapshot-6-open").is_none(), "six images per page");
+    assert!(rt.accessibility_action(
+        "snapshots-toggle-images",
+        rune::accesskit::Action::Click,
+        None
+    ));
+    settle(&mut rt);
+    assert!(
+        rt.find("snapshot-0-open").is_none(),
+        "collapsed images are not drawn"
+    );
+    assert!(
+        rt.find("snapshots-status").is_some(),
+        "status remains visible"
+    );
+    assert!(
+        rt.find("snapshots-pause").is_some(),
+        "pause remains available"
+    );
+    assert!(rt.accessibility_action(
+        "snapshots-toggle-images",
+        rune::accesskit::Action::Click,
+        None
+    ));
+    settle(&mut rt);
+    assert!(rt.accessibility_action("snapshots-next", rune::accesskit::Action::Click, None));
+    settle(&mut rt);
+    assert!(rt.find("snapshot-0-open").is_none());
+    assert!(rt.find("snapshot-6-open").is_some());
+    rt.state
+        .meetings
+        .meetings
+        .iter_mut()
+        .find(|meeting| meeting.id == "preview-live")
+        .unwrap()
+        .snapshots
+        .active = false;
+    rt.state.settings.labs.meeting_snapshots = false;
+    refresh(&mut rt);
+    assert!(
+        rt.find("meeting-snapshots").is_some(),
+        "saved images remain browsable"
+    );
+    assert!(rt.accessibility_action("snapshot-6-delete", rune::accesskit::Action::Click, None));
+    settle(&mut rt);
+    let meeting = rt
+        .state
+        .meetings
+        .meetings
+        .iter()
+        .find(|meeting| meeting.id == "preview-live")
+        .unwrap();
+    assert!(meeting.snapshots.images.iter().all(|image| image.id != 6));
+}
+
+#[test]
+fn meeting_snapshots_pause_and_permission_actions_follow_status() {
+    let mut rt = runtime("meetings-snapshots", true, PANE_SIZE);
+    assert!(rt.accessibility_action("snapshots-pause", rune::accesskit::Action::Click, None));
+    settle(&mut rt);
+    assert!(texts(&rt).iter().any(|text| text == "Resume snapshots"));
+    let meeting = rt
+        .state
+        .meetings
+        .meetings
+        .iter_mut()
+        .find(|meeting| meeting.id == "preview-live")
+        .unwrap();
+    meeting.snapshots.status = crate::meeting::snapshots::Status::PermissionRequired;
+    refresh(&mut rt);
+    assert!(rt.find("snapshots-pause").is_some());
+    assert!(rt.find("snapshots-permission").is_some());
+}
+
+#[test]
+fn meeting_snapshots_show_only_for_a_session_or_saved_images() {
+    let mut rt = runtime("meetings-recording", true, PANE_SIZE);
+    rt.state.settings.labs.meeting_snapshots = true;
+    refresh(&mut rt);
+    assert!(
+        rt.find("meeting-snapshots").is_none(),
+        "an unrelated live meeting has no snapshot session"
+    );
+    let meeting = rt
+        .state
+        .meetings
+        .meetings
+        .iter_mut()
+        .find(|meeting| meeting.id == "preview-live")
+        .unwrap();
+    meeting.snapshots.active = true;
+    meeting.snapshots.status = crate::meeting::snapshots::Status::Waiting;
+    refresh(&mut rt);
+    assert!(
+        rt.find("meeting-snapshots").is_some(),
+        "an active session shows its waiting status"
+    );
+    rt.state.meetings.select("preview-notes".into());
+    refresh(&mut rt);
+    assert!(
+        rt.find("meeting-snapshots").is_none(),
+        "old empty meetings have no snapshot section"
+    );
 }
