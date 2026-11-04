@@ -208,7 +208,7 @@ mod tests {
         accept(&mut selector, original.clone(), 0);
         assert!(accept(&mut selector, original.clone(), 500));
         let mut noisy = original;
-        for p in noisy.pixels.chunks_exact_mut(4) {
+        for p in noisy.pixels.as_chunks_mut::<4>().0 {
             if p[0] == 20 {
                 p.copy_from_slice(&[50, 74, 112, 255]);
             }
