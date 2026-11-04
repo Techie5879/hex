@@ -2,6 +2,22 @@
 use super::Status;
 use super::selector::Frame;
 
+pub(super) struct Unavailable {
+    pub status: Status,
+    pub interrupted: bool,
+}
+
+fn unavailable(code: i32) -> Unavailable {
+    Unavailable {
+        status: match code {
+            1 => Status::PermissionRequired,
+            2..=5 => Status::Waiting,
+            _ => Status::Failed,
+        },
+        interrupted: code != 2,
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 #[repr(C)]
 #[derive(Default)]
@@ -23,7 +39,7 @@ unsafe extern "C" {
 }
 
 #[cfg(target_os = "macos")]
-pub(super) fn capture() -> Result<Frame, Status> {
+pub(super) fn capture() -> Result<Frame, Unavailable> {
     let mut native = NativeFrame::default();
     // SAFETY: the Swift bridge fills the repr(C) record synchronously. Its
     // returned malloc allocation stays valid until the matching free call.
@@ -54,15 +70,13 @@ pub(super) fn capture() -> Result<Frame, Status> {
             window: native.window,
             binding: native.window_identity,
         }),
-        1 => Err(Status::PermissionRequired),
-        2..=5 => Err(Status::Waiting),
-        _ => Err(Status::Failed),
+        code => Err(unavailable(if code == 0 { 6 } else { code })),
     }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn capture() -> Result<Frame, Status> {
-    Err(Status::Waiting)
+pub(super) fn capture() -> Result<Frame, Unavailable> {
+    Err(unavailable(2))
 }
 
 #[cfg(test)]
@@ -75,5 +89,12 @@ mod tests {
         assert_eq!(std::mem::offset_of!(NativeFrame, rgba), 24);
         assert_eq!(std::mem::offset_of!(NativeFrame, length), 32);
         assert_eq!(std::mem::offset_of!(NativeFrame, window_identity), 40);
+    }
+    #[test]
+    fn minimization_and_ambiguity_remain_distinct_from_no_share() {
+        assert!(!unavailable(2).interrupted);
+        for code in [1, 3, 4, 5, 6] {
+            assert!(unavailable(code).interrupted);
+        }
     }
 }

@@ -84,6 +84,16 @@ impl Store {
         Ok(())
     }
     pub fn add(&mut self, frame: &Frame, at_ms: u64, until_ms: u64) -> Result<bool> {
+        self.add_with_writer(frame, at_ms, until_ms, write_asset)
+    }
+
+    fn add_with_writer(
+        &mut self,
+        frame: &Frame,
+        at_ms: u64,
+        until_ms: u64,
+        mut write: impl FnMut(&Path, &[u8]) -> Result<()>,
+    ) -> Result<bool> {
         if !frame.valid() {
             return Err(eyre!("invalid snapshot dimensions"));
         }
@@ -107,16 +117,21 @@ impl Store {
         }
         let path = self.directory.join(format!("{asset}.png"));
         let thumbnail = self.directory.join(format!("{asset}-thumb.png"));
-        if !path.exists() {
+        let (w, h, pixels) = thumbnail_pixels(frame);
+        if !complete_png(&path, frame.width, frame.height) || !complete_png(&thumbnail, w, h) {
             let encoded = encode(frame.width, frame.height, &frame.pixels)?;
-            let (w, h, pixels) = thumbnail_pixels(frame);
             let thumb = encode(w, h, &pixels)?;
             let total = fs::read_dir(&self.directory)?.try_fold(
                 0u64,
                 |total, entry| -> std::io::Result<u64> {
                     let entry = entry?;
-                    let meta = entry.metadata()?;
-                    Ok(total.saturating_add(meta.len()))
+                    // Existing incomplete versions are replaced, not added.
+                    let bytes = if entry.path() == path || entry.path() == thumbnail {
+                        0
+                    } else {
+                        entry.metadata()?.len()
+                    };
+                    Ok(total.saturating_add(bytes))
                 },
             )?;
             if total
@@ -126,11 +141,8 @@ impl Store {
             {
                 return Ok(false);
             }
-            write_new(&path, &encoded)?;
-            if let Err(e) = write_new(&thumbnail, &thumb) {
-                let _ = fs::remove_file(&path);
-                return Err(e);
-            }
+            write(&path, &encoded)?;
+            write(&thumbnail, &thumb)?;
         }
         let mut next = self.index.clone();
         next.entries.push(Entry {
@@ -219,19 +231,41 @@ impl Store {
         Ok(Self { directory, index })
     }
 }
-fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
+fn write_asset(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && !metadata.is_file()
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        return Err(eyre!("invalid snapshot file"));
     }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
+    crate::durable::write(path, bytes)?;
+    super::super::set_owner_only(path, false)?;
     Ok(())
+}
+fn complete_png(path: &Path, width: u32, height: u32) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    let expected = width as usize * height as usize * 4;
+    if !metadata.is_file() || metadata.len() > expected as u64 + 1024 * 1024 {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let decoder = png::Decoder::new(std::io::BufReader::new(file));
+    let Ok(mut reader) = decoder.read_info() else {
+        return false;
+    };
+    if reader.output_buffer_size() != Some(expected) {
+        return false;
+    }
+    let mut bytes = vec![0; expected];
+    reader.next_frame(&mut bytes).is_ok_and(|info| {
+        info.width == width
+            && info.height == height
+            && info.color_type == png::ColorType::Rgba
+            && info.bit_depth == png::BitDepth::Eight
+    })
 }
 fn regular(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
@@ -351,6 +385,50 @@ mod tests {
         store.mark_gap();
         assert!(Store::load(&p).unwrap().view(Status::Complete).has_gaps);
         fs::remove_dir_all(p).unwrap();
+    }
+    #[test]
+    fn a_failed_image_or_thumbnail_write_can_be_retried_and_deleted() {
+        for failure_at in [0, 1] {
+            for partial in [false, true] {
+                let p = directory();
+                let mut store = Store::new(&p).unwrap();
+                let mut call = 0;
+                let result = store.add_with_writer(&frame(), 1, 2, |path, bytes| {
+                    let fail = call == failure_at;
+                    call += 1;
+                    if fail {
+                        if partial {
+                            fs::write(path, &bytes[..bytes.len() / 2])?;
+                        } else {
+                            write_asset(path, bytes)?;
+                        }
+                        return Err(eyre!("injected write or sync failure"));
+                    }
+                    write_asset(path, bytes)
+                });
+                assert!(result.is_err());
+                assert!(
+                    Store::load(&p)
+                        .unwrap()
+                        .view(Status::Complete)
+                        .images
+                        .is_empty()
+                );
+                assert!(store.add(&frame(), 1, 2).unwrap());
+                let restored = Store::load(&p).unwrap().view(Status::Complete);
+                assert_eq!(restored.images.len(), 1);
+                assert!(complete_png(&restored.images[0].path, 4, 4));
+                store.delete(restored.images[0].id).unwrap();
+                assert!(
+                    Store::load(&p)
+                        .unwrap()
+                        .view(Status::Complete)
+                        .images
+                        .is_empty()
+                );
+                fs::remove_dir_all(p).unwrap();
+            }
+        }
     }
     #[test]
     fn image_limit_does_not_evict_previous_content() {

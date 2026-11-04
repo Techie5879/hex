@@ -78,6 +78,18 @@ impl SessionState {
     fn may_publish(&self, generation: u64) -> bool {
         !self.paused && !self.disabled && self.generation == generation
     }
+
+    fn unavailable(&mut self, reason: native::Unavailable, established: bool) {
+        if established && reason.interrupted {
+            self.store.mark_gap();
+        }
+        self.status = reason.status;
+    }
+
+    fn rejected_binding(&mut self) {
+        self.store.mark_gap();
+        self.status = Status::Waiting;
+    }
 }
 
 type Shared = Arc<Mutex<SessionState>>;
@@ -225,7 +237,15 @@ impl Session {
             }
         };
         let stop = Arc::new(AtomicBool::new(false));
-        lock(sessions()).insert(id.to_owned(), state.clone());
+        {
+            let mut registry = lock(sessions());
+            // Pair admission with disable_all's registry lock. A setting
+            // changed during directory setup must not admit a late worker.
+            if !crate::labs::meeting_snapshots() {
+                return None;
+            }
+            registry.insert(id.to_owned(), state.clone());
+        }
         let worker_stop = stop.clone();
         let worker = thread::Builder::new()
             .name("meeting-snapshots".into())
@@ -329,14 +349,11 @@ fn run(shared: Shared, stop: Arc<AtomicBool>, clock: Instant) {
                 }
             }
             Ok(_) => {
-                state.status = Status::Waiting;
+                state.rejected_binding();
                 selector.reset();
             }
-            Err(status) => {
-                if matches!(status, Status::Failed | Status::PermissionRequired) {
-                    state.store.mark_gap();
-                }
-                state.status = status;
+            Err(reason) => {
+                state.unavailable(reason, pinned_window.is_some());
                 selector.reset();
             }
         }
@@ -393,5 +410,51 @@ mod tests {
         assert!(!state.may_publish(1));
         assert!(state.may_publish(2));
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn interruptions_after_capture_and_rejected_bindings_retain_a_gap() {
+        for rejected_binding in [false, true] {
+            let directory = std::env::temp_dir().join(format!(
+                "hex-snapshot-interruption-{}-{rejected_binding}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            let mut state = SessionState {
+                store: store::Store::new(&directory).unwrap(),
+                status: Status::Waiting,
+                paused: false,
+                generation: 0,
+                disabled: false,
+            };
+            // Waiting before a share has ever been established is ordinary.
+            state.unavailable(
+                native::Unavailable {
+                    status: Status::Waiting,
+                    interrupted: false,
+                },
+                false,
+            );
+            assert!(!state.store.view(state.status).has_gaps);
+            state.status = Status::Capturing;
+            if rejected_binding {
+                state.rejected_binding();
+            } else {
+                state.unavailable(
+                    native::Unavailable {
+                        status: Status::Waiting,
+                        interrupted: true,
+                    },
+                    true,
+                );
+            }
+            state.status = Status::Capturing;
+            assert!(
+                store::Store::load(&directory)
+                    .unwrap()
+                    .view(Status::Complete)
+                    .has_gaps
+            );
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 }

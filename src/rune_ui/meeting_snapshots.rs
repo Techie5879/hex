@@ -99,7 +99,7 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
                 },
                 ButtonKind::Secondary,
                 move |ui: &mut Ui, _| {
-                    action(ui, id.clone(), None, Some(!paused));
+                    action(ui, id.clone(), SnapshotAction::Pause(!paused));
                 },
             )
             .disabled(state.pending.is_some()),
@@ -250,7 +250,11 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
                                 &tr_fill("Delete image at {}", &timestamp),
                                 ButtonKind::Secondary,
                                 move |ui: &mut Ui, _| {
-                                    action(ui, meeting_id.clone(), Some(image_id), None);
+                                    action(
+                                        ui,
+                                        meeting_id.clone(),
+                                        SnapshotAction::Delete(image_id),
+                                    );
                                 },
                             )
                             .disabled(state.pending.is_some()),
@@ -298,7 +302,12 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
     Some(body)
 }
 
-fn action(ui: &mut Ui, id: String, delete: Option<u64>, paused: Option<bool>) {
+enum SnapshotAction {
+    Delete(u64),
+    Pause(bool),
+}
+
+fn action(ui: &mut Ui, id: String, action: SnapshotAction) {
     if ui.meetings.snapshots.pending.is_some() {
         return;
     }
@@ -309,18 +318,18 @@ fn action(ui: &mut Ui, id: String, delete: Option<u64>, paused: Option<bool>) {
             .iter_mut()
             .find(|meeting| meeting.id == id)
         {
-            if let Some(image) = delete {
-                meeting
+            match action {
+                SnapshotAction::Delete(image) => meeting
                     .snapshots
                     .images
-                    .retain(|snapshot| snapshot.id != image);
-            }
-            if let Some(paused) = paused {
-                meeting.snapshots.status = if paused {
-                    Status::Paused
-                } else {
-                    Status::Waiting
-                };
+                    .retain(|snapshot| snapshot.id != image),
+                SnapshotAction::Pause(paused) => {
+                    meeting.snapshots.status = if paused {
+                        Status::Paused
+                    } else {
+                        Status::Waiting
+                    }
+                }
             }
         }
         return;
@@ -330,10 +339,9 @@ fn action(ui: &mut Ui, id: String, delete: Option<u64>, paused: Option<bool>) {
     ui.meetings.snapshots.pending = Some(receiver);
     ui.meetings.snapshots.error = None;
     std::thread::spawn(move || {
-        let result = if let Some(image) = delete {
-            crate::meeting::snapshots::delete(&id, image)
-        } else {
-            crate::meeting::snapshots::set_paused(&id, paused.unwrap_or_default())
+        let result = match action {
+            SnapshotAction::Delete(image) => crate::meeting::snapshots::delete(&id, image),
+            SnapshotAction::Pause(paused) => crate::meeting::snapshots::set_paused(&id, paused),
         };
         let _ = sender.send(result);
         if let Some(wake) = wake {
