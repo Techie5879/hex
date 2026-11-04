@@ -44,6 +44,10 @@ const MANAGED_MARK: &str = "X-Hex-Managed=true";
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// A request can wait for the user to approve a desktop dialog.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+/// BindShortcuts waits as long as the desktop's approval dialog may
+/// reasonably stay open. Giving up closes Hex's session, and KDE then keeps
+/// every shortcut with no key and never asks again (#898).
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// How often a pending request checks for cancellation.
 const STOP_POLL: Duration = Duration::from_millis(50);
 /// The ids Cancel dictation had until it was removed (#786): `cancel`,
@@ -140,6 +144,26 @@ fn unknown(error: &zbus::Error) -> bool {
         _ => return false,
     };
     name.starts_with("org.freedesktop.DBus.Error.Unknown")
+}
+
+/// The portal's backend failed a request: it answered Response code 2, or
+/// the call itself failed on the bus. Unlike a dismissal (code 1), the
+/// desktop never asked the person; on niri with the GNOME backend and no
+/// GNOME Shell, BindShortcuts always fails this way (#1014).
+#[derive(Debug)]
+pub(crate) struct BackendFailure(String);
+
+impl std::fmt::Display for BackendFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for BackendFailure {}
+
+/// Whether `error` is the portal's backend failing, not a refusal.
+pub(crate) fn is_backend_failure(error: &color_eyre::eyre::Report) -> bool {
+    error.downcast_ref::<BackendFailure>().is_some()
 }
 
 /// A private session-bus connection registered with the portal as Hex.
@@ -322,19 +346,40 @@ impl PortalBus {
     where
         B: serde::Serialize + zbus::Type,
     {
+        self.request_within(method, body, stop, RESPONSE_TIMEOUT)
+    }
+
+    /// [`Self::request`], waiting up to `timeout` for the answer.
+    fn request_within<B>(
+        &mut self,
+        method: &str,
+        body: impl FnOnce(&str) -> B,
+        stop: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<Results>
+    where
+        B: serde::Serialize + zbus::Type,
+    {
         let token = self.token();
         let path = format!("{DESKTOP_PATH}/request/{}/{token}", self.sender);
         let interface = self.interface;
-        self.call::<_, OwnedObjectPath>(DESKTOP_PATH, interface, method, &body(&token))
-            .wrap_err_with(|| format!("the {interface} portal refused {method}"))?;
-        let deadline = Instant::now() + RESPONSE_TIMEOUT;
+        if let Err(error) =
+            self.call::<_, OwnedObjectPath>(DESKTOP_PATH, interface, method, &body(&token))
+        {
+            return Err(color_eyre::eyre::Report::new(BackendFailure(format!(
+                "the {interface} portal refused {method}: {error}"
+            ))));
+        }
+        let deadline = Instant::now() + timeout;
         loop {
             match self.signals.recv_timeout(STOP_POLL) {
                 Ok(Signal::Response(answered, code, results)) if answered == path => {
                     return match code {
                         0 => Ok(results),
                         1 => Err(eyre!("the {interface} request {method} was dismissed")),
-                        _ => Err(eyre!("the {interface} portal could not complete {method}")),
+                        _ => Err(color_eyre::eyre::Report::new(BackendFailure(format!(
+                            "the {interface} portal could not complete {method}"
+                        )))),
                     };
                 }
                 Ok(Signal::Session(session, event)) => self.pending.push_back((session, event)),
@@ -747,7 +792,22 @@ impl Portal {
     ) -> Result<HashMap<String, Option<String>>> {
         let session = self.bus.create_session(stop)?;
         self.session = Some(session.clone());
-        self.bind_session(session, shortcuts, stop)
+        let bound = self.bind_session(session, shortcuts, stop);
+        if desktop_is("KDE") {
+            match &bound {
+                // Approved: whatever KDE keeps now, the person chose.
+                Ok(granted) if granted.values().any(Option::is_some) => {
+                    kde_unapproved::clear();
+                }
+                Ok(_) => {}
+                // The backend failed: no dialog was shown.
+                Err(error) if is_backend_failure(error) => {}
+                // Dismissed, canceled, or abandoned: KDE keeps these ids
+                // with no key and never asks for them again (#898).
+                Err(_) => kde_unapproved::remember(shortcuts),
+            }
+        }
+        bound
     }
 
     /// Clears the shortcuts GNOME keeps listed for Hex once its session
@@ -775,29 +835,29 @@ impl Portal {
     /// shortcut a portal app bound under that app's id, so an upgraded Hex
     /// left `hex`'s set (Cancel dictation on Escape among it) grabbed with
     /// nothing able to rebind it, taking Escape from every app (#624).
-    /// Removes that set, and the [`STALE_KDE_ACTIONS`] under the current id,
-    /// from KDE's global shortcuts. Only on KDE, only those entries.
-    pub(crate) fn forget_legacy_kde_shortcuts(&self) -> Result<()> {
+    /// Removes that set, the [`STALE_KDE_ACTIONS`], and every other action
+    /// under the current id that `keep` (the ids about to be bound) doesn't
+    /// name from KDE's global shortcuts. A shortcut changed in Hex gets a new
+    /// id, and KDE keeps the old one holding its key, so the new id could
+    /// never take that key back (#898). Only on KDE, only Hex's entries.
+    pub(crate) fn forget_legacy_kde_shortcuts(&self, keep: &[&str]) -> Result<()> {
         if !desktop_is("KDE") {
             return Ok(());
         }
-        let actions: Vec<Vec<String>> = self
-            .bus
-            .call_service(
-                KGLOBALACCEL,
-                KGLOBALACCEL_PATH,
-                KGLOBALACCEL_INTERFACE,
-                "allActionsForComponent",
-                &(vec![LEGACY_APP_ID],),
-            )
-            .wrap_err("could not list Hex's old KDE shortcuts")?;
-        let mut legacy = actions
-            .iter()
-            .filter_map(|action| action.get(1))
-            .map(|action| (LEGACY_APP_ID, action.as_str()))
-            .collect::<Vec<_>>();
-        legacy.extend(STALE_KDE_ACTIONS.map(|action| (APP_ID, action)));
-        for (component, action) in legacy {
+        let list = |component: &str| -> Result<Vec<Vec<String>>> {
+            self.bus
+                .call_service(
+                    KGLOBALACCEL,
+                    KGLOBALACCEL_PATH,
+                    KGLOBALACCEL_INTERFACE,
+                    "allActionsForComponent",
+                    &(vec![component],),
+                )
+                .wrap_err("could not list Hex's old KDE shortcuts")
+        };
+        let legacy = list(LEGACY_APP_ID)?;
+        let current = list(APP_ID)?;
+        for (component, action) in superseded_kde_actions(&legacy, &current, keep) {
             let removed: bool = self
                 .bus
                 .call_service(
@@ -812,6 +872,46 @@ impl Portal {
                 tracing::info!(component, action, "removed an old Hex shortcut from KDE");
             }
         }
+        // Shortcuts a bind left unapproved, which KDE keeps with no key: gone,
+        // KDE's dialog asks for them again. A key set since in System Settings
+        // stays (#898).
+        let unapproved = kde_unapproved::ids();
+        for action in current
+            .iter()
+            .filter_map(|action| action.get(1))
+            .filter(|action| unapproved.iter().any(|id| id == *action))
+        {
+            let keys: Vec<(Vec<i32>,)> = self
+                .bus
+                .call_service(
+                    KGLOBALACCEL,
+                    KGLOBALACCEL_PATH,
+                    KGLOBALACCEL_INTERFACE,
+                    "shortcutKeys",
+                    &(vec![APP_ID, action.as_str()],),
+                )
+                .wrap_err_with(|| format!("could not read Hex's KDE shortcut {action}"))?;
+            if keys.iter().any(|(keys,)| keys.iter().any(|key| *key != 0)) {
+                continue;
+            }
+            let removed: bool = self
+                .bus
+                .call_service(
+                    KGLOBALACCEL,
+                    KGLOBALACCEL_PATH,
+                    KGLOBALACCEL_INTERFACE,
+                    "unregister",
+                    &(APP_ID, action.as_str()),
+                )
+                .wrap_err_with(|| format!("could not remove Hex's KDE shortcut {action}"))?;
+            if removed {
+                tracing::info!(
+                    action,
+                    "removed a Hex shortcut KDE kept without a key after its dialog went unanswered; KDE asks again"
+                );
+            }
+        }
+        kde_unapproved::clear();
         Ok(())
     }
 
@@ -843,7 +943,7 @@ impl Portal {
             })
             .collect::<Vec<_>>();
         let handle = session.into_inner();
-        let results = self.bus.request(
+        let results = self.bus.request_within(
             "BindShortcuts",
             |token| {
                 (
@@ -854,6 +954,7 @@ impl Portal {
                 )
             },
             stop,
+            APPROVAL_TIMEOUT,
         )?;
         let bound = results
             .get("shortcuts")
@@ -862,6 +963,70 @@ impl Portal {
             .unwrap_or_default();
         Ok(triggers(bound))
     }
+}
+
+/// The shortcut ids of a KDE bind whose approval dialog was dismissed,
+/// canceled, or abandoned (Hex stopped while it was open), kept in
+/// Application Support until the next bind on KDE (#898).
+mod kde_unapproved {
+    use std::path::PathBuf;
+
+    fn path() -> Option<PathBuf> {
+        crate::app_paths::support_dir()
+            .ok()
+            .map(|dir| dir.join("kde-unapproved-shortcuts"))
+    }
+
+    pub(super) fn remember(shortcuts: &[super::Shortcut]) {
+        let Some(path) = path() else { return };
+        let ids = shortcuts
+            .iter()
+            .map(|shortcut| format!("{}\n", shortcut.id))
+            .collect::<String>();
+        if let Err(error) = std::fs::write(&path, ids) {
+            tracing::warn!(%error, "could not note Hex's unapproved KDE shortcuts");
+        }
+    }
+
+    pub(super) fn ids() -> Vec<String> {
+        path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn clear() {
+        if let Some(path) = path() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// The KDE actions to remove before binding: every action of the pre-#579
+/// `hex` component, then every action under `anomaly.hex` that `keep` doesn't
+/// name, the [`STALE_KDE_ACTIONS`] included. Each action is kglobalaccel's
+/// `[component, action, …]` id.
+fn superseded_kde_actions<'a>(
+    legacy: &'a [Vec<String>],
+    current: &'a [Vec<String>],
+    keep: &[&str],
+) -> Vec<(&'static str, &'a str)> {
+    let mut actions = legacy
+        .iter()
+        .filter_map(|action| action.get(1))
+        .map(|action| (LEGACY_APP_ID, action.as_str()))
+        .collect::<Vec<_>>();
+    let mut current = current
+        .iter()
+        .filter_map(|action| action.get(1))
+        .map(String::as_str)
+        .chain(STALE_KDE_ACTIONS)
+        .filter(|action| !keep.contains(action))
+        .collect::<Vec<_>>();
+    current.sort_unstable();
+    current.dedup();
+    actions.extend(current.into_iter().map(|action| (APP_ID, action)));
+    actions
 }
 
 /// What the log says when the session has no shortcuts portal at startup.
@@ -978,6 +1143,13 @@ pub(crate) fn gnome() -> bool {
     desktop_is("GNOME")
 }
 
+/// Whether the desktop keeps Alt+Space for itself: GNOME's window menu
+/// (#723) and KDE Plasma's KRunner (#898), which the KDE portal's approval
+/// dialog flags as a conflict and then leaves Hex without.
+pub(crate) fn desktop_takes_alt_space() -> bool {
+    gnome() || desktop_is("KDE")
+}
+
 /// Whether the desktop assigns portal shortcuts their keys in its own
 /// configuration and describes no trigger in the portal's answer. Hyprland's
 /// portal returns an empty description for every shortcut, bound or not
@@ -1040,6 +1212,20 @@ mod tests {
         )));
         assert!(gone(zbus::fdo::Error::UnknownObject("gone".into())));
         assert!(!gone(zbus::fdo::Error::AccessDenied("no".into())));
+    }
+
+    /// A bind the backend failed falls back to the `hex` commands; one the
+    /// person dismissed or Hex canceled stays a refusal (#1014).
+    #[test]
+    fn only_backend_failures_count_as_a_missing_portal() {
+        let failed = color_eyre::eyre::Report::new(BackendFailure(
+            "the org.freedesktop.portal.GlobalShortcuts portal could not complete BindShortcuts"
+                .into(),
+        ));
+        assert!(is_backend_failure(&failed));
+        assert!(!is_backend_failure(&eyre!(
+            "the org.freedesktop.portal.GlobalShortcuts request BindShortcuts was dismissed"
+        )));
     }
 
     #[test]
@@ -1257,6 +1443,41 @@ mod tests {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         }));
+    }
+
+    /// A shortcut changed in Hex gets a new id; on KDE the old id keeps its
+    /// key until removed, so the new one could never take it (#898).
+    #[test]
+    fn kde_actions_hex_no_longer_binds_are_removed() {
+        let id = |component: &str, action: &str| {
+            vec![
+                component.to_string(),
+                action.to_string(),
+                "Hex".to_string(),
+                action.to_string(),
+            ]
+        };
+        let legacy = vec![id("hex", "dictation")];
+        let current = vec![
+            id(APP_ID, "dictation-ALT-space"),
+            id(APP_ID, "dictation-CTRL-ALT-space"),
+            id(APP_ID, "paste-last-ALT-SHIFT-v"),
+            id(APP_ID, "cancel"),
+        ];
+        let removed = superseded_kde_actions(
+            &legacy,
+            &current,
+            &["dictation-CTRL-ALT-space", "paste-last-ALT-SHIFT-v"],
+        );
+        assert_eq!(
+            removed,
+            vec![
+                ("hex", "dictation"),
+                (APP_ID, "cancel"),
+                (APP_ID, "cancel-dictation"),
+                (APP_ID, "dictation-ALT-space"),
+            ]
+        );
     }
 
     #[test]

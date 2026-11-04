@@ -15,7 +15,7 @@ mod generation;
 mod rewrite;
 use generation::*;
 
-const PROTOCOL_PROMPT: &str = "You transform dictated speech into replacement text. Return only the text that should be pasted. Do not add an explanation, label, alternative, or Markdown fence.";
+const PROTOCOL_PROMPT: &str = "You transform dictated speech into replacement text. Return only the text that should be pasted. Do not add an explanation, label, alternative, or Markdown fence.\n\nNumbers: keep every number the speaker said. Never drop, merge, reorder, round, or reinterpret a number, and never add thousands separators or other formatting to a number that the transcript already writes in digits.";
 const CATALOG_DEADLINE: Duration = Duration::from_secs(10);
 /// Newest one-shot generation route first; older OpenCode V2 builds only serve the later name.
 const GENERATE_ENDPOINTS: [&str; 2] = ["/api/experimental/generate", "/api/generate"];
@@ -34,6 +34,8 @@ pub struct Profile {
     min_chars: usize,
     replacements: ReplacementSet,
     transformations: Vec<String>,
+    /// The mode's own vocabulary, heard and spelled ahead of the shared list.
+    vocabulary: Vec<VocabularyEntry>,
 }
 
 impl Profile {
@@ -49,12 +51,24 @@ impl Profile {
             min_chars: 0,
             replacements: ReplacementSet::default(),
             transformations: Vec::new(),
+            vocabulary: Vec::new(),
         }
+    }
+
+    pub(crate) fn vocabulary(mut self, vocabulary: Vec<VocabularyEntry>) -> Self {
+        self.vocabulary = vocabulary;
+        self
     }
 
     pub fn ai_enabled(mut self, enabled: bool) -> Self {
         self.ai_enabled = enabled;
         self
+    }
+
+    /// Whether this profile runs the OpenCode rewrite.
+    #[cfg(test)]
+    pub(crate) fn rewrites(&self) -> bool {
+        self.ai_enabled
     }
 
     pub(crate) fn replacements(mut self, replacements: ReplacementSet) -> Self {
@@ -101,6 +115,7 @@ impl Profile {
             mode.transformations.clone(),
             &mode.post_processing,
         )
+        .vocabulary(mode.vocabulary.clone())
     }
 
     /// Builds a runtime profile from persisted settings. A malformed model key
@@ -111,8 +126,32 @@ impl Profile {
         transformations: Vec<String>,
         settings: &PostProcessingSettings,
     ) -> Self {
+        Self::configured_under(
+            name,
+            replacements,
+            transformations,
+            settings,
+            crate::policy::Policy::current(),
+        )
+    }
+
+    /// [`Self::configured`] under `policy`: a managed lock drops the
+    /// OpenCode rewrite or every transformation, leaving the mode saved as is.
+    fn configured_under(
+        name: impl Into<String>,
+        replacements: ReplacementSet,
+        transformations: Vec<String>,
+        settings: &PostProcessingSettings,
+        policy: crate::policy::Policy,
+    ) -> Self {
+        use crate::policy::Lock;
+        let transformations = if policy.locks(Lock::Transforms) {
+            Vec::new()
+        } else {
+            transformations
+        };
         let mut profile = Self::new(name, &settings.prompt)
-            .ai_enabled(settings.enabled)
+            .ai_enabled(settings.enabled && !policy.locks(Lock::OpenCodeProcessing))
             .replacements(replacements)
             .transformations(transformations);
         if let Some((provider, model)) = settings
@@ -223,6 +262,9 @@ struct ContextualProfile {
 pub struct Profiles {
     default: Profile,
     contextual: Vec<ContextualProfile>,
+    /// Global's corrections, run before the selected mode's own on every
+    /// dictation, as the Windows and Linux listeners do.
+    global: ReplacementSet,
 }
 
 impl Profiles {
@@ -230,7 +272,13 @@ impl Profiles {
         Self {
             default,
             contextual: Vec::new(),
+            global: ReplacementSet::default(),
         }
+    }
+
+    pub(crate) fn global_replacements(mut self, replacements: ReplacementSet) -> Self {
+        self.global = replacements;
+        self
     }
 
     pub fn application(self, application: impl Into<String>, profile: Profile) -> Self {
@@ -270,6 +318,11 @@ impl Profiles {
         selected.map_or(&self.default, |selected| &selected.profile)
     }
 
+    /// The selected mode's own vocabulary.
+    pub(crate) fn vocabulary_for(&self, context: &ContextSnapshot) -> Vec<VocabularyEntry> {
+        self.select(context).vocabulary.clone()
+    }
+
     pub fn processes(&self, context: &ContextSnapshot) -> bool {
         let profile = self.select(context);
         crate::labs::local_polish() || profile.ai_enabled || !profile.transformations.is_empty()
@@ -307,7 +360,9 @@ impl Profiles {
         } else {
             transcript
         };
-        let corrected = profile.replacements.replace(transcript);
+        let corrected = profile
+            .replacements
+            .replace(&self.global.replace(transcript));
         profile.rewrite(
             corrected,
             crate::labs::local_polish(),
@@ -318,7 +373,10 @@ impl Profiles {
                     profile,
                     input,
                     context,
-                    &crate::dictation::vocabulary::entries(),
+                    &crate::dictation::vocabulary::merged(
+                        &profile.vocabulary,
+                        &crate::dictation::vocabulary::entries(),
+                    ),
                 );
                 generate_cancellable_with_fallback(
                     &prompt,
@@ -334,14 +392,91 @@ impl Profiles {
     }
 }
 
+/// Whether a transcript says nothing but numbers: digits or English number
+/// words, with punctuation between them.
+fn numbers_only(transcript: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+        "twenty",
+        "thirty",
+        "forty",
+        "fifty",
+        "sixty",
+        "seventy",
+        "eighty",
+        "ninety",
+        "hundred",
+        "thousand",
+        "million",
+        "billion",
+    ];
+    /// Words that join numbers but are not numbers themselves.
+    const JOINERS: &[&str] = &["and", "point", "minus", "negative"];
+    let mut any_number = false;
+    for token in transcript.split(|c: char| c.is_whitespace() || c == '-') {
+        let word = token.trim_matches(|c: char| !c.is_alphanumeric());
+        if word.is_empty() {
+            continue;
+        }
+        if word
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+            || WORDS.iter().any(|w| word.eq_ignore_ascii_case(w))
+        {
+            any_number = true;
+        } else if !JOINERS.iter().any(|w| word.eq_ignore_ascii_case(w)) {
+            return false;
+        }
+    }
+    any_number
+}
+
+/// One generation's text and the model that wrote it, when Hex named one
+/// (`None` when OpenCode's own default model answered).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Generated {
+    pub text: String,
+    pub model: Option<Model>,
+}
+
 /// One generation from OpenCode's default ranked models, for work outside
 /// dictation such as meeting notes.
 pub(crate) fn generate_text(
     prompt: &str,
     deadline: Duration,
     cancelled: &AtomicBool,
-) -> Result<String> {
-    generate_cancellable(prompt, None, deadline, cancelled)
+) -> Result<Generated> {
+    generate_reported(prompt, None, deadline, cancelled)
+}
+
+/// One generation from exactly `model`, never another provider's: a failure
+/// is OpenCode's answer for that model (Labs › Choose meeting summary model).
+pub(crate) fn generate_text_with(
+    prompt: &str,
+    model: &Model,
+    deadline: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Generated> {
+    generate_reported(prompt, Some(model), deadline, cancelled)
 }
 
 #[derive(Clone, Debug)]
@@ -495,6 +630,15 @@ fn cache_ranked_candidates(service: &Service, catalog: &ModelCatalog) {
     }
 }
 
+/// Drops the cached ranked candidates once one of them failed: the catalog
+/// may have been read while OpenCode was still loading, listing models that
+/// left it since (#1123). The next generation reads the catalog again.
+fn forget_ranked_candidates() {
+    if let Ok(mut guard) = CACHED_RANKED_CANDIDATES.lock() {
+        *guard = None;
+    }
+}
+
 fn ranked_candidates_for(service: &Service) -> Vec<Model> {
     if let Ok(guard) = CACHED_RANKED_CANDIDATES.lock()
         && let Some((cached, candidates)) = guard.as_ref()
@@ -512,9 +656,14 @@ fn ranked_candidates_for(service: &Service) -> Vec<Model> {
 
 /// The running service's model catalog. Reads OpenCode's registration and
 /// talks loopback HTTP; never starts anything. Call off the UI thread.
+/// `None` when OpenCode isn't running; an obsolete OpenCode is an error that
+/// says to update it.
 pub fn load_model_catalog() -> Result<Option<ModelCatalog>> {
-    let Some(service) = crate::desktop::opencode_service::find() else {
-        return Ok(None);
+    use crate::desktop::opencode_service::Missing;
+    let service = match crate::desktop::opencode_service::find() {
+        Ok(service) => service,
+        Err(Missing::NotRunning) => return Ok(None),
+        Err(missing) => return Err(eyre!(missing.message())),
     };
     let models: ModelsResponse = opencode_api(&service, "/api/model")?;
     let default: DefaultModelResponse = opencode_api(&service, "/api/model/default")?;
@@ -673,6 +822,33 @@ fn prompt(
 mod tests {
     use super::*;
     use url::Url;
+
+    #[test]
+    fn managed_locks_drop_the_rewrite_and_transformations() {
+        use crate::policy::{Lock, Policy};
+        let settings = PostProcessingSettings {
+            enabled: true,
+            ..PostProcessingSettings::default()
+        };
+        let build = |policy| {
+            Profile::configured_under(
+                "Mode",
+                ReplacementSet::default(),
+                vec!["lowercase".into()],
+                &settings,
+                policy,
+            )
+        };
+        let open = build(Policy::default());
+        assert!(open.rewrites());
+        assert_eq!(open.transformations, ["lowercase"]);
+        let rewrite = build(Policy::default().with(Lock::OpenCodeProcessing));
+        assert!(!rewrite.rewrites());
+        assert_eq!(rewrite.transformations, ["lowercase"]);
+        let transforms = build(Policy::default().with(Lock::Transforms));
+        assert!(transforms.rewrites());
+        assert!(transforms.transformations.is_empty());
+    }
 
     fn context(application: &str, url: Option<&str>) -> ContextSnapshot {
         ContextSnapshot {
@@ -939,6 +1115,35 @@ mod tests {
     }
 
     #[test]
+    fn numbers_only_transcripts_skip_the_rewrite() {
+        for numbers in [
+            "One, two, three, four, five, six, seven, eight, nine, ten.",
+            "1355",
+            "Twenty-one point five.",
+            "one hundred and forty two",
+        ] {
+            assert!(numbers_only(numbers), "{numbers}");
+        }
+        for speech in [
+            "",
+            "And.",
+            "Point one, the dataset has 1355 evaluation windows.",
+            "Call me at five.",
+        ] {
+            assert!(!numbers_only(speech), "{speech}");
+        }
+
+        let profiles = Profiles::new(Profile::new("default", "Rewrite freely.").ai_enabled(true));
+        let processed = profiles.process_cancellable(
+            "one two three four five",
+            &context("Zed", None),
+            &AtomicBool::new(false),
+        );
+        assert_eq!(processed.text, "one two three four five");
+        assert!(processed.observation.is_none());
+    }
+
+    #[test]
     fn only_model_unavailability_is_retried() {
         assert!(
             GenerationFailure {
@@ -954,6 +1159,47 @@ mod tests {
                 ..Default::default()
             }
             .model_unavailable()
+        );
+    }
+
+    /// Labs › Choose meeting summary model: a chosen model is the only one
+    /// asked, and its failure is reported rather than another provider tried.
+    #[test]
+    fn a_chosen_model_is_asked_alone_and_never_falls_back() {
+        let chosen = Model {
+            provider: "openai".into(),
+            id: "gpt-5".into(),
+            variant: None,
+        };
+        let mut posted = Vec::new();
+        let error = generate_with_candidates(
+            "Summarize.",
+            Some(&chosen),
+            || -> Vec<Model> { panic!("a chosen model never reads the ranked candidates") },
+            || panic!("a chosen model never forgets the ranked candidates"),
+            Instant::now(),
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+            |data, _, _| {
+                posted.push(data.to_owned());
+                Ok(Response::Error(
+                    serde_json::from_value(
+                        serde_json::json!({"message": "Provider request failed"}),
+                    )
+                    .unwrap(),
+                ))
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("Provider request failed"),
+            "{error}"
+        );
+        assert_eq!(posted.len(), 1);
+        assert!(
+            posted[0].contains(r#""providerID":"openai""#),
+            "{}",
+            posted[0]
         );
     }
 
@@ -1008,6 +1254,14 @@ mod tests {
             (
                 vec![("/api/experimental/generate", 400, unavailable)],
                 Err("Model unavailable: x"),
+            ),
+            (
+                vec![(
+                    "/api/experimental/generate",
+                    404,
+                    r#"{"_tag":"NotFoundError","message":"Model not found: github-copilot/gpt-5.4-nano"}"#,
+                )],
+                Err("Model not found: github-copilot/gpt-5.4-nano"),
             ),
             (
                 vec![
@@ -1160,16 +1414,20 @@ mod tests {
                 r#"{"data":{"text":"resolved from second ranked model"}}"#,
             ),
         ]);
+        let mut forgotten = 0;
         let output = generate_with_ranked_candidates(
             "Make this concise.",
             &candidates,
+            || forgotten += 1,
             Instant::now(),
             Duration::from_secs(5),
             &AtomicBool::new(false),
             |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
         )
         .unwrap();
-        assert_eq!(output, "resolved from second ranked model");
+        assert_eq!(output.text, "resolved from second ranked model");
+        assert_eq!(output.model.as_ref(), Some(&candidates[1]));
+        assert_eq!(forgotten, 1, "a failed candidate drops the cached list");
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
         let first: serde_json::Value = serde_json::from_slice(&requests[0]).unwrap();
@@ -1189,6 +1447,46 @@ mod tests {
                 "id": "claude-haiku-4-5"
             })
         );
+    }
+
+    /// A ranked list read while OpenCode was still loading can name models
+    /// that left its catalog (#1123): every one failing forgets the list and
+    /// asks OpenCode's own default model instead.
+    #[test]
+    fn stale_ranked_models_fall_back_to_the_default_model() {
+        let candidates = vec![Model {
+            provider: "github-copilot".into(),
+            id: "gpt-5.4-nano".into(),
+            variant: None,
+        }];
+        let mut forgotten = 0;
+        let mut posted = Vec::new();
+        let output = generate_with_ranked_candidates(
+            "Summarize.",
+            &candidates,
+            || forgotten += 1,
+            Instant::now(),
+            Duration::from_secs(5),
+            &AtomicBool::new(false),
+            |data, _, _| {
+                posted.push(serde_json::from_str::<serde_json::Value>(data).unwrap());
+                Ok(if posted.len() == 1 {
+                    Response::Error(serde_json::from_value(serde_json::json!({"message": "Model not found: github-copilot/gpt-5.4-nano"})).unwrap())
+                } else {
+                    Response::Success {
+                        data: ResponseData {
+                            text: "from the default".into(),
+                        },
+                    }
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(output.text, "from the default");
+        assert_eq!(output.model, None);
+        assert_eq!(forgotten, 1);
+        assert_eq!(posted.len(), 2);
+        assert!(posted[1].get("model").is_none(), "{}", posted[1]);
     }
 
     #[test]

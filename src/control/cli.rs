@@ -60,10 +60,10 @@ pub enum ControlCli {
         #[command(flatten)]
         output: Output,
     },
-    /// Start, stop, or toggle a dictation, as the shortcut would.
+    /// Start, stop, toggle, or cancel a dictation, as the shortcut would.
     ///
-    /// `start` locks the recording: `stop` or the shortcut finishes it.
-    /// Repeating a command changes nothing.
+    /// `start` locks the recording: `stop` or the shortcut finishes it,
+    /// `cancel` discards it. Repeating a command changes nothing.
     Dictation {
         #[arg(value_enum)]
         action: CaptureAction,
@@ -100,7 +100,7 @@ pub enum ControlCli {
         #[command(subcommand)]
         command: WindowCommand,
     },
-    /// Replay the first-run onboarding (needs Labs on).
+    /// Replay the first-run onboarding.
     Onboarding {
         #[command(subcommand)]
         command: OnboardingCommand,
@@ -116,6 +116,11 @@ pub enum ControlCli {
         state: Option<Toggle>,
         #[command(flatten)]
         output: Output,
+    },
+    /// Share the dictionary and cleanup prompts with Hex on Android (Labs).
+    Profile {
+        #[command(subcommand)]
+        command: crate::profile_sync::cli::ProfileCommand,
     },
     /// List, add, and remove vocabulary terms.
     Vocabulary {
@@ -383,6 +388,10 @@ pub fn run(command: ControlCli) -> u8 {
         ControlCli::Quit { force, output } => send(ControlCommand::Quit { force }, output),
         ControlCli::Restart { force, output } => {
             if !running() {
+                #[cfg(target_os = "linux")]
+                if crate::linux::service::instance_answers() {
+                    return print(restart_older_hex(), output);
+                }
                 return start(output);
             }
             #[cfg(target_os = "linux")]
@@ -407,18 +416,11 @@ pub fn run(command: ControlCli) -> u8 {
             raw,
             output,
         } => {
-            if let Err(error) = super::check_flags(action.into(), print, raw) {
+            if let Err(error) = super::check_flags(action, print, raw) {
                 eprintln!("hex: {}", error.message);
                 return 2;
             }
-            send(
-                ControlCommand::Dictation {
-                    action: action.into(),
-                    print,
-                    raw,
-                },
-                output,
-            )
+            send(ControlCommand::Dictation { action, print, raw }, output)
         }
         ControlCli::PasteLast { output } => send(ControlCommand::PasteLast, output),
         ControlCli::Settings { command } => settings(command),
@@ -494,6 +496,7 @@ pub fn run(command: ControlCli) -> u8 {
             },
             output,
         ),
+        ControlCli::Profile { command } => crate::profile_sync::cli::run(command),
         ControlCli::Vocabulary { command } => match command {
             VocabularyCommand::List { output } => send(ControlCommand::VocabularyList, output),
             VocabularyCommand::Add {
@@ -924,6 +927,10 @@ fn apply_settings(file: &std::path::Path, output: Output) -> u8 {
         match lock {
             Ok(_lock) if !running() => return print(apply_offline(&values), output),
             Ok(_) => {}
+            #[cfg(target_os = "linux")]
+            Err(_) if crate::linux::service::instance_answers() => {
+                return print(older_hex(), output);
+            }
             Err(_) if std::time::Instant::now() >= deadline => {
                 return print(
                     ControlReply::error(
@@ -986,6 +993,11 @@ fn running() -> bool {
     crate::local_api::running_pid().is_some()
 }
 
+/// One command in the running Hex, its failures as replies.
+pub(crate) fn ask_running_hex(command: ControlCommand) -> ControlReply {
+    call(ControlRequest::new(command)).map_or_else(|reply| reply, |response| response.reply)
+}
+
 /// `hex settings set key value` in the running Hex, which saves and applies
 /// it; `None` when no Hex runs.
 pub(crate) fn set_in_running_hex(key: &str, value: &str) -> Option<ControlReply> {
@@ -1000,7 +1012,7 @@ pub(crate) fn set_in_running_hex(key: &str, value: &str) -> Option<ControlReply>
 
 fn call(request: ControlRequest) -> Result<ControlResponse, ControlReply> {
     if !running() {
-        return Err(not_running());
+        return Err(absent());
     }
     crate::local_api::call_control(&request)
         .map_err(|error| ControlReply::error("transport", format!("{error:#}")))
@@ -1008,6 +1020,50 @@ fn call(request: ControlRequest) -> Result<ControlResponse, ControlReply> {
 
 pub(crate) fn not_running() -> ControlReply {
     ControlReply::error("not-running", "Hex is not running; run `hex start`")
+}
+
+/// Why no Hex answered `/control`: on Linux an older Hex an update left
+/// running answers only on its socket (#915).
+fn absent() -> ControlReply {
+    #[cfg(target_os = "linux")]
+    if crate::linux::service::instance_answers() {
+        return older_hex();
+    }
+    not_running()
+}
+
+/// An older Hex that predates `hex` commands over the local API.
+#[cfg(target_os = "linux")]
+fn older_hex() -> ControlReply {
+    ControlReply::error(
+        "outdated",
+        "an older Hex is still running (Hex was updated) and doesn't take `hex` commands; run `hex restart`",
+    )
+}
+
+/// `hex restart` with an older Hex running: restarts its systemd unit into
+/// the installed build, then waits until the new Hex answers.
+#[cfg(target_os = "linux")]
+fn restart_older_hex() -> ControlReply {
+    use std::time::{Duration, Instant};
+
+    if !crate::linux::service::supervised() {
+        return ControlReply::error(
+            "failed",
+            "an older Hex is running outside its systemd unit; quit it from its window or tray, then run `hex start`",
+        );
+    }
+    if let Err(error) = crate::linux::service::restart() {
+        return ControlReply::error("failed", format!("{error:#}"));
+    }
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(20) {
+        if running() {
+            return ControlReply::done("Restarted Hex");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    ControlReply::done("Restarted Hex; it isn't answering yet (it may be loading its model)")
 }
 
 #[cfg(target_os = "macos")]
@@ -1067,6 +1123,10 @@ fn start_reply() -> ControlReply {
 
     if running() {
         return ControlReply::unchanged("Hex is already running");
+    }
+    #[cfg(target_os = "linux")]
+    if crate::linux::service::instance_answers() {
+        return older_hex();
     }
     let executable = match std::env::current_exe() {
         Ok(executable) => executable,
@@ -1267,6 +1327,17 @@ mod tests {
             exit_code(&ControlReply::error("no-speech", "x")),
             EXIT_NO_SPEECH
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_older_hex_is_not_reported_as_not_running() {
+        let reply = older_hex();
+        assert_eq!(exit_code(&reply), EXIT_REFUSED);
+        assert!(matches!(
+            &reply,
+            ControlReply::Error { code, message } if code == "outdated" && message.contains("hex restart")
+        ));
     }
 
     #[cfg(target_os = "macos")]

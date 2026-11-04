@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  flagInputMethodEditor gives Hex an AccessibilityInputConnection beside the keyboard,
+  so it can commit text at the caret without replacing the IME.
+  No typeViewTextChanged: Hex has no use for what is typed.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeViewFocused|typeWindowStateChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagReportViewIds|flagInputMethodEditor"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/a11y_description"
+    android:isAccessibilityTool="false"
+    android:notificationTimeout="50"
+    android:settingsActivity="anomaly.hex.android.ui.MainActivity"
+    android:summary="@string/a11y_summary" />

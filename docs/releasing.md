@@ -1,5 +1,10 @@
 # Releasing Hex
 
+In this fork, Compile, Test builds, Release, and the full platform checks run
+only when explicitly requested. Pushes and PR updates do not start these builds
+or test suites. A manually requested check or stable release still runs its
+required validation. Upstream automation described below is not the fork default.
+
 One run of the **Release** workflow (`.github/workflows/release.yml`)
 builds, signs, and publishes every platform from one commit to the Anomaly
 release service (`anomalyco/release`, `https://anoma.ly/release`). Hex's
@@ -28,7 +33,7 @@ secret. `.github/workflows/` (Release, Site deploy, Legacy appcast) and
   nothing swapped in between jobs is signed or published.
 
 ```ts
-Release (push to dev: dev channel; workflow_dispatch: ref + channel check | dev | stable (from production))
+Release (workflow_dispatch: ref + channel check | dev | stable (from production))
 ├─ plan                     .github/release/plan.sh: version, channel, tag, notes
 ├─ build                    build-desktop.yml: Linux x64 + ARM64 (Ubuntu 24.04) executables, .deb,  [build]
 │                           .rpm (installed and run on Ubuntu and Fedora); Windows x64 + ARM64
@@ -38,9 +43,10 @@ Release (push to dev: dev channel; workflow_dispatch: ref + channel check | dev 
 ├─ sign-windows             Azure Artifact Signing of both hex.exe, Authenticode check                [release]
 ├─ installers               windows-installers.yml: Setup.exe around them, tested on x64 + ARM64      [build]
 ├─ sign-windows-installers  Azure Artifact Signing of both Setup.exe                                  [release]
+├─ check-linux, -macos,     stable, check: the full suites on the candidate (check-<os>.yml, called   [build]
+│  -windows                 here; pull requests only compile, dev pushes run no checks)
 ├─ onboarding               stable, check: scripts/check-onboarding.sh (scene goldens + a first run   [build]
-│                           in a clean data folder, Linux); stable also needs the candidate's Check
-│                           Linux, macOS, and Windows to have passed. Publishing waits for it
+│                           in a clean data folder, Linux). Stable publishes only once these four pass
 ├─ publish                  OIDC: every signed target, then the release (release-service.sh); Nix     [release]
 ├─ github                   last: tag v<version> on the released commit (tag-release.sh), then the    [contents: write]
 │                           GitHub release mirror (publish-github-release.sh); GITHUB_TOKEN only.
@@ -173,8 +179,8 @@ secrets; the `homebrew` job pushes that verified file with the tap deploy key
   and refuses a version already tagged `v<version>` or `app-v<version>`.
   Tags trigger nothing. Only last, once every platform and the release
   service published, the `github` job tags `v<version>` on the released
-  commit with `GITHUB_TOKEN` and the GitHub release `v<version>` (kept off
-  "Latest", which the SDK uses) mirrors the files. A failed run leaves no tag. Releases through
+  commit with `GITHUB_TOKEN` and the GitHub release `v<version>` (GitHub's
+  "Latest"; SDK releases never take it) mirrors the files. A failed run leaves no tag. Releases through
   2.3.1 used `app-v<version>` tags, which stay as history. Deploy the
   production site afterwards with Site.
 
@@ -326,7 +332,11 @@ app (new updater, and on macOS a new bundle ID), so:
   https://anoma.ly/hex (no enclosure, so Sparkle installs nothing). The item
   is prepared with the macOS client work; upload it with the Legacy appcast
   workflow (`.github/workflows/legacy-appcast.yml`, dispatch from `production`),
-  which replaces only `appcast.xml`.
+  which replaces only `appcast.xml`. Superseded (Kit, 2026-11-02): the 2.3.1
+  and Swift feeds offer the released ZIP itself, signed with their old Sparkle
+  key, so Install Update moves those Macs onto the new Hex
+  (docs/plans/swift-app-handoff.md, "Legacy Update"). Keep `SUPublicEDKey` in
+  `app/Info.plist`.
 - **Windows signer:** the updater accepts only a Valid Authenticode signature
   whose signer is `AUTHENTICODE_SIGNER` in `src/updater/windows.rs` (OpenCode's
   Artifact Signing subject). Check the first Azure-signed Hex build's subject
@@ -423,9 +433,13 @@ never self-updates; Settings says
 source checkout".
 
 Both Linux architectures build natively on Ubuntu 24.04 runners
-(`ubuntu-24.04`, `ubuntu-24.04-arm`), so every Linux file needs glibc 2.39
-(Ubuntu 24.04, Debian 13, Fedora 40, current Arch) instead of the newest
-glibc of an Arch build. ARM64 keeps the Vulkan backend like x64; ggml's CPU
+(`ubuntu-24.04`, `ubuntu-24.04-arm`) inside a Debian 12 image
+(`scripts/build-linux-release.sh`, `packaging/linux/build.Dockerfile`, with
+Vulkan headers and glslc from Vulkan SDK 1.4.341), so every Linux file needs
+only glibc 2.36 and GCC 12's libstdc++ (Debian 12, Ubuntu 23.04, Fedora 37,
+current Arch). `.github/release/check-glibc-floor.sh` fails the build if the
+executable needs a newer symbol, and the build installs the `.deb` and runs
+the executables on Debian 12. ARM64 keeps the Vulkan backend like x64; ggml's CPU
 kernels stay portable (`GGML_NATIVE=OFF`, baseline ARMv8-A). There is no
 AppImage: the bare executable already runs without installing, and Hex's
 systemd user unit and updater want a stable executable path that an AppImage

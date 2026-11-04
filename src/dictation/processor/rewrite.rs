@@ -27,6 +27,7 @@ impl Profile {
             apply(&mut text, result, "SpeakoFlow", &mut failures);
         }
         let run_ai = self.ai_enabled
+            && !numbers_only(&text)
             && self.meets_rewrite_threshold(&text)
             && !cancelled.load(Ordering::Acquire);
         if run_ai {

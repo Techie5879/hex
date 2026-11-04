@@ -4,10 +4,8 @@ name: Test builds
 # for Apple silicon Macs, Windows x64 and ARM64 executables and installers,
 # and the Linux x64 and ARM64 executables with their .deb and .rpm. Nothing is published, signed with a
 # release key, or uploaded anywhere but this run's artifacts. See
-# docs/test-builds.md.
+# docs/test-builds.md. This fork builds them only on manual dispatch.
 on:
-  push:
-    branches: [dev]
   workflow_dispatch:
 
 permissions:

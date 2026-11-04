@@ -72,31 +72,37 @@ impl ContextMonitor {
         let (sender, updates) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
-        thread::spawn(move || {
-            let mut previous = None;
-            let mut previous_error = None;
-            while !worker_stop.load(Ordering::Acquire) {
-                match capture() {
-                    Ok(context) => {
-                        previous_error = None;
-                        if !publish_context(&sender, &mut previous, context) {
-                            break;
+        let spawned = thread::Builder::new()
+            .name("foreground-context".into())
+            .spawn(move || {
+                let mut previous = None;
+                let mut previous_error = None;
+                while !worker_stop.load(Ordering::Acquire) {
+                    match capture() {
+                        Ok(context) => {
+                            previous_error = None;
+                            if !publish_context(&sender, &mut previous, context) {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let error = error.to_string();
+                            if previous_error.as_ref() != Some(&error) {
+                                tracing::warn!(%error, "could not capture foreground context");
+                                previous_error = Some(error);
+                            }
+                            if !publish_context(&sender, &mut previous, ContextSnapshot::default())
+                            {
+                                break;
+                            }
                         }
                     }
-                    Err(error) => {
-                        let error = error.to_string();
-                        if previous_error.as_ref() != Some(&error) {
-                            tracing::warn!(%error, "could not capture foreground context");
-                            previous_error = Some(error);
-                        }
-                        if !publish_context(&sender, &mut previous, ContextSnapshot::default()) {
-                            break;
-                        }
-                    }
+                    thread::sleep(poll_interval);
                 }
-                thread::sleep(poll_interval);
-            }
-        });
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "could not start the foreground context monitor");
+        }
         Self { updates, stop }
     }
 }
@@ -211,6 +217,7 @@ impl ContextSnapshot {
             .is_some_and(|current| application_names_equal(current, application))
     }
 
+    #[cfg(debug_assertions)]
     pub fn label(&self) -> String {
         match (&self.application, self.browser_host()) {
             (Some(application), Some(host)) => format!("{application} · {host}"),
@@ -403,11 +410,13 @@ impl ScriptableBrowser {
 
     /// The front window's tab, even when another app is in front.
     /// Background tabs are deliberately not searched: a call open in one
-    /// says nothing about which tab is using the microphone.
+    /// says nothing about which tab is using the microphone. The tab is
+    /// named through the front window each time rather than kept in a
+    /// variable: Arc can't resolve the stored tab-by-id reference (#1113).
     fn meeting_tab(self) -> Result<Option<(Url, Option<String>)>> {
         let (tab, title) = self.tab();
         let script = format!(
-            "tell application id \"{}\"\n    if (count of windows) is 0 then return \"\"\n    set frontTab to {tab} of front window\n    return (URL of frontTab) & linefeed & ({title} of frontTab)\nend tell",
+            "tell application id \"{}\"\n    if (count of windows) is 0 then return \"\"\n    return (URL of {tab} of front window) & linefeed & ({title} of {tab} of front window)\nend tell",
             self.bundle_id
         );
         Ok(parse_tab_output(&self.run(&script)?))

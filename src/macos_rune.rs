@@ -34,9 +34,9 @@ use block2::RcBlock;
 use color_eyre::Result;
 use color_eyre::eyre::eyre;
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{MainThreadOnly, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 use objc2_foundation::{MainThreadMarker, NSAppleEventManager, NSObject, NSString, NSTimer};
 
 use crate::app_settings::AppSettings;
@@ -56,8 +56,14 @@ use crate::transcription::models::{
 };
 use crate::transcription::preparation::TranscriptionPreparation;
 
+mod activation;
 mod control;
+mod main_menu;
+mod profile;
 pub(crate) mod status_item;
+
+use activation::{observe_activation, reopen_on_activation};
+use main_menu::install_main_menu;
 
 #[cfg(test)]
 mod tests;
@@ -118,6 +124,8 @@ pub(crate) enum ShortcutTarget {
     RawDictation,
     /// Labs › Second dictation shortcut.
     SecondDictation,
+    /// Toggle mode's cancel shortcut.
+    Cancel,
 }
 
 /// What the runtime last published for the window and the menu bar.
@@ -266,6 +274,25 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// Asks a running 2.3.1 or Swift Hex to quit once this Hex is ready to
+/// listen, so the two never answer the same shortcut. The old app stays
+/// installed.
+fn quit_legacy_hex() {
+    objc2::rc::autoreleasepool(|_| {
+        for bundle_id in crate::desktop::onboarding::LEGACY_MAC_BUNDLE_IDS {
+            for app in objc2_app_kit::NSRunningApplication::runningApplicationsWithBundleIdentifier(
+                &NSString::from_str(bundle_id),
+            ) {
+                if app.terminate() {
+                    tracing::info!(bundle_id, "asked the old Hex to quit");
+                } else {
+                    tracing::warn!(bundle_id, "the old Hex did not agree to quit");
+                }
+            }
+        }
+    });
+}
+
 /// Samples footprint and CPU for the life of the app (every 10 s in release, 2 s in debug
 /// builds) and logs a warning on a large footprint, steady growth, or a busy core.
 fn watch_process() {
@@ -283,6 +310,9 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
     };
     shutdown.store(false, Ordering::Relaxed);
     watch_process();
+    // Observing first means a source change during startup still rebuilds
+    // the snapshot at the pump's first turn.
+    crate::keyboard_input_sources::start(mtm);
     crate::keyboard::initialize_layout()?;
     crate::updater::finish_on_launch();
     let _ = UPDATER.set(crate::updater::Updater::start());
@@ -325,6 +355,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
             ..Default::default()
         },
     )?;
+    let (profile_sender, profile_calls) = mpsc::sync_channel(4);
     let (controller_events_sender, controller_events) = mpsc::sync_channel(32);
     let (controller_commands, controller_command_receiver) = mpsc::sync_channel(8);
     let (meeting_requests, meeting_request_receiver) = mpsc::sync_channel(8);
@@ -370,6 +401,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
                     }
                 }
             }
+            quit_legacy_hex();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::recognition::listen(
                     event_log,
@@ -425,9 +457,15 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
                 listener_failure,
             )
         })?;
+    // A closed window is only ordered out, and AppKit keeps it on the Space
+    // it was last shown on: reopening it from the menu bar would switch back
+    // to that Space. Bring it to the active Space instead.
+    let native = rune::MacWindowOptions::default()
+        .collection_behavior(objc2_app_kit::NSWindowCollectionBehavior::MoveToActiveSpace.0);
     let mut app = crate::rune_ui::app(Default::default())
         .args(Vec::new())
-        .accessory();
+        .accessory()
+        .macos_window(native);
     // The first-run tour opens centred at one size; a tiling window manager
     // would otherwise stretch it to half the screen.
     if !onboarding_completed {
@@ -476,6 +514,21 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
     #[cfg(hex_capture)]
     let capture_overlays =
         Some(crate::rune_ui::capture_capsule::feed::CaptureOverlays::install(&mut app));
+    // `hex dictation` and `hex paste-last` go straight to the listener; the
+    // rest reach the main thread's pump.
+    let (pump_calls, pump_call_receiver) = mpsc::sync_channel(8);
+    let control_runtime = handle.clone();
+    thread::Builder::new()
+        .name("hex-control".into())
+        .spawn(move || {
+            for call in control_receiver {
+                if let Some(call) = control::answer_off_main(&control_runtime, call)
+                    && pump_calls.send(call).is_err()
+                {
+                    return;
+                }
+            }
+        })?;
     let pump = Pump {
         window: window.clone(),
         capsules,
@@ -488,7 +541,11 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
         status_actions: None,
         controller_events,
         developer_calls: developer_receiver,
-        control_calls: control_receiver,
+        control_calls: pump_call_receiver,
+        profile_sender,
+        profile_calls,
+        profile_listener: None,
+        profile_check_at: Instant::now(),
         meeting_waiters: Vec::new(),
         meeting_state: MeetingMenuState::Idle,
         meeting_menu_at: Instant::now(),
@@ -806,6 +863,10 @@ struct Pump {
     controller_events: Receiver<ControllerEvent>,
     developer_calls: Receiver<crate::control::developer_control::DeveloperCall>,
     control_calls: Receiver<crate::control::ControlCall>,
+    profile_sender: SyncSender<crate::profile_sync::listener::Call>,
+    profile_calls: Receiver<crate::profile_sync::listener::Call>,
+    profile_listener: Option<crate::profile_sync::listener::Listener>,
+    profile_check_at: Instant,
     meeting_waiters: Vec<control::MeetingWaiter>,
     meeting_state: MeetingMenuState,
     meeting_menu_at: Instant,
@@ -887,6 +948,7 @@ fn start_main_thread() {
     );
     let indicator = DictationIndicatorUi::new(pump.hud.clone());
     install_main_menu(&target, mtm);
+    observe_activation(&target);
     // Inside the loop, once AppKit has started, so its own Apple event setup
     // can't replace this handler.
     // SAFETY: the target outlives the handler (kept in PUMP for the app's
@@ -907,6 +969,9 @@ fn start_main_thread() {
                     let switching = state.pump.runtime.published().is_some_and(|published| {
                         published.settings.keyboard_model_switching.enabled
                     });
+                    if crate::keyboard_input_sources::take_layout_change(mtm) {
+                        refresh_keyboard_layout(mtm);
+                    }
                     crate::keyboard_input_sources::observe(mtm, switching);
                     if let Some(source) = crate::keyboard_input_sources::take_change(mtm) {
                         let _ = state.pump.runtime.send(Request::InputSourceChanged(source));
@@ -936,6 +1001,21 @@ fn start_main_thread() {
     });
 }
 
+/// Rebuilds the keyboard layout snapshot after the selected input source
+/// changed, here on the main thread, so a later ⌘V posts the key that types
+/// V now (t1304). Shortcuts on letter keys follow it; the listener rebinds a
+/// shortcut only once its machine is idle, so a recording goes on.
+fn refresh_keyboard_layout(mtm: MainThreadMarker) {
+    match crate::keyboard::refresh_layout(mtm) {
+        Ok(true) => {
+            tracing::info!("keyboard layout changed");
+            crate::app_settings::refresh_layout_hotkeys();
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!(%error, "could not read the new keyboard layout"),
+    }
+}
+
 /// Whether the window is on screen.
 fn window_visible() -> bool {
     WINDOW.get().is_some_and(rune::AppHandle::is_visible)
@@ -945,6 +1025,12 @@ fn window_visible() -> bool {
 fn show(window: &rune::AppHandle<Ui>, destination: Destination) {
     window.update(move |ui, tx| crate::rune_ui::show(ui, destination, tx));
     bring_forward(window);
+}
+
+/// Opens the window where its footer shows the update check's outcome.
+fn show_update_check(window: &rune::AppHandle<Ui>) {
+    window.update(|ui, _| crate::rune_ui::update_check_asked(ui));
+    show(window, Destination::Settings);
 }
 
 /// Opens the window in front, from the main thread.
@@ -958,29 +1044,9 @@ fn bring_forward(window: &rune::AppHandle<Ui>) {
     crate::app_settings::set_dock_icon_visible(true);
     if let Some(mtm) = MainThreadMarker::new() {
         let app = NSApplication::sharedApplication(mtm);
-        follow_active_space(&app);
         app.activate();
     }
     window.open();
-}
-
-/// Lets Hex's main window open on the Space the user is on, instead of
-/// activating Hex switching back to the Space it was first shown on (#596).
-/// Overlays and panels (which can't become main, or already join every
-/// Space) are left alone: AppKit refuses `MoveToActiveSpace` beside
-/// `CanJoinAllSpaces`.
-fn follow_active_space(app: &NSApplication) {
-    use objc2_app_kit::NSWindowCollectionBehavior;
-    for window in app.windows().iter() {
-        let behavior = window.collectionBehavior();
-        if !window.canBecomeMainWindow()
-            || behavior.contains(NSWindowCollectionBehavior::CanJoinAllSpaces)
-            || behavior.contains(NSWindowCollectionBehavior::MoveToActiveSpace)
-        {
-            continue;
-        }
-        window.setCollectionBehavior(behavior | NSWindowCollectionBehavior::MoveToActiveSpace);
-    }
 }
 
 impl Pump {
@@ -1012,6 +1078,7 @@ impl Pump {
             let reply = self.developer(call.command, indicator);
             let _ = call.reply.send(reply);
         }
+        self.profile_sync_tick();
         while let Ok(call) = self.control_calls.try_recv() {
             self.control(call);
         }
@@ -1097,9 +1164,16 @@ impl Pump {
                 }
             }
             StatusItemAction::Update => {
-                if let Some(updater) = UPDATER.get()
-                    && let Err(error) = update_action(&updater.menu_action())
-                {
+                let Some(updater) = UPDATER.get() else {
+                    return;
+                };
+                let action = updater.menu_action();
+                // A check from the menu bar opens the window, whose footer
+                // says how it went: up to date or couldn't check (#1120).
+                if action == DesktopAction::CheckForUpdates {
+                    show_update_check(&self.window);
+                }
+                if let Err(error) = update_action(&action) {
                     tracing::warn!(error = %format!("{error:#}"), "the update menu item failed");
                 }
             }
@@ -1194,8 +1268,12 @@ impl Pump {
             ControllerEvent::OpenMeeting(id) => {
                 show(&self.window, Destination::Meetings(Some(id)));
             }
-            ControllerEvent::CallEnded { app } => {
-                tracing::info!(%app, "the call ended; the recording continues until Stop");
+            ControllerEvent::CallEnded { app, auto_stop } => {
+                if auto_stop {
+                    tracing::info!(%app, "the call ended; the recording stops after its grace unless kept");
+                } else {
+                    tracing::info!(%app, "the call ended; the recording continues until Stop");
+                }
             }
             ControllerEvent::Transcribing => self.meeting_state = MeetingMenuState::Transcribing,
             ControllerEvent::Finished(manifest) => {
@@ -1285,6 +1363,7 @@ objc2::define_class!(
 
         #[unsafe(method(checkForUpdates:))]
         fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            with_window(show_update_check);
             let _ = update_action(&crate::desktop::host::DesktopAction::CheckForUpdates);
         }
 
@@ -1323,6 +1402,20 @@ objc2::define_class!(
             with_window(|window| show(window, Destination::Settings));
         }
 
+        /// ⌘Tab (or any activation) with the window closed opens it where
+        /// it was, as clicking the Dock icon does.
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn application_did_become_active(&self, _notification: Option<&AnyObject>) {
+            let app = NSApplication::sharedApplication(self.mtm());
+            if reopen_on_activation(
+                app.activationPolicy() == NSApplicationActivationPolicy::Regular,
+                app.keyWindow().is_some(),
+                window_visible(),
+            ) {
+                with_window(bring_forward);
+            }
+        }
+
         /// `-[NSApplication terminate:]` calls `exit` right after this.
         #[unsafe(method(applicationWillTerminate:))]
         fn application_will_terminate(&self, _notification: Option<&AnyObject>) {
@@ -1348,80 +1441,4 @@ fn with_window(f: impl FnOnce(&rune::AppHandle<Ui>)) {
     if let Some(window) = WINDOW.get() {
         f(window);
     }
-}
-
-/// The menu bar while the window is active: Hex, File, View (with the
-/// Labs), Window.
-/// Rune draws no Edit menu items, so ⌘C/⌘V reach its text fields as keys.
-fn install_main_menu(target: &MenuTarget, mtm: MainThreadMarker) {
-    let main = NSMenu::new(mtm);
-    let name = crate::app_paths::app_name();
-    let (hide, quit) = (format!("Hide {name}"), format!("Quit {name}"));
-    let mut application = vec![];
-    if !crate::updater::managed_by_policy() {
-        application.push(Some(("Check for Updates…", sel!(checkForUpdates:), "")));
-        application.push(None);
-    }
-    application.extend([
-        Some(("Settings…", sel!(showSettings:), ",")),
-        None,
-        Some((hide.as_str(), sel!(hideHex:), "h")),
-        None,
-        Some((quit.as_str(), sel!(quitHex:), "q")),
-    ]);
-    let mut menus = vec![
-        (name, application),
-        (
-            "File",
-            vec![Some(("Close Window", sel!(closeWindow:), "w"))],
-        ),
-    ];
-    // Rune's own View › Playground item, which this menu bar replaces. A
-    // capital letter adds Shift: ⇧⌘D. It opens the playground only while
-    // Labs › Playground is on.
-    menus.push((
-        "View",
-        vec![Some(("Playground", sel!(togglePlayground:), "D"))],
-    ));
-    menus.push((
-        "Window",
-        vec![Some(("Minimize", sel!(minimizeWindow:), "m"))],
-    ));
-    for (title, items) in menus {
-        let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str(title));
-        for item in items {
-            match item {
-                Some((title, action, key)) => {
-                    menu.addItem(&menu_item(target, title, action, key, mtm));
-                }
-                None => menu.addItem(&NSMenuItem::separatorItem(mtm)),
-            }
-        }
-        let heading = NSMenuItem::new(mtm);
-        heading.setSubmenu(Some(&menu));
-        main.addItem(&heading);
-    }
-    NSApplication::sharedApplication(mtm).setMainMenu(Some(&main));
-}
-
-fn menu_item(
-    target: &MenuTarget,
-    title: &str,
-    action: Sel,
-    key: &str,
-    mtm: MainThreadMarker,
-) -> Retained<NSMenuItem> {
-    // SAFETY: a plain menu item whose action the target implements.
-    let item = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str(title),
-            Some(action),
-            &NSString::from_str(key),
-        )
-    };
-    item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
-    // SAFETY: the target lives as long as the app (kept in PUMP).
-    unsafe { item.setTarget(Some(target)) };
-    item
 }

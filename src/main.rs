@@ -44,12 +44,16 @@ mod macos_rune;
 mod meeting;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod microphone_activity;
+mod net;
 #[cfg(target_os = "macos")]
 mod parakeet;
 #[cfg(target_os = "macos")]
 mod paste;
 #[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
 mod personal_commands;
+#[cfg_attr(any(target_os = "linux", target_os = "windows"), allow(dead_code))]
+mod policy;
+mod profile_sync;
 #[cfg(target_os = "macos")]
 mod recognition;
 mod rune_hud;
@@ -68,7 +72,7 @@ use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "macos")]
 use clap::{Parser, Subcommand, ValueEnum};
 use color_eyre::Result;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", debug_assertions))]
 use color_eyre::eyre::eyre;
 
 #[cfg(target_os = "macos")]
@@ -860,6 +864,7 @@ fn main() -> Result<()> {
 fn main() -> Result<()> {
     // DLL search hardening first: the CPU check's message box loads DLLs.
     windows::restrict_dll_search();
+    windows::vulkan::check();
     windows::gpu_fallback::choose();
     #[cfg(target_arch = "x86_64")]
     transcription::cpu_floor::require();

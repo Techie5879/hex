@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Hex</string>
+    <string name="a11y_summary">Shows the Hex button on text fields and inserts your dictation at the cursor.</string>
+    <string name="a11y_description">Hex checks whether the focused field accepts text, and what kind of field it is, so its button appears on ordinary text fields and stays away from passwords. When you finish dictating, Hex inserts the text at your cursor. Hex reads only what it needs around your cursor and keeps nothing from your screen. It records only after you tap or hold its button.</string>
+</resources>
