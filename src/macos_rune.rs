@@ -319,7 +319,7 @@ fn watch_process() {
     procwatch::watch_with(config, |event, _| tracing::warn!(%event, "process watch"));
 }
 
-pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()> {
+pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool) -> Result<()> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(eyre!("desktop startup requires the main thread"));
     };
@@ -496,6 +496,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
         LaunchWindow::Open
     } else {
         LaunchWindow::decide(
+            hidden,
             settings.show_dock_icon,
             setup_ready,
             onboarding_completed,
