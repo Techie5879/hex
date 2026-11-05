@@ -22,27 +22,25 @@ const STREAM_PREWARM_SAMPLES: usize = 8 * 16_000;
 
 thread_local! {
     static JOB_CANCEL: RefCell<Option<transcribe_cpp::CancelToken>> = const { RefCell::new(None) };
-    static LIVE_PREVIEW: Cell<bool> = const { Cell::new(false) };
+    static INTERACTIVE_TRANSCRIPTION: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Temporary captions yield the Metal GPU between smaller graph submissions.
-/// Final transcription and every other model keep their original scheduling.
-pub(crate) fn with_live_preview<R>(
-    cancel: &transcribe_cpp::CancelToken,
-    work: impl FnOnce() -> R,
-) -> R {
+/// Dictation and its captions yield the Metal GPU between smaller graph
+/// submissions so the HUD can animate through release and final transcription.
+/// Background work and other model architectures keep their original scheduling.
+pub(crate) fn with_interactive_transcription<R>(work: impl FnOnce() -> R) -> R {
     struct Restore(bool);
     impl Drop for Restore {
         fn drop(&mut self) {
-            LIVE_PREVIEW.set(self.0);
+            INTERACTIVE_TRANSCRIPTION.set(self.0);
         }
     }
-    let _restore = Restore(LIVE_PREVIEW.replace(true));
-    with_job_cancel(cancel, work)
+    let _restore = Restore(INTERACTIVE_TRANSCRIPTION.replace(true));
+    work()
 }
 
-fn preview_command_buffers(architecture: &str) -> u32 {
-    if cfg!(target_os = "macos") && architecture == "whisper" && LIVE_PREVIEW.get() {
+pub(super) fn interactive_command_buffers(architecture: &str) -> u32 {
+    if cfg!(target_os = "macos") && architecture == "whisper" && INTERACTIVE_TRANSCRIPTION.get() {
         8
     } else {
         0
@@ -341,7 +339,7 @@ impl OfflineGgufSession {
             session.set_cancel_token(&cancel);
         }
         let options = self.with_vocabulary(options, false);
-        let buffers = preview_command_buffers(&self.model.arch());
+        let buffers = interactive_command_buffers(&self.model.arch());
         let run = if buffers == 0 {
             session.run(samples, &options)
         } else {
@@ -801,31 +799,31 @@ mod tests {
     }
 
     #[test]
-    fn metal_scheduling_is_scoped_to_whisper_previews() {
-        let cancel = transcribe_cpp::CancelToken::new();
-        assert_eq!(preview_command_buffers("whisper"), 0);
-        with_live_preview(&cancel, || {
+    fn metal_scheduling_is_scoped_to_interactive_whisper() {
+        assert_eq!(interactive_command_buffers("whisper"), 0);
+        with_interactive_transcription(|| {
             assert_eq!(
-                preview_command_buffers("whisper"),
+                interactive_command_buffers("whisper"),
                 if cfg!(target_os = "macos") { 8 } else { 0 }
             );
-            assert_eq!(preview_command_buffers("parakeet"), 0);
-            with_live_preview(&cancel, || assert!(LIVE_PREVIEW.get()));
-            assert!(LIVE_PREVIEW.get());
+            assert_eq!(interactive_command_buffers("parakeet"), 0);
+            with_interactive_transcription(|| assert!(INTERACTIVE_TRANSCRIPTION.get()));
+            assert!(INTERACTIVE_TRANSCRIPTION.get());
         });
-        assert!(!LIVE_PREVIEW.get());
+        assert!(!INTERACTIVE_TRANSCRIPTION.get());
         assert!(job_cancel().is_none());
-        assert_eq!(preview_command_buffers("whisper"), 0);
+        assert_eq!(interactive_command_buffers("whisper"), 0);
     }
 
     #[test]
-    fn failed_preview_restores_normal_scheduling_and_cancel_scope() {
+    fn failed_interactive_run_restores_normal_scheduling_and_cancel_scope() {
         let cancel = transcribe_cpp::CancelToken::new();
-        let result =
-            std::panic::catch_unwind(|| with_live_preview(&cancel, || panic!("preview failed")));
+        let result = std::panic::catch_unwind(|| {
+            with_interactive_transcription(|| with_job_cancel(&cancel, || panic!("run failed")))
+        });
         assert!(result.is_err());
-        assert!(!LIVE_PREVIEW.get());
+        assert!(!INTERACTIVE_TRANSCRIPTION.get());
         assert!(job_cancel().is_none());
-        assert_eq!(preview_command_buffers("whisper"), 0);
+        assert_eq!(interactive_command_buffers("whisper"), 0);
     }
 }

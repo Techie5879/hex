@@ -1024,10 +1024,12 @@ impl Worker {
                                         .ok_or_else(|| "preview model changed".to_string())?;
                                     let model = held(model, &selection)
                                         .ok_or_else(|| "preview model changed".to_string())?;
-                                    crate::transcription::gguf_session::with_live_preview(
-                                        &cancel,
-                                        || transcribe_clip(model, samples),
-                                    )
+                                    crate::transcription::gguf_session::with_interactive_transcription(|| {
+                                        crate::transcription::gguf_session::with_job_cancel(
+                                            &cancel,
+                                            || transcribe_clip(model, samples),
+                                        )
+                                    })
                                     .map_err(|e| format!("{e:#}"))
                                 },
                             );
@@ -1070,8 +1072,10 @@ impl Worker {
                         None => Source::Offline,
                     };
                     self.dictating.store(true, Ordering::Release);
-                    crate::dictation::vocabulary::for_dictation(|| {
-                        self.run_offline(clip, offline, source, job);
+                    crate::transcription::gguf_session::with_interactive_transcription(|| {
+                        crate::dictation::vocabulary::for_dictation(|| {
+                            self.run_offline(clip, offline, source, job);
+                        });
                     });
                     self.dictating.store(false, Ordering::Release);
                 }
@@ -1287,7 +1291,9 @@ impl Worker {
                     }
                     Err(reason) => {
                         tracing::warn!(%reason, "live stream unusable; transcribing the full clip");
-                        self.offline(clip, offline, Source::Fallback(reason), started, job);
+                        crate::transcription::gguf_session::with_interactive_transcription(|| {
+                            self.offline(clip, offline, Source::Fallback(reason), started, job);
+                        });
                     }
                 }
             }
@@ -2096,6 +2102,49 @@ mod tests {
                 .unwrap();
             assert_eq!(transcribed.text, "whole 5");
             assert_eq!(transcribed.source, Source::Offline);
+        }
+
+        #[test]
+        fn final_dictation_yields_the_gpu_then_restores_foreground_scheduling() {
+            use crate::transcription::gguf_session::{interactive_command_buffers, job_cancel};
+
+            let engine = TranscriptionEngine::start(Model::default()).unwrap();
+            for fail in [false, true] {
+                let pending = engine
+                    .finish_with(
+                        None,
+                        vec![0.0; 5],
+                        Box::new(move |_, clip| {
+                            assert_eq!(clip.len(), 5, "the complete clip reaches final inference");
+                            assert_eq!(interactive_command_buffers("whisper"), 8);
+                            assert_eq!(interactive_command_buffers("parakeet"), 0);
+                            if fail {
+                                job_cancel().unwrap().cancel();
+                                Err("cancelled final inference".into())
+                            } else {
+                                Ok("final text".into())
+                            }
+                        }),
+                    )
+                    .unwrap();
+                let result = pending.wait();
+                assert_eq!(result.is_err(), fail);
+                if let Ok(result) = result {
+                    assert_eq!(result.text, "final text");
+                }
+                engine
+                    .foreground(
+                        vec![],
+                        Box::new(|_, _| {
+                            assert_eq!(interactive_command_buffers("whisper"), 0);
+                            assert!(!job_cancel().unwrap().is_cancelled());
+                            Ok("host request".into())
+                        }),
+                    )
+                    .unwrap()
+                    .wait()
+                    .unwrap();
+            }
         }
 
         #[test]
