@@ -58,7 +58,8 @@ pub(super) const NOTES_END: &str = "<!-- /hex:notes -->";
 
 const NOTES_INSTRUCTIONS: &str = "You title and summarize meeting transcripts. Each line starts \
 with a timestamp and a speaker label: You is the person who recorded the meeting, Them is one or \
-more other participants, and any other label is the name of the participant the call app showed \
+more other participants. Room mic and Call audio label capture paths, not individual people. \
+Only labels other than these four identify the participant the call app showed \
 speaking. A long meeting is excerpted, and […] marks skipped parts. Write \
 one short, specific title for the whole meeting and a summary of at most two short sentences \
 on the main topics and outcomes. Use only what the transcript says; never invent names, dates, \
@@ -66,7 +67,8 @@ or numbers.";
 
 const TITLE_INSTRUCTIONS: &str = "You name meetings from the first part of their transcript. \
 Each line starts with a timestamp and a speaker label: You is the person who recorded the \
-meeting, Them is one or more other participants, and any other label names a participant. Write \
+meeting, Them is one or more other participants. Room mic and Call audio label capture paths, \
+not individual people. Only labels other than these four name a participant. Write \
 one short, specific title naming \
 the main topic. Use only what the transcript says.";
 
@@ -296,7 +298,8 @@ pub(super) fn summarize_with_calendar(
     mut generate: impl FnMut(&str, &str, Duration) -> Result<GeneratedNotes, GenerationError>,
 ) -> Result<Summary> {
     let preamble = format!(
-        "{}{}",
+        "{}{}{}",
+        super::label_context(entries),
         super::chapters::vocabulary_line(terms),
         calendar_preamble(calendar)
     );
@@ -628,7 +631,11 @@ pub(super) fn provisional_title(
     if excerpt.text.is_empty() {
         return Err(eyre!("the transcript has no speech yet"));
     }
-    let prompt = format!("Meeting transcript so far:\n\n{}", excerpt.text);
+    let prompt = format!(
+        "{}Meeting transcript so far:\n\n{}",
+        super::label_context(entries),
+        excerpt.text
+    );
     let title =
         clean_title(&generate(TITLE_INSTRUCTIONS, &prompt, timeout).map_err(|e| eyre!("{e}"))?);
     if title.is_empty() {
@@ -907,8 +914,9 @@ fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
 }
 
 /// Parses the turns of an exported meeting Markdown file (`**You** · 01:02`
-/// followed by the turn's text). Any label other than `You` and `Them` is a
-/// participant's name on the call audio.
+/// followed by the turn's text). Any label other than `You` and `Them`, or
+/// a shared room's `Room mic` and `Call audio`, is a participant's name on
+/// the call audio.
 #[cfg(any(debug_assertions, test))]
 pub(super) fn entries_from_markdown(markdown: &str) -> Vec<TranscriptEntry> {
     let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -918,21 +926,27 @@ pub(super) fn entries_from_markdown(markdown: &str) -> Vec<TranscriptEntry> {
             .strip_prefix("**")
             .and_then(|rest| rest.split_once("** · "))
             .and_then(|(label, clock)| {
-                let (source, speaker) = match label {
-                    "You" => (super::MeetingSource::Microphone, None),
-                    "Them" => (super::MeetingSource::System, None),
-                    name if super::speakers::is_valid_name(name) => {
-                        (super::MeetingSource::System, Some(name.to_owned()))
-                    }
+                use super::{MeetingMode, MeetingSource};
+                let (source, speaker, mode) = match label {
+                    "You" => (MeetingSource::Microphone, None, MeetingMode::Standard),
+                    "Them" => (MeetingSource::System, None, MeetingMode::Standard),
+                    "Room mic" => (MeetingSource::Microphone, None, MeetingMode::SharedRoom),
+                    "Call audio" => (MeetingSource::System, None, MeetingMode::SharedRoom),
+                    name if super::speakers::is_valid_name(name) => (
+                        MeetingSource::System,
+                        Some(name.to_owned()),
+                        MeetingMode::Standard,
+                    ),
                     _ => return None,
                 };
                 let (minutes, seconds) = clock.trim().split_once(':')?;
                 let start_ms =
                     (minutes.parse::<u64>().ok()? * 60 + seconds.parse::<u64>().ok()?) * 1_000;
-                Some((source, speaker, start_ms))
+                Some((source, speaker, mode, start_ms))
             });
-        if let Some((source, speaker, start_ms)) = header {
+        if let Some((source, speaker, mode, start_ms)) = header {
             entries.push(TranscriptEntry {
+                mode,
                 source,
                 start_ms,
                 end_ms: start_ms,
@@ -1054,6 +1068,7 @@ mod tests {
 
     fn entry(source: MeetingSource, start_ms: u64, text: &str) -> TranscriptEntry {
         TranscriptEntry {
+            mode: Default::default(),
             source,
             start_ms,
             end_ms: start_ms + 1_000,
@@ -1134,6 +1149,55 @@ mod tests {
             "They reviewed the launch plan. Docs move to Friday."
         );
         assert_eq!(summary.excerpt_chars, summary.transcript_chars);
+    }
+
+    #[test]
+    fn shared_room_prompts_explain_their_source_labels_and_never_say_you() {
+        let room = conversation(4)
+            .into_iter()
+            .map(|entry| TranscriptEntry {
+                mode: crate::meeting::MeetingMode::SharedRoom,
+                ..entry
+            })
+            .collect::<Vec<_>>();
+        let mut prompts = Vec::new();
+        summarize_entries(
+            &room,
+            FINAL_EXCERPT_CHARS,
+            Instant::now() + Duration::from_secs(60),
+            |instructions, prompt, _| {
+                prompts.push((instructions.to_string(), prompt.to_string()));
+                Ok(generated("Launch", "They met."))
+            },
+        )
+        .unwrap();
+        provisional_title(
+            &room,
+            5_000,
+            Duration::from_secs(5),
+            |instructions, prompt, _| {
+                prompts.push((instructions.to_string(), prompt.to_string()));
+                Ok("Launch".into())
+            },
+        )
+        .unwrap();
+        for (instructions, prompt) in &prompts {
+            assert!(instructions.contains("Room mic and Call audio label capture paths"));
+            assert!(instructions.contains("not individual people"));
+            assert!(
+                prompt.starts_with("Speaker labels: Room mic is"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("[00:00] Room mic: Turn 0"), "{prompt}");
+            assert!(prompt.contains("] Call audio: Turn"), "{prompt}");
+            assert!(!prompt.contains("] You:") && !prompt.contains("] Them:"));
+        }
+        let window = crate::meeting::chapters::pass_window(&room, 0, 5_000).unwrap();
+        let chapters = crate::meeting::chapters::prompt(&window, None, &[]);
+        assert!(
+            chapters.starts_with("Speaker labels: Room mic is"),
+            "{chapters}"
+        );
     }
 
     #[test]
@@ -1571,6 +1635,7 @@ mod tests {
             entries,
             [
                 TranscriptEntry {
+                    mode: Default::default(),
                     source: MeetingSource::Microphone,
                     start_ms: 1_000,
                     end_ms: 4_000,
@@ -1578,6 +1643,7 @@ mod tests {
                     speaker: None,
                 },
                 TranscriptEntry {
+                    mode: Default::default(),
                     source: MeetingSource::System,
                     start_ms: 4_000,
                     end_ms: 4_400,

@@ -53,6 +53,8 @@ impl Status {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Turn {
     pub(super) mine: bool,
+    /// A shared-room meeting's turn (Labs): `Room mic` or `Call audio`.
+    pub(super) room: bool,
     /// The call-audio participant's name (Labs); `Them` without one.
     pub(super) speaker: Option<String>,
     pub(super) start_ms: u64,
@@ -106,6 +108,8 @@ pub(super) struct Meeting {
     /// How long it is kept once finished, as `MeetingRetention::label`;
     /// `None` when it is kept for good.
     pub(super) kept_for: Option<&'static str>,
+    /// Recorded in shared-room mode (Labs).
+    pub(super) shared_room: bool,
 }
 
 impl Meeting {
@@ -211,12 +215,15 @@ pub(super) fn clock_offset(milliseconds: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
-/// `You`, `Them`, or the participant's name, untranslated, as copies say it.
+/// `You`, `Them`, the participant's name, or in a shared room `Room mic` or
+/// `Call audio`, untranslated, as copies say it.
 fn speaker_label(turn: &Turn) -> &str {
-    match (&turn.speaker, turn.mine) {
-        (_, true) => "You",
-        (Some(name), false) => name,
-        (None, false) => "Them",
+    match (&turn.speaker, turn.mine, turn.room) {
+        (_, true, true) => "Room mic",
+        (_, false, true) => "Call audio",
+        (_, true, false) => "You",
+        (Some(name), false, false) => name,
+        (None, false, false) => "Them",
     }
 }
 
@@ -298,6 +305,7 @@ impl MeetingsPane {
     pub(super) fn fixture() -> Self {
         let turn = |mine, seconds: u64, text: &str| Turn {
             mine,
+            room: false,
             speaker: None,
             start_ms: seconds * 1_000,
             text: text.into(),
@@ -360,6 +368,7 @@ impl MeetingsPane {
                 chapters: Vec::new(),
                 snapshots: Default::default(),
                 kept_for: Some("24 hours"),
+                shared_room: false,
             };
         let mut live = meeting(
             "preview-live",
@@ -410,6 +419,46 @@ impl MeetingsPane {
             selected: Some("preview-notes".into()),
             ..Self::default()
         }
+    }
+
+    /// A stored shared-room meeting still uses its source labels while the
+    /// global switch is off. All content is invented.
+    pub(super) fn shared_room_fixture() -> Self {
+        let mut pane = Self::fixture();
+        let meeting = pane
+            .meetings
+            .iter_mut()
+            .find(|meeting| meeting.id == "preview-live")
+            .unwrap();
+        meeting.title = "Room planning session".into();
+        meeting.app = Some("Slack Huddle".into());
+        meeting.shared_room = true;
+        let lines = [
+            (false, "The rehearsal is confirmed for Thursday afternoon."),
+            (true, "Can someone close the door near the whiteboard?"),
+            (
+                false,
+                "We should bring twelve copies of the revised agenda.",
+            ),
+            (true, "The projector cable is in the cupboard."),
+            (false, "Let's review the final slide before we finish."),
+        ];
+        meeting.transcript = Transcript::Loaded(
+            lines
+                .into_iter()
+                .enumerate()
+                .map(|(index, (mine, text))| Turn {
+                    mine,
+                    room: true,
+                    speaker: None,
+                    start_ms: index as u64 * 8_000,
+                    text: text.into(),
+                    pause_before_ms: None,
+                })
+                .collect(),
+        );
+        pane.selected = Some("preview-live".into());
+        pane
     }
 
     /// The fixture with recordings from more call services, for Labs ›
@@ -1049,12 +1098,23 @@ fn detail(ui: &Ui, p: Paint, meeting: &Meeting, layer: &mut Vec<El>) -> El {
     if let Some(snapshots) = super::meeting_snapshots::view(ui, p, meeting) {
         body = body.child(snapshots);
     }
-    if let Some(names) = crate::meeting::speakers::active_status(&meeting.id) {
+    if !meeting.shared_room
+        && let Some(names) = crate::meeting::speakers::active_status(&meeting.id)
+    {
         body = body.child(
             text(tr(names.label()))
                 .key("speaker-names")
                 .font(DESCRIPTION)
                 .color(p.faint()),
+        );
+    }
+    if meeting.shared_room {
+        body = body.child(
+            text(tr("Shared room: Room mic is everyone near this computer and Call audio is the call. Hex doesn't tell the people apart."))
+                .key("shared-room")
+                .font(DESCRIPTION)
+                .color(p.faint())
+                .wrap(),
         );
     }
     if !meeting.chapters.is_empty() {
@@ -1319,10 +1379,12 @@ pub(super) fn turn_line(p: Paint, index: usize, turn: &Turn) -> Vec<El> {
                     .key("speaker")
                     .gap(8.0)
                     .child(
-                        text(match (&turn.speaker, turn.mine) {
-                            (_, true) => tr("You"),
-                            (Some(name), false) => name.as_str(),
-                            (None, false) => tr("Them"),
+                        text(match (&turn.speaker, turn.mine, turn.room) {
+                            (_, true, true) => tr("Room mic"),
+                            (_, false, true) => tr("Call audio"),
+                            (_, true, false) => tr("You"),
+                            (Some(name), false, false) => name.as_str(),
+                            (None, false, false) => tr("Them"),
                         })
                         .key("name")
                         .font(p.k.ty.small_medium)

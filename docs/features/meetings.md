@@ -1415,6 +1415,15 @@ Granola import: see [granola-import.md](../plans/granola-import.md).
 
 ## Gaps
 
+- A recording started by hand, including a shared-room one, is bound to no
+  call app and never stops when the call ends. A bounded follow-up: an
+  explicit "Stop with <call>" choice on the recording capsule or
+  `hex meetings record --call <app>`, offered only for a call Hex can confirm
+  uniquely (exactly one detected call app on the microphone or playing call
+  audio), never chosen for the user, never from a calendar timer or room
+  silence, stored in the manifest, and then the existing 30 s Keep recording
+  countdown. Not implemented.
+
 - No executed end-to-end recording with a real call, Screen Recording grant, or
   speakers echo in this change; see the test script in the handoff.
 - The process tap, its System Audio Recording prompt, and display-sleep
@@ -1511,6 +1520,78 @@ interruption history, blinking-caret suppression, and bounded motion sampling. T
 artificial diagram pixels. These checks do not prove capture of a live Teams
 share, macOS permission behavior, or native end-to-end capture. No live meeting
 or private screenshot is used in repository fixtures.
+
+## Shared room meetings
+
+For a call where several people sit in one room with this computer, its
+microphone hears all of them, and another computer in the room may carry the
+same voices into the call, so they come back a moment later as system audio.
+Standard labels call the microphone `You` and the call `Them`, and echo
+suppression keeps a microphone sentence the signal calls local, so such a call
+shows each room sentence twice under two wrong names. Hex can't tell the people
+in a room apart; this mode only labels honestly and removes the plain repeats.
+
+```ts
+Labs › Shared room meetings                       // labs.shared_room_meetings
+├── Off by default; macOS (Meetings' platform); the saved setting does nothing elsewhere
+├── Read once, as a recording's manifest is written, before capture
+│   └── manifest.mode = "shared_room" (absent = standard; older files read as standard)
+├── The mode belongs to the meeting: turning the lab on or off never relabels a
+│   recording in progress, a finished meeting, or a final pass after a restart
+├── Each transcript entry carries the meeting's mode (`mode`, written only when shared)
+│   ├── Microphone -> Room mic (everyone near the computer, the recorder included)
+│   ├── System audio -> Call audio (the call, which can carry the room again)
+│   └── Participant names (Labs › Meeting speaker names) are kept in the files
+│       but never shown: one call account can carry the whole room
+├── Echo suppression (meeting/transcript/echo_words.rs)
+│   ├── Signal bleed -> dropped, as in standard meetings
+│   ├── Words alone (no signal) -> never echo; the 60 % bag-of-words rule is not used
+│   └── Then shared_room::drop_call_repeats: a microphone utterance is dropped,
+│       and the call copy kept, only when all of
+│       ├── adjacent room lines within 700 ms are judged together, never
+│       │   discarding a suffix after the complete utterance disagrees
+│       ├── ≥ 5 words and ≥ 4 outside the fillers/articles list
+│       ├── its words appear in order, exactly (case and punctuation aside),
+│       │   in one stretch of call words, differing only by fillers/articles,
+│       │   at most one per six words, rounded up; can't ≠ can, -0.5 ≠ +0.5
+│       ├── complete call-entry boundaries: a matching suffix after "do not",
+│       │   or a prefix before a qualification, never cancels a different statement
+│       ├── that stretch starts between 2 s before and 4 s after the sentence
+│       │   (call words are placed by spreading each entry's words evenly)
+│       └── those call words don't already stand behind another room sentence
+│           (one-to-one, in time order); two copies in one source never compare
+│       Utterances over 120 words or with ambiguous partial context are kept
+├── Rolling view: microphone text also waits until the call is settled 4 s past
+│   it and the microphone is settled 700 ms past it, so a following room line
+│   cannot extend the utterance after it was shown or pasted
+├── Every reader labels the same way: Meetings pane (with a "Shared room: …"
+│   line), copies, Option-Control-V, exported Markdown ("- **Shared room:** …"),
+│   subtitles, `hex meetings`, MCP, notes, titles, and chapters
+│   └── notes, titles, and chapters prompts start with what the two labels mean
+└── Speaker filters: `room mic` / `room` = microphone, `call audio` / `call` = system
+```
+
+Proof limits. Checks: `meeting::transcript::shared_room` (invented lines through
+`suppress_echo`, `rolling_view`, and the final pass from a stored manifest;
+polarity context, signed decimals, units, and split qualifications),
+`meeting::entry`, `meeting::tests::a_meeting_keeps_the_mode_it_was_recorded_in`,
+`rune_ui::meetings_host::tests::a_shared_room_meeting_reads_as_room_mic_and_call_audio_everywhere`,
+the notes prompt test, and the Labs bit test, all on Linux. No real room, call,
+or audio was used; the 2 s / 4 s window, the five-word floor, and the filler list
+are estimates for sentence-level timestamps, not measurements. No audio-aligned
+room measurements establish the signal classifier's behavior in this setup.
+Sentences that differ by one recognition error in a content word stay twice;
+that is the chosen side of the trade. Telling the people in a room apart would
+need voice-based diarization, which this mode does not do.
+
+Auto-stop. A shared-room recording follows the same rules as any other
+(Labs › Stop when the call ends, above): only Always record or an accepted
+offer watches a call app. A recording started from the menu bar or
+`hex meetings record` names no call app (`app: null`), so it never stops by
+itself, whatever its mode, and the mode grants no permission to record or
+stop. In a shared room the user's own call app may be muted and off the
+microphone, so the offer may never appear; binding such a recording to its
+call needs an explicit choice (see Gaps).
 
 ## Speaker names
 

@@ -163,6 +163,7 @@ const PATHS: &[(&str, &str)] = &[
     ),
     ("meetings", "Window/Meetings/Meetings"),
     ("meetings-recording", "Window/Meetings/Recording"),
+    ("meetings-shared-room", "Window/Meetings/Shared room"),
     ("meetings-chapters", "Window/Meetings/Chapters"),
     ("meetings-actions", "Window/Meetings/Actions menu"),
     ("meetings-rename", "Window/Meetings/Rename"),

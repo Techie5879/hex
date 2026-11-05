@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 mod french;
+mod meetings;
 mod portuguese;
 mod russian;
 mod traditional_chinese;
@@ -324,8 +325,7 @@ fn tables() -> &'static [HashMap<&'static str, &'static str>; 6] {
     static TABLES: OnceLock<[HashMap<&'static str, &'static str>; 6]> = OnceLock::new();
     TABLES.get_or_init(|| {
         std::array::from_fn(|column| {
-            TRANSLATIONS
-                .iter()
+            meetings::every()
                 .map(|(english, translated)| (*english, translated[column]))
                 .collect()
         })
@@ -1511,7 +1511,7 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::TRANSLATIONS;
+    use super::meetings::every;
     use super::{language_from_env, primary_subtag};
 
     #[test]
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn templates_keep_their_placeholder_in_every_language() {
-        for (english, translated) in TRANSLATIONS {
+        for (english, translated) in every() {
             if english.contains("{}") {
                 for translation in translated {
                     assert!(
@@ -1763,7 +1763,7 @@ mod tests {
 
     #[test]
     fn every_translated_string_has_every_language() {
-        let table: std::collections::HashMap<_, _> = TRANSLATIONS.iter().copied().collect();
+        let table: std::collections::HashMap<_, _> = every().copied().collect();
         let mut checked = 0;
         for source in SOURCES {
             for literal in translated_literals(source) {
@@ -1784,7 +1784,7 @@ mod tests {
 
     #[test]
     fn every_meeting_speaker_names_status_has_every_language() {
-        let table: std::collections::HashMap<_, _> = TRANSLATIONS.iter().copied().collect();
+        let table: std::collections::HashMap<_, _> = every().copied().collect();
         for status in crate::meeting::speakers::Status::ALL {
             assert!(
                 table
@@ -1808,7 +1808,7 @@ mod tests {
     #[test]
     fn every_meeting_snapshot_status_has_every_language() {
         use crate::meeting::snapshots::Status;
-        let table: std::collections::HashMap<_, _> = TRANSLATIONS.iter().copied().collect();
+        let table: std::collections::HashMap<_, _> = every().copied().collect();
         for status in [
             Status::Off,
             Status::Waiting,
@@ -1837,7 +1837,7 @@ mod tests {
     #[test]
     fn every_sound_set_string_has_every_language() {
         use crate::feedback::{Cue, SoundSet};
-        let table: std::collections::HashMap<_, _> = TRANSLATIONS.iter().copied().collect();
+        let table: std::collections::HashMap<_, _> = every().copied().collect();
         let strings = SoundSet::ALL
             .into_iter()
             .flat_map(|set| [set.name(), set.character()])
@@ -1856,7 +1856,7 @@ mod tests {
 
     #[test]
     fn named_placeholders_survive_translation() {
-        for (english, translated) in TRANSLATIONS {
+        for (english, translated) in every() {
             let names = english
                 .split('{')
                 .skip(1)
@@ -1877,7 +1877,7 @@ mod tests {
     #[test]
     fn keys_are_unique() {
         let mut seen = std::collections::HashSet::new();
-        for (english, _) in TRANSLATIONS {
+        for (english, _) in every() {
             assert!(
                 seen.insert(english),
                 "duplicate translation key {english:?}"

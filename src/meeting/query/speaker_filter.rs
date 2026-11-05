@@ -33,28 +33,29 @@ pub(super) fn parse_speaker(
     let name = fold(speaker.trim());
     // Canonical selectors keep their meaning; recorded names win over
     // historical aliases such as Kit, Local, or Computer.
-    if !matches!(name.as_str(), "" | "you" | "them" | "all")
-        && entries.iter().any(|entry| {
-            entry
-                .speaker_name()
-                .is_some_and(|known| fold(known) == name)
-        })
-    {
+    if !matches!(
+        name.as_str(),
+        "" | "you" | "them" | "all" | "room mic" | "call audio"
+    ) && entries.iter().any(|entry| {
+        entry
+            .speaker_name()
+            .is_some_and(|known| fold(known) == name)
+    }) {
         return Ok(Some(SpeakerFilter::Named(name)));
     }
     match name.as_str() {
         "" | "all" | "both" | "any" => Ok(None),
-        "you" | "me" | "kit" | "microphone" | "mic" | "local" => {
+        "you" | "me" | "kit" | "microphone" | "mic" | "local" | "room" | "room mic" => {
             Ok(Some(SpeakerFilter::Source(MeetingSource::Microphone)))
         }
-        "them" | "others" | "other" | "remote" | "system" | "computer" => {
+        "them" | "others" | "other" | "remote" | "system" | "computer" | "call" | "call audio" => {
             Ok(Some(SpeakerFilter::Source(MeetingSource::System)))
         }
         other if crate::meeting::speakers::is_valid_name(speaker.trim()) => {
             Ok(Some(SpeakerFilter::Named(other.into())))
         }
         other => Err(eyre!(
-            "Unknown speaker {other:?}; use \"you\", \"them\", \"all\", or a participant's name."
+            "Unknown speaker {other:?}; use \"you\" or \"room mic\", \"them\" or \"call audio\", \"all\", or a participant's name."
         )),
     }
 }
@@ -90,6 +91,7 @@ mod tests {
     fn a_recorded_name_wins_over_a_legacy_source_alias() {
         for name in ["Kit", "Local", "Computer", "Other"] {
             let entries = [TranscriptEntry {
+                mode: Default::default(),
                 source: MeetingSource::System,
                 start_ms: 0,
                 end_ms: 1_000,

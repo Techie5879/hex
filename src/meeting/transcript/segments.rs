@@ -39,6 +39,7 @@ impl TrackTranscript {
                     let start = (segment.start_ms.max(0) as u64).min(duration_ms);
                     let end = (segment.end_ms.max(0) as u64).min(duration_ms);
                     (!text.is_empty() && end > start).then(|| TranscriptEntry {
+                        mode: Default::default(),
                         source: self.source,
                         start_ms: chunk_ms + start,
                         end_ms: chunk_ms + end,
@@ -51,6 +52,7 @@ impl TrackTranscript {
             let text = text.trim();
             (!text.is_empty())
                 .then(|| TranscriptEntry {
+                    mode: Default::default(),
                     source: self.source,
                     start_ms: chunk_ms,
                     end_ms: chunk_ms + duration_ms,
@@ -199,6 +201,7 @@ mod tests {
     use super::*;
     fn entry(start: u64, end: u64, text: &str) -> TranscriptEntry {
         TranscriptEntry {
+            mode: Default::default(),
             source: MeetingSource::System,
             start_ms: start,
             end_ms: end,

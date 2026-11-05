@@ -521,6 +521,7 @@ pub(super) mod tests {
 
     fn entry(source: MeetingSource, start_ms: u64, end_ms: u64) -> TranscriptEntry {
         TranscriptEntry {
+            mode: Default::default(),
             source,
             start_ms,
             end_ms,

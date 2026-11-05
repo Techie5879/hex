@@ -517,6 +517,11 @@ pub(super) const SCENES: &[Scene] = &[
         ui.meetings.select("preview-live".into());
         ui.pane = Pane::Meetings;
     }),
+    ("meetings-shared-room", |ui| {
+        *ui = mac_fixture();
+        ui.meetings = meetings::MeetingsPane::shared_room_fixture();
+        ui.pane = Pane::Meetings;
+    }),
     ("meetings-actions", |ui| {
         *ui = mac_fixture();
         ui.open = Some(Menu::MeetingActions);

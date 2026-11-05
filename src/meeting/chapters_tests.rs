@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicUsize;
 
 fn entry(source: MeetingSource, start_ms: u64, text: &str) -> TranscriptEntry {
     TranscriptEntry {
+        mode: Default::default(),
         source,
         start_ms,
         end_ms: start_ms + 5_000,
@@ -34,7 +35,28 @@ fn window(start_ms: u64, end_ms: u64) -> PassWindow {
         skipped: false,
         start_ms,
         end_ms,
+        context: "",
     }
+}
+
+#[test]
+fn both_chapter_generators_receive_source_aware_instructions() {
+    for instructions in [INSTRUCTIONS, REFINE_INSTRUCTIONS] {
+        assert!(instructions.contains("Room mic and Call audio label capture paths"));
+        assert!(instructions.contains("not individual people"));
+        assert!(!instructions.contains("any other speaker is a participant"));
+    }
+    let mut state = Chaptering::default();
+    let mut room = window(0, 180_000);
+    room.text = "[00:00] Room mic: The rehearsal moves to Friday.".into();
+    room.context = "Room mic and Call audio are sources, not people.\n\n";
+    run_pass(&mut state, &room, &[], |instructions, prompt, _| {
+        assert!(instructions.contains("Room mic and Call audio label capture paths"));
+        assert!(prompt.contains("sources, not people"));
+        assert!(prompt.contains("Room mic: The rehearsal"));
+        Ok(said("Rehearsal", false))
+    })
+    .unwrap();
 }
 
 fn said(title: &str, same_topic: bool) -> GeneratedChapter {

@@ -16,7 +16,6 @@ use crate::desktop::events::now_ms;
 use crate::durable::{sync_directory, sync_file};
 
 const SAMPLE_RATE: u32 = 16_000;
-const TRANSCRIPT_TURN_GAP_MS: u64 = 3_000;
 /// Beside the manifest of a meeting Hex quit while recording or during its
 /// final transcription: its audio is
 /// saved and its final transcript runs at the next launch.
@@ -44,6 +43,7 @@ pub(crate) use os::{
 };
 mod delta;
 mod echo;
+mod entry;
 pub(crate) mod finished_events;
 pub(crate) mod generator;
 pub(crate) mod mcp;
@@ -62,6 +62,8 @@ pub use chapters::chapters_file;
 pub use chapters::section_for_id;
 pub use chapters::{Chapter, chapter_entries, section_markdown};
 pub use delta::*;
+use entry::label_context;
+pub use entry::{MeetingMode, MeetingSource, TranscriptEntry, coalesce_transcript};
 pub use notes::{MeetingNotes, display_title, notes_in_progress, notes_wanted, spawn_summary};
 #[cfg(all(debug_assertions, target_os = "macos"))]
 pub use notes::{summarize, summarize_file};
@@ -196,6 +198,9 @@ pub struct MeetingManifest {
     /// user edited stays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_sha256: Option<String>,
+    /// How it was recorded, fixed before capture starts (Labs › Shared room).
+    #[serde(default, skip_serializing_if = "MeetingMode::is_standard")]
+    pub mode: MeetingMode,
 }
 
 impl MeetingManifest {
@@ -278,76 +283,6 @@ fn missing_samples(track: &TrackManifest, packet: &AudioPacket) -> u64 {
         missing
     } else {
         0
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-pub struct TranscriptEntry {
-    /// Which recording it came from. Echo suppression and the paste cursor
-    /// work on this alone; a name never changes it.
-    pub source: MeetingSource,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub text: String,
-    /// The participant the call app showed speaking throughout a system-audio
-    /// entry (Labs › Meeting speaker names); absent means `Them`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub speaker: Option<String>,
-}
-
-impl TranscriptEntry {
-    /// `You`, `Them`, or the participant's name. A name is shown only on
-    /// system audio and only while it is a valid name, whatever a file says.
-    pub fn label(&self) -> &str {
-        match (&self.source, self.speaker.as_deref()) {
-            (MeetingSource::System, Some(name)) if speakers::is_valid_name(name) => name,
-            (source, _) => source.label(),
-        }
-    }
-
-    /// The participant's name, when [`label`](Self::label) shows one.
-    pub fn speaker_name(&self) -> Option<&str> {
-        (self.label() != self.source.label()).then(|| self.label())
-    }
-}
-
-/// Joins consecutive entries by one speaker: the same source and, for the
-/// call audio, the same name, so two people never share a turn.
-pub fn coalesce_transcript(
-    entries: impl IntoIterator<Item = TranscriptEntry>,
-) -> Vec<TranscriptEntry> {
-    let mut turns: Vec<TranscriptEntry> = Vec::new();
-    for entry in entries {
-        if let Some(turn) = turns.last_mut()
-            && turn.source == entry.source
-            && turn.label() == entry.label()
-            && entry.start_ms.saturating_sub(turn.end_ms) <= TRANSCRIPT_TURN_GAP_MS
-        {
-            if !turn.text.ends_with(char::is_whitespace) {
-                turn.text.push(' ');
-            }
-            turn.text.push_str(entry.text.trim());
-            turn.end_ms = turn.end_ms.max(entry.end_ms);
-        } else {
-            turns.push(entry);
-        }
-    }
-    turns
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MeetingSource {
-    System,
-    Microphone,
-}
-
-impl MeetingSource {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::System => "Them",
-            Self::Microphone => "You",
-        }
     }
 }
 
@@ -466,6 +401,7 @@ pub fn record(
         chapters_refined: false,
         retention_applies: true,
         export_sha256: None,
+        mode: MeetingMode::for_new_recording(),
     };
     set_title_source(&mut manifest, title_source);
     write_manifest(&meeting_dir, &manifest)?;
@@ -477,8 +413,11 @@ pub fn record(
         let (sender, receiver) = mpsc::sync_channel::<AudioPacket>(128);
         let system_drops = Arc::new(AtomicU64::new(0));
         let microphone_drops = Arc::new(AtomicU64::new(0));
-        let mut rolling =
-            transcript::Rolling::start(meeting_dir.clone(), transcription_selection.clone());
+        let mut rolling = transcript::Rolling::start(
+            meeting_dir.clone(),
+            transcription_selection.clone(),
+            manifest.mode,
+        );
         let rolling_feed = rolling.feed();
         let flush_registration = transcript::register_flusher(&manifest.id, rolling.flusher());
         let writer_dir = meeting_dir.clone();

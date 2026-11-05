@@ -406,6 +406,7 @@ mod tests {
         let (directory, status) = record(samples, Some(Provider::Teams));
         assert_eq!(status, Status::Reading);
         let mut entries = vec![TranscriptEntry {
+            mode: Default::default(),
             source: MeetingSource::System,
             start_ms: 1_000,
             end_ms: 4_000,

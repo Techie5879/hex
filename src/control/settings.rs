@@ -500,6 +500,11 @@ const KEYS: &[Key] = &[
         "Labs: name the people who speak in Teams calls and Slack huddles from the call app, starting with the next recording (macOS)",
     ),
     key(
+        "labs.shared_room_meetings",
+        Kind::Bool,
+        "Labs: new meetings label lines Room mic and Call audio instead of You and Them and keep room speech the call audio repeats once; a meeting keeps the mode it started with (macOS)",
+    ),
+    key(
         "labs.meeting_platform_icons",
         Kind::Bool,
         "Labs: each recording in the Meetings list shows a small icon for its call app or website, or a neutral one when Hex doesn't know it",
@@ -750,6 +755,7 @@ const NEEDS: &[(&str, &str)] = &[
     ("labs.meeting_platform_icons", "meetings"),
     ("labs.meeting_snapshots", "meetings"),
     ("labs.meeting_speaker_names", "meetings"),
+    ("labs.shared_room_meetings", "meetings"),
     ("labs.follow_live_transcript", "meetings"),
     ("labs.collapsible_meeting_sections", "meetings"),
     ("experimental.hex_microphone", "fun"),

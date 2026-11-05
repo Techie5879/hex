@@ -29,6 +29,7 @@ fn rejects_non_numeric_media_times() {
 #[test]
 fn transcript_entries_coalesce_into_source_turns_without_hiding_long_pauses() {
     let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
+        mode: Default::default(),
         source,
         start_ms,
         end_ms,
@@ -57,6 +58,7 @@ fn final_transcript_replaces_the_rolling_transcript_atomically() {
     ));
     fs::create_dir_all(&directory).unwrap();
     let rolling = TranscriptEntry {
+        mode: Default::default(),
         source: MeetingSource::Microphone,
         start_ms: 0,
         end_ms: 500,
@@ -77,6 +79,7 @@ fn final_transcript_replaces_the_rolling_transcript_atomically() {
     );
 
     let final_entry = TranscriptEntry {
+        mode: Default::default(),
         source: MeetingSource::Microphone,
         start_ms: 0,
         end_ms: 500,
@@ -113,6 +116,7 @@ fn reading_a_transcript_ignores_an_in_flight_trailing_write() {
         now_ms()
     ));
     let complete = TranscriptEntry {
+        mode: Default::default(),
         source: MeetingSource::System,
         start_ms: 0,
         end_ms: 500,
@@ -149,6 +153,7 @@ fn capture_failures_are_persisted_instead_of_looking_interrupted() {
     ));
     fs::create_dir_all(&directory).unwrap();
     let manifest = MeetingManifest {
+        mode: Default::default(),
         schema_version: 1,
         id: "failure-test".into(),
         title: "Failure test".into(),
@@ -195,6 +200,7 @@ fn mid_meeting_capture_loss_proceeds_to_transcription_when_audio_was_recorded() 
     ));
     fs::create_dir_all(&directory).unwrap();
     let mut manifest = MeetingManifest {
+        mode: Default::default(),
         schema_version: 1,
         id: "capture-loss-test".into(),
         title: "Capture loss test".into(),
@@ -486,6 +492,7 @@ fn retention_manifest(
     ended_at_ms: Option<u64>,
 ) -> MeetingManifest {
     MeetingManifest {
+        mode: Default::default(),
         schema_version: 1,
         id: id.into(),
         title: id.into(),
@@ -665,6 +672,7 @@ fn hex_rewriting_its_markdown_keeps_it_hexs_and_a_user_edit_does_not() {
 #[test]
 fn paste_cursor_counts_coalesced_turns_and_advances_only_on_success() {
     let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
+        mode: Default::default(),
         source,
         start_ms,
         end_ms,
@@ -725,6 +733,7 @@ fn paste_cursor_counts_coalesced_turns_and_advances_only_on_success() {
 #[test]
 fn paste_cursor_neither_repeats_nor_drops_text_when_the_transcript_is_rewritten() {
     let entry = |source, start_ms, end_ms, text: &str| TranscriptEntry {
+        mode: Default::default(),
         source,
         start_ms,
         end_ms,
@@ -788,6 +797,7 @@ fn paste_cursor_neither_repeats_nor_drops_text_when_the_transcript_is_rewritten(
 #[test]
 fn paste_cursor_pastes_text_the_final_pass_recovers_for_skipped_audio() {
     let entry = |start_ms, end_ms, text: &str| TranscriptEntry {
+        mode: Default::default(),
         source: MeetingSource::System,
         start_ms,
         end_ms,
@@ -885,4 +895,64 @@ fn writer_fills_a_capture_gap_with_silence_and_records_it() {
     let wav = WavReader::open(directory.join("system.wav")).unwrap();
     assert_eq!(u64::from(wav.len()), stats.system.samples);
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn a_meeting_keeps_the_mode_it_was_recorded_in() {
+    let old: MeetingManifest = serde_json::from_value(serde_json::json!({
+        "schema_version": 1,
+        "id": "1",
+        "title": "Planning",
+        "status": "complete",
+        "created_at_ms": 1_760_000_000_000_u64,
+        "ended_at_ms": null,
+        "duration_ms": null,
+        "system": {"file": "system.wav", "samples": 0, "dropped_packets": 0},
+        "microphone": {"file": "microphone.wav", "samples": 0, "dropped_packets": 0},
+        "error": null,
+    }))
+    .unwrap();
+    assert_eq!(old.mode, MeetingMode::Standard);
+    // Standard manifests are written as before, so older builds read them.
+    assert!(!serde_json::to_string(&old).unwrap().contains("\"mode\""));
+    let shared = MeetingManifest {
+        mode: MeetingMode::SharedRoom,
+        ..old.clone()
+    };
+    let written = serde_json::to_string(&shared).unwrap();
+    assert!(written.contains("\"mode\":\"shared_room\""));
+    let read: MeetingManifest = serde_json::from_str(&written).unwrap();
+    assert_eq!(read.mode, MeetingMode::SharedRoom);
+
+    let entry = |source, start_ms, text: &str| TranscriptEntry {
+        source,
+        start_ms,
+        end_ms: start_ms + 1_000,
+        text: text.into(),
+        speaker: None,
+        mode: MeetingMode::SharedRoom,
+    };
+    let entries = [
+        entry(MeetingSource::Microphone, 1_000, "Is the projector on?"),
+        entry(MeetingSource::System, 5_000, "We can see the slides."),
+    ];
+    let exported = transcript::render_markdown(&read, &entries);
+    assert!(exported.contains("- **Shared room:**"), "{exported}");
+    assert!(exported.contains("**Room mic** · 00:01\nIs the projector on?"));
+    assert!(exported.contains("**Call audio** · 00:05\nWe can see the slides."));
+    assert!(!exported.contains("**You**") && !exported.contains("**Them**"));
+    // The copy-all Markdown and the debug parser agree on the labels.
+    assert_eq!(
+        notes::entries_from_markdown(&exported)
+            .iter()
+            .map(|entry| (entry.source, entry.mode))
+            .collect::<Vec<_>>(),
+        [
+            (MeetingSource::Microphone, MeetingMode::SharedRoom),
+            (MeetingSource::System, MeetingMode::SharedRoom)
+        ]
+    );
+    assert!(transcript_markdown(&entries).starts_with("**Room mic** · 00:01"));
+    let standard = transcript::render_markdown(&old, &[]);
+    assert!(!standard.contains("Shared room"));
 }

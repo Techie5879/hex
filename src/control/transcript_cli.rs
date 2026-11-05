@@ -700,7 +700,8 @@ fn require_subtitle_export(on: bool) -> Result<()> {
 }
 
 /// One cue per transcript entry (a speaker turn), timed by the entry's
-/// offsets from the meeting's start and labelled You or Them.
+/// offsets from the meeting's start and labelled as transcripts show it:
+/// You, Them, a participant, or a shared room's Room mic and Call audio.
 fn render_subtitles<'a>(
     entries: impl IntoIterator<Item = &'a crate::meeting::TranscriptEntry>,
     format: SubtitleFormat,
