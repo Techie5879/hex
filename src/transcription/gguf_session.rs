@@ -4,7 +4,7 @@
 //! inference that sized it.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,31 @@ const STREAM_PREWARM_SAMPLES: usize = 8 * 16_000;
 
 thread_local! {
     static JOB_CANCEL: RefCell<Option<transcribe_cpp::CancelToken>> = const { RefCell::new(None) };
+    static LIVE_PREVIEW: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Temporary captions yield the Metal GPU between smaller graph submissions.
+/// Final transcription and every other model keep their original scheduling.
+pub(crate) fn with_live_preview<R>(
+    cancel: &transcribe_cpp::CancelToken,
+    work: impl FnOnce() -> R,
+) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            LIVE_PREVIEW.set(self.0);
+        }
+    }
+    let _restore = Restore(LIVE_PREVIEW.replace(true));
+    with_job_cancel(cancel, work)
+}
+
+fn preview_command_buffers(architecture: &str) -> u32 {
+    if cfg!(target_os = "macos") && architecture == "whisper" && LIVE_PREVIEW.get() {
+        8
+    } else {
+        0
+    }
 }
 
 /// Runs `work` with `cancel` installed on every offline run it makes on this
@@ -316,14 +341,19 @@ impl OfflineGgufSession {
             session.set_cancel_token(&cancel);
         }
         let options = self.with_vocabulary(options, false);
-        let result =
-            keep_repetition_partial(session.run(samples, &options)).map(|mut transcript| {
-                if let Some(prompt) = &options.prompt {
-                    drop_prompt_echo(&mut transcript, prompt);
-                }
-                drop_subtitle_credit(&mut transcript);
-                transcript
-            });
+        let buffers = preview_command_buffers(&self.model.arch());
+        let run = if buffers == 0 {
+            session.run(samples, &options)
+        } else {
+            session.run_with_metal_command_buffers(samples, &options, buffers)
+        };
+        let result = keep_repetition_partial(run).map(|mut transcript| {
+            if let Some(prompt) = &options.prompt {
+                drop_prompt_echo(&mut transcript, prompt);
+            }
+            drop_subtitle_credit(&mut transcript);
+            transcript
+        });
         drop(session);
         if result.is_ok() {
             self.last_run = Some(Instant::now());
@@ -768,5 +798,34 @@ mod tests {
             job_cancel().is_none(),
             "a panicking run still uninstalls its token"
         );
+    }
+
+    #[test]
+    fn metal_scheduling_is_scoped_to_whisper_previews() {
+        let cancel = transcribe_cpp::CancelToken::new();
+        assert_eq!(preview_command_buffers("whisper"), 0);
+        with_live_preview(&cancel, || {
+            assert_eq!(
+                preview_command_buffers("whisper"),
+                if cfg!(target_os = "macos") { 8 } else { 0 }
+            );
+            assert_eq!(preview_command_buffers("parakeet"), 0);
+            with_live_preview(&cancel, || assert!(LIVE_PREVIEW.get()));
+            assert!(LIVE_PREVIEW.get());
+        });
+        assert!(!LIVE_PREVIEW.get());
+        assert!(job_cancel().is_none());
+        assert_eq!(preview_command_buffers("whisper"), 0);
+    }
+
+    #[test]
+    fn failed_preview_restores_normal_scheduling_and_cancel_scope() {
+        let cancel = transcribe_cpp::CancelToken::new();
+        let result =
+            std::panic::catch_unwind(|| with_live_preview(&cancel, || panic!("preview failed")));
+        assert!(result.is_err());
+        assert!(!LIVE_PREVIEW.get());
+        assert!(job_cancel().is_none());
+        assert_eq!(preview_command_buffers("whisper"), 0);
     }
 }
