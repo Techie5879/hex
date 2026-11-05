@@ -273,10 +273,11 @@ impl Drop for CfObject {
     }
 }
 
-/// Self queries synchronously enter Hex's AccessKit callbacks on the caller's
-/// thread. The background context reader can then re-enter a mutably borrowed
-/// tree and abort across the Objective-C callback boundary. Only query other
-/// processes; application identity still comes from NSWorkspace.
+/// Self queries run Hex's AccessKit callbacks synchronously on the caller's
+/// thread. AccessKit's Rc and RefCell state is confined to the main thread, so
+/// a background read races it and can abort across the Objective-C callback
+/// boundary. Only query other processes; application identity still comes from
+/// NSWorkspace.
 fn external_application(pid: i32) -> Option<CfObject> {
     if pid <= 0 || pid as u32 == std::process::id() {
         return None;
