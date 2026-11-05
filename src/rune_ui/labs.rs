@@ -518,6 +518,12 @@ fn rows(ui: &Ui) -> Vec<Row> {
             tr("Meeting snapshots"),
             tr("Save shared content from native Teams meetings on this Mac. English Teams UI only. Requires Screen Recording permission. Starts with the next recording."),
         ));
+        rows.push(row(
+            Feature::MeetingSpeakerNames,
+            &BOOK,
+            tr("Meeting speaker names"),
+            tr("Name who is speaking in Teams calls and Slack huddles, as the call app marks them. Uses Accessibility. Lines Hex can't attribute stay Them. Starts with the next recording."),
+        ));
     }
     if caps.meetings {
         rows.push(row(
@@ -594,6 +600,7 @@ fn row_key(feature: Feature) -> &'static str {
         Feature::AnnotateReplay => "lab-annotate-replay",
         Feature::MeetingPlatformIcons => "lab-meeting-platform-icons",
         Feature::MeetingSnapshots => "lab-meeting-snapshots",
+        Feature::MeetingSpeakerNames => "lab-meeting-speaker-names",
         Feature::GnomeMeetingCapsules => "lab-gnome-meeting-capsules",
         Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
         Feature::NotchIndicator => "lab-notch-indicator",

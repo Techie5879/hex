@@ -338,6 +338,12 @@ const TRANSLATIONS: &[(&str, [&str; 6])] = &[
     ("Show images", ["Pokaż obrazy", "显示图片", "画像を表示", "Bilder anzeigen", "Mostrar imágenes", "Показати зображення"]),
     ("Hide images", ["Ukryj obrazy", "隐藏图片", "画像を隠す", "Bilder ausblenden", "Ocultar imágenes", "Сховати зображення"]),
     ("Some content may be missing because snapshot capture was paused or interrupted.", ["Niektórych treści może brakować, ponieważ zapisywanie migawek zostało wstrzymane lub przerwane.", "部分内容可能缺失，因为快照拍摄曾暂停或中断。", "スナップショットの撮影が一時停止または中断されたため、一部の内容が欠けている可能性があります。", "Einige Inhalte fehlen möglicherweise, weil die Aufnahme von Schnappschüssen pausiert oder unterbrochen wurde.", "Puede faltar contenido porque las capturas se pausaron o interrumpieron.", "Частина вмісту може бути відсутня, оскільки створення знімків було призупинено або перервано."]),
+    ("Meeting speaker names", ["Imiona mówców na spotkaniach", "会议发言人姓名", "会議の話者名", "Namen der Sprechenden in Meetings", "Nombres de quienes hablan en reuniones", "Імена мовців на зустрічах"]),
+    ("Name who is speaking in Teams calls and Slack huddles, as the call app marks them. Uses Accessibility. Lines Hex can't attribute stay Them. Starts with the next recording.", ["Podpisuje, kto mówi w rozmowach Teams i huddle'ach Slacka, tak jak oznacza to aplikacja. Korzysta z Dostępności. Wypowiedzi, których Hex nie przypisze, pozostają jako Rozmówcy. Od następnego nagrania.", "按通话应用的标记，注明 Teams 通话和 Slack 小组会话中谁在发言。使用辅助功能。Hex 无法归属的内容仍显示为对方。从下次录制开始。", "Teams の通話と Slack のハドルで、通話アプリの表示どおりに話している人の名前を付けます。アクセシビリティを使用します。Hex が特定できない発言は「相手」のままです。次の録音から開始します。", "Benennt, wer in Teams-Anrufen und Slack-Huddles spricht, so wie die App es anzeigt. Verwendet die Bedienungshilfen. Was Hex nicht zuordnen kann, bleibt bei Andere. Ab der nächsten Aufnahme.", "Indica quién habla en llamadas de Teams y huddles de Slack, tal como lo marca la app. Usa Accesibilidad. Lo que Hex no pueda atribuir queda como Ellos. Empieza con la próxima grabación.", "Підписує, хто говорить у дзвінках Teams і гаддлах Slack, як це позначає застосунок. Використовує Доступність. Репліки, які Hex не може приписати, лишаються як Співрозмовники. Починаючи з наступного запису."]),
+    ("Waiting for a Teams call or Slack huddle to name speakers", ["Oczekiwanie na rozmowę Teams lub huddle Slacka, aby podpisać mówców", "等待 Teams 通话或 Slack 小组会话以注明发言人", "話者名を付けるため Teams の通話または Slack のハドルを待っています", "Warten auf einen Teams-Anruf oder ein Slack-Huddle, um Sprechende zu benennen", "Esperando una llamada de Teams o un huddle de Slack para nombrar a quienes hablan", "Очікування дзвінка Teams або гаддла Slack, щоб підписати мовців"]),
+    ("Naming speakers from the call app", ["Podpisywanie mówców na podstawie aplikacji", "正在根据通话应用注明发言人", "通話アプリから話者名を付けています", "Sprechende werden aus der App benannt", "Nombrando a quienes hablan desde la app", "Підписування мовців за даними застосунку"]),
+    ("Allow Accessibility to name speakers", ["Zezwól na Dostępność, aby podpisywać mówców", "允许辅助功能以注明发言人", "話者名を付けるにはアクセシビリティを許可してください", "Bedienungshilfen erlauben, um Sprechende zu benennen", "Permite Accesibilidad para nombrar a quienes hablan", "Дозвольте Доступність, щоб підписувати мовців"]),
+    ("Speaker names unavailable", ["Imiona mówców niedostępne", "发言人姓名不可用", "話者名を利用できません", "Namen der Sprechenden nicht verfügbar", "Nombres de quienes hablan no disponibles", "Імена мовців недоступні"]),
     ("Meeting snapshots", ["Migawki spotkań", "会议快照", "会議のスナップショット", "Meeting-Schnappschüsse", "Capturas de reuniones", "Знімки зустрічей"]),
     ("Save shared content from native Teams meetings on this Mac. English Teams UI only. Requires Screen Recording permission. Starts with the next recording.", ["Zapisuj udostępnianą zawartość spotkań w aplikacji Teams na tym Macu. Wymaga dostępu do nagrywania ekranu. Od następnego nagrania. Tylko angielski interfejs Teams.", "在此 Mac 上保存 Teams 原生应用会议中的共享内容。需要屏幕录制权限。从下次录制开始。 仅支持英文 Teams 界面。", "このMacでTeamsアプリの会議の共有内容を保存します。画面収録の許可が必要です。次の録音から開始します。 Teamsの英語UIのみ対応。", "Geteilte Inhalte aus Meetings der Teams-App auf diesem Mac speichern. Erfordert die Berechtigung zur Bildschirmaufnahme. Ab der nächsten Aufnahme. Nur mit englischer Teams-Oberfläche.", "Guarda el contenido compartido de reuniones de la app Teams en este Mac. Requiere permiso de grabación de pantalla. Empieza con la próxima grabación. Solo con la interfaz de Teams en inglés.", "Зберігати спільний вміст зустрічей у програмі Teams на цьому Mac. Потрібен дозвіл на запис екрана. Починаючи з наступного запису. Лише англійський інтерфейс Teams."]),
     ("Resume snapshots", ["Wznów migawki", "继续快照", "スナップショットを再開", "Schnappschüsse fortsetzen", "Reanudar capturas", "Відновити знімки"]),
@@ -1774,6 +1780,29 @@ mod tests {
             }
         }
         assert!(checked > 300, "only {checked} translated strings found");
+    }
+
+    #[test]
+    fn every_meeting_speaker_names_status_has_every_language() {
+        let table: std::collections::HashMap<_, _> = TRANSLATIONS.iter().copied().collect();
+        for status in crate::meeting::speakers::Status::ALL {
+            assert!(
+                table
+                    .get(status.label())
+                    .is_some_and(|translations| translations
+                        .iter()
+                        .all(|translation| !translation.is_empty())),
+                "{}",
+                status.label()
+            );
+            for language in [
+                super::french::table(),
+                super::portuguese::table(),
+                super::russian::table(),
+            ] {
+                assert!(language.contains_key(status.label()), "{}", status.label());
+            }
+        }
     }
 
     #[test]

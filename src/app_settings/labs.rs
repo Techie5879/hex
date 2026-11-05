@@ -95,6 +95,8 @@ pub struct LabsSettings {
     pub meeting_platform_icons: bool,
     /// Save local snapshots of shared content in native macOS Teams meetings.
     pub meeting_snapshots: bool,
+    /// Name Teams and Slack huddle speakers from the call app (macOS).
+    pub meeting_speaker_names: bool,
     /// The screenshot shortcut takes an area or a window (macOS); its
     /// shortcut and folder are `screenshots.*`.
     pub screenshots: bool,
@@ -159,6 +161,7 @@ impl Default for LabsSettings {
             gnome_meeting_capsules: false,
             meeting_platform_icons: false,
             meeting_snapshots: false,
+            meeting_speaker_names: false,
             screenshots: false,
             follow_live_transcript: false,
             collapsible_meeting_sections: false,

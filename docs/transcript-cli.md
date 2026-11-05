@@ -112,8 +112,9 @@ They take the same IDs, `--from`/`--to`, and `--chapter` as the other outputs
 and conflict with `--md`, `--json`, and each other. Each transcript entry (a
 speaker turn) becomes one cue timed by its offsets from the meeting's start,
 not by word timings: SRT numbers its cues, uses `HH:MM:SS,mmm` times, and
-prefixes the text `You:` or `Them:`; VTT starts with `WEBVTT`, uses
-`HH:MM:SS.mmm` times and `<v You>`/`<v Them>` voice tags, and escapes `&`, `<`,
+prefixes the text `You:`, `Them:`, or a participant's name (Labs › Meeting
+speaker names); VTT starts with `WEBVTT`, uses
+`HH:MM:SS.mmm` times and `<v You>`/`<v Them>`/`<v Name>` voice tags, and escapes `&`, `<`,
 and `>`. An end before its start is clamped to the start, entries with no text
 are skipped, and blank lines and `-->` are removed from the text so a cue
 can't break.
@@ -219,10 +220,11 @@ type MeetingShow = {
   chapters?: Chapter[] // only when the meeting has chapters
   chapter?: Chapter // only with --chapter
   entries: { // with a range or chapter, only the entries in it
-    source: "microphone" | "system" // You / Them; remote speakers aren't separated
+    source: "microphone" | "system" // You / Them
     start_ms: number // relative to the meeting start
     end_ms: number
     text: string
+    speaker?: string // system only: the participant the call app showed speaking (Labs › Meeting speaker names)
   }[]
 }
 type Chapter = {

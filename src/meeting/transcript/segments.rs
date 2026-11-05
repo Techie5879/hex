@@ -43,6 +43,7 @@ impl TrackTranscript {
                         start_ms: chunk_ms + start,
                         end_ms: chunk_ms + end,
                         text,
+                        speaker: None,
                     })
                 })
                 .collect()
@@ -54,6 +55,7 @@ impl TrackTranscript {
                     start_ms: chunk_ms,
                     end_ms: chunk_ms + duration_ms,
                     text: text.into(),
+                    speaker: None,
                 })
                 .into_iter()
                 .collect()
@@ -201,6 +203,7 @@ mod tests {
             start_ms: start,
             end_ms: end,
             text: text.into(),
+            speaker: None,
         }
     }
     #[test]

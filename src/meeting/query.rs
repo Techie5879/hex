@@ -33,6 +33,9 @@ const CONTEXT_CHARS: usize = 120;
 const BM25_K1: f32 = 1.2;
 const BM25_B: f32 = 0.75;
 
+mod speaker_filter;
+use speaker_filter::{SpeakerFilter, parse_speaker, unknown_name};
+
 /// Where a meeting's transcript came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TranscriptSource {
@@ -202,6 +205,8 @@ enum PassageKind {
 
 struct Passage {
     kind: PassageKind,
+    /// `You`, `Them`, a participant's name, or `Notes`.
+    label: String,
     start_ms: u64,
     text: String,
     tokens: Vec<Token>,
@@ -215,7 +220,7 @@ struct Token {
 }
 
 impl Passage {
-    fn new(kind: PassageKind, start_ms: u64, text: String) -> Self {
+    fn new(kind: PassageKind, label: &str, start_ms: u64, text: String) -> Self {
         let tokens = tokenize(&text);
         let mut frequencies = HashMap::new();
         for token in &tokens {
@@ -223,6 +228,7 @@ impl Passage {
         }
         Self {
             kind,
+            label: label.into(),
             start_ms,
             text,
             tokens,
@@ -230,11 +236,8 @@ impl Passage {
         }
     }
 
-    fn speaker(&self) -> &'static str {
-        match self.kind {
-            PassageKind::Speech(source) => source.label(),
-            PassageKind::Notes => "Notes",
-        }
+    fn speaker(&self) -> &str {
+        &self.label
     }
 }
 
@@ -462,13 +465,23 @@ impl Library {
         let meeting = self.meeting(&query.meeting_id)?;
         let range = OffsetRange::parse(query.start.as_deref(), query.end.as_deref())?;
         range.check(&meeting, now_ms)?;
-        let speaker = query.speaker.as_deref().map(parse_speaker).transpose()?;
+        let speaker = query
+            .speaker
+            .as_deref()
+            .map(parse_speaker)
+            .transpose()?
+            .flatten();
+        if let Some(filter @ SpeakerFilter::Named(name)) = &speaker
+            && !meeting.entries.iter().any(|entry| filter.matches(entry))
+        {
+            return Err(unknown_name(name, &meeting.entries));
+        }
         let cursor = query.cursor.as_deref().map(Cursor::parse).transpose()?;
         Ok(render_transcript(
             &meeting,
             TranscriptWindow {
                 range,
-                speaker: speaker.flatten(),
+                speaker,
                 cursor,
                 max_chars: query.max_chars.clamp(500, 200_000),
             },
@@ -753,6 +766,10 @@ fn load(directory: &Path, id: &str, in_progress: bool) -> Result<Meeting> {
         (source, rolling.entries)
     };
     entries.retain(|entry| !entry.text.trim().is_empty());
+    // Only names a transcript would show leave this module, in text or JSON.
+    for entry in &mut entries {
+        entry.speaker = entry.speaker_name().map(str::to_owned);
+    }
     entries.sort_by_key(|entry| entry.start_ms);
     let passages = passages(&manifest, &entries);
     Ok(Meeting {
@@ -810,12 +827,13 @@ fn file_name(path: &Path) -> String {
 }
 
 fn passages(manifest: &MeetingManifest, entries: &[TranscriptEntry]) -> Vec<Passage> {
-    let mut groups: Vec<(MeetingSource, u64, u64, usize, String)> = Vec::new();
+    let mut groups: Vec<(&TranscriptEntry, u64, u64, usize, String)> = Vec::new();
     for entry in entries {
         let text = entry.text.trim();
         let words = text.split_whitespace().count();
-        if let Some((source, _, end, count, joined)) = groups.last_mut()
-            && *source == entry.source
+        if let Some((first, _, end, count, joined)) = groups.last_mut()
+            && first.source == entry.source
+            && first.label() == entry.label()
             && entry.start_ms.saturating_sub(*end) <= TURN_GAP_MS
             && *count + words <= PASSAGE_WORDS
         {
@@ -824,22 +842,23 @@ fn passages(manifest: &MeetingManifest, entries: &[TranscriptEntry]) -> Vec<Pass
             *end = (*end).max(entry.end_ms);
             *count += words;
         } else {
-            groups.push((
-                entry.source,
-                entry.start_ms,
-                entry.end_ms,
-                words,
-                text.into(),
-            ));
+            groups.push((entry, entry.start_ms, entry.end_ms, words, text.into()));
         }
     }
     let mut passages = groups
         .into_iter()
-        .map(|(source, start, _, _, text)| Passage::new(PassageKind::Speech(source), start, text))
+        .map(|(first, start, _, _, text)| {
+            Passage::new(
+                PassageKind::Speech(first.source),
+                first.label(),
+                start,
+                text,
+            )
+        })
         .collect::<Vec<_>>();
     if let Some(notes) = &manifest.notes {
         let text = format!("{}. {}", notes.title.trim(), notes.summary.trim());
-        passages.push(Passage::new(PassageKind::Notes, 0, text));
+        passages.push(Passage::new(PassageKind::Notes, "Notes", 0, text));
     }
     passages
 }
@@ -1590,7 +1609,12 @@ pub fn search_texts(
     for (document, texts) in documents.iter().enumerate() {
         for text in texts {
             owners.push(document);
-            passages.push(Passage::new(PassageKind::Notes, 0, (*text).to_owned()));
+            passages.push(Passage::new(
+                PassageKind::Notes,
+                "Notes",
+                0,
+                (*text).to_owned(),
+            ));
         }
     }
     let texts = passages.iter().collect::<Vec<_>>();
@@ -1842,7 +1866,7 @@ pub struct TranscriptQuery {
 
 struct TranscriptWindow {
     range: OffsetRange,
-    speaker: Option<MeetingSource>,
+    speaker: Option<SpeakerFilter>,
     cursor: Option<Cursor>,
     max_chars: usize,
 }
@@ -1872,27 +1896,17 @@ impl Cursor {
     }
 }
 
-fn parse_speaker(speaker: &str) -> Result<Option<MeetingSource>> {
-    match fold(speaker.trim()).as_str() {
-        "" | "all" | "both" | "any" => Ok(None),
-        "you" | "me" | "kit" | "microphone" | "mic" | "local" => {
-            Ok(Some(MeetingSource::Microphone))
-        }
-        "them" | "others" | "other" | "remote" | "system" | "computer" => {
-            Ok(Some(MeetingSource::System))
-        }
-        other => Err(eyre!(
-            "Unknown speaker {other:?}; use \"you\", \"them\", or \"all\"."
-        )),
-    }
-}
-
 fn render_transcript(meeting: &Meeting, window: TranscriptWindow, now_ms: u64) -> String {
     let mut ordinals: HashMap<u64, usize> = HashMap::new();
     let selected = meeting
         .entries
         .iter()
-        .filter(|entry| window.speaker.is_none_or(|speaker| entry.source == speaker))
+        .filter(|entry| {
+            window
+                .speaker
+                .as_ref()
+                .is_none_or(|speaker| speaker.matches(entry))
+        })
         .filter(|entry| window.range.overlaps(entry))
         .map(|entry| {
             let ordinal = ordinals.entry(entry.start_ms).or_insert(0);
@@ -1956,6 +1970,7 @@ fn render_transcript(meeting: &Meeting, window: TranscriptWindow, now_ms: u64) -
         match turns.last_mut() {
             Some(turn)
                 if turn.source == entry.source
+                    && turn.label() == entry.label()
                     && entry.start_ms.saturating_sub(turn.end_ms) <= TURN_GAP_MS =>
             {
                 turn.text.push(' ');
@@ -1977,8 +1992,10 @@ fn render_transcript(meeting: &Meeting, window: TranscriptWindow, now_ms: u64) -
         "Showing {}–{}{}:",
         format_duration(turns.first().map_or(0, |turn| turn.start_ms)),
         format_duration(shown_end),
-        match window.speaker {
-            Some(source) => format!(" ({} only)", source.label()),
+        match &window.speaker {
+            Some(SpeakerFilter::Source(source)) => format!(" ({} only)", source.label()),
+            Some(SpeakerFilter::Named(_)) =>
+                format!(" ({} only)", turns.first().map_or("", |turn| turn.label())),
             None => String::new(),
         }
     );
@@ -1988,7 +2005,7 @@ fn render_transcript(meeting: &Meeting, window: TranscriptWindow, now_ms: u64) -
             "[{} · {}] {}: {}",
             format_duration(turn.start_ms),
             clock_seconds(meeting.start_ms() + turn.start_ms),
-            turn.source.label(),
+            turn.label(),
             turn.text
         );
     }

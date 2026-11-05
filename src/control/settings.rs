@@ -495,6 +495,11 @@ const KEYS: &[Key] = &[
         "Labs: save local snapshots of shared content in native Teams meetings, starting with the next recording (macOS)",
     ),
     key(
+        "labs.meeting_speaker_names",
+        Kind::Bool,
+        "Labs: name the people who speak in Teams calls and Slack huddles from the call app, starting with the next recording (macOS)",
+    ),
+    key(
         "labs.meeting_platform_icons",
         Kind::Bool,
         "Labs: each recording in the Meetings list shows a small icon for its call app or website, or a neutral one when Hex doesn't know it",
@@ -744,6 +749,7 @@ const NEEDS: &[(&str, &str)] = &[
     ("labs.meeting_finished_event", "meetings"),
     ("labs.meeting_platform_icons", "meetings"),
     ("labs.meeting_snapshots", "meetings"),
+    ("labs.meeting_speaker_names", "meetings"),
     ("labs.follow_live_transcript", "meetings"),
     ("labs.collapsible_meeting_sections", "meetings"),
     ("experimental.hex_microphone", "fun"),

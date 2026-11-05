@@ -1,6 +1,6 @@
 #!/bin/sh
 # Mirrors another Mac's Hex meetings folder for a local, read-only `hex mcp
-# --meetings-dir`. One rsync over SSH; snapshots, audio (*.wav), lock, and temporary
+# --meetings-dir`. One rsync over SSH; snapshots, speaker readings, audio (*.wav), lock, and temporary
 # files stay behind. Updated files land together at the end of the transfer
 # (--delay-updates), and meetings trashed on the source disappear here.
 #
@@ -28,7 +28,7 @@ trap 'rm -f "$errors"' EXIT
 
 status=0
 rsync -a --delete --delete-delay --delay-updates --timeout=60 \
-	--exclude='snapshots/' --exclude='*.wav' --exclude='*.lock' --exclude='*.tmp' --exclude='.DS_Store' \
+	--exclude='snapshots/' --exclude='speakers.ndjson' --exclude='*.wav' --exclude='*.lock' --exclude='*.tmp' --exclude='.DS_Store' \
 	-e 'ssh -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=2' \
 	"$host:$remote_path" "$mirror/" 2>"$errors" || status=$?
 

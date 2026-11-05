@@ -1489,3 +1489,103 @@ interruption history, blinking-caret suppression, and bounded motion sampling. T
 artificial diagram pixels. These checks do not prove capture of a live Teams
 share, macOS permission behavior, or native end-to-end capture. No live meeting
 or private screenshot is used in repository fixtures.
+
+## Speaker names
+
+```ts
+Labs › Meeting speaker names                     // labs.meeting_speaker_names
+├── Off by default; macOS only (no reader elsewhere: the saved setting does nothing)
+├── Read at recording start: on -> one bounded worker per recording, for
+│   ├── a detected Teams call (com.microsoft.teams2) -> the Teams adapter
+│   ├── a detected Slack huddle (com.tinyspeck.slackmacgap) -> the Slack adapter
+│   ├── a recording started by hand -> whichever of them holds the microphone and a call
+│   └── any other app -> no worker, unchanged You / Them
+├── Every 500 ms -> one Accessibility reading of the call app, ≤ 6,000 elements and 600 ms
+│   ├── Hex not trusted for Accessibility -> "Allow Accessibility…"; never prompts
+│   ├── no verified call, two calls, two copies of the app -> no evidence
+│   ├── anything left unread (budget, depth 64, a failed child or window list,
+│   │   over 512 children, a tile deeper than 16) -> no evidence, never a partial reading
+│   └── verified call -> the one remote participant marked speaking, silence, or uncertain
+├── speakers.ndjson beside the manifest (owner-only, ≤ 4 MiB, Trash with its meeting)
+│   └── times on the system track's own timeline (capture clock + audio position)
+├── Transcript lines (in-call, copy-through-now, final, final after a restart)
+│   ├── system audio + one person marked throughout -> that name
+│   ├── anything less -> Them
+│   └── microphone -> You, always
+├── Off during a recording -> stop reading and storing; lines already named stay named
+└── Meeting detail while recording -> the reader's status line
+```
+
+The worker never clicks, focuses, raises, or asks for a permission, and it
+reads no captions, rosters, chats, or messages. To get a tree at all it sets
+`AXManualAccessibility` on Slack and, on Teams, also `AXEnhancedUserInterface`,
+once per process, as the browser-page reader already does for Chromium
+browsers; Teams then builds its full web tree until it quits. It never reads
+Hex's own process.
+
+What names a line (`speakers/timeline.rs`): readings at most 1.5 s apart, the
+same call window or huddle region throughout, no uncertain reading, and one
+name marked for at least 60 % of the line after allowing 500 ms for the mark
+to follow the voice and trimming up to 400 ms at each end. A line shorter than
+a mark lingers (1.5 s) is named only if its mark began during it or outlasts
+it, so a mark left over from the previous speaker can't name a hidden one.
+Readings never vouch for more than one poll past themselves, a reading that
+took over 700 ms counts as uncertain, and a file written on another clock
+names nothing. Line times come from the system track's sample count, not the
+wall clock, so a drift below the writer's 1 s padding threshold doesn't move
+names onto the wrong line. These values are initial: none was measured
+against a real call's audio.
+
+Teams (`speakers/teams.rs`): a window holding the `hangup-button` control (or
+the compact view, "Meeting compact view | …") is the call; its gallery tile
+(`AXMenuItem`) holding the `vdi-frame-occlusion` frame is the speaker, named
+from the tile label read from its end ("<Name>, muted, Context menu is
+available"), or the compact view's "<Name> is speaking". The user's own tile
+("Myself video, …", "(You)") is silence; a muted marked tile, two marks, a
+mark outside a tile, a label with an unknown part, or a non-English label is
+uncertain. Two meeting windows, or a compact view of another meeting, are no
+evidence.
+
+Slack (`speakers/slack.rs`): the only `p-huddle_window_content` container,
+in the huddle window or docked in the main window, is the call; Hex looks for
+it by role and class only, never entering messages, threads, the composer, or
+search, and reads text only inside participant tiles. A tile
+(`p-huddle_peer_tile`, `huddle-grid-gridcell-[self_]…`) holding the exact
+class `p-huddle_peer_tile__overlay--active_speaker` is the speaker, named from
+"View <Name>'s profile" or its name overlay. The user's own tile is silence;
+an unresolved (`_pending`), muted, or nameless marked tile, or two people, is
+uncertain; two containers are no evidence. Slack moves the mark as a turn, so
+two people talking over each other read as one: that overlap can be misnamed.
+
+Names are hostile input (`speakers/names.rs`): control and Markdown
+characters, `:`, role words, `You`/`Them`, and anonymous `Speaker 2` names are
+refused, at reading time and again wherever a transcript shows one, so a
+stored file can't inject one. Turns, copies, Option-Control-V, the pane,
+Markdown, `hex meetings` (`speaker` in `--json`), subtitles, MCP search and
+`get_transcript` (`speaker` takes a name; `them` is still all call audio),
+notes, and chapters all show the name and never merge two people into one
+turn. The paste cursor still follows time per source, so a line copied as
+`Them` is not copied again once named. Names stay on this computer; meeting
+notes send them to OpenCode only where they already send the transcript, and
+the meeting-mirror script leaves `speakers.ndjson` behind.
+
+Evidence for the selectors is third-party and published, never observed by
+this project: Teams' `hangup-button` via `AXDOMIdentifier`
+(danswett/streamdeck-teams-control#4, J3tto/callcontrol#3); its tile labels,
+compact view, and `vdi-frame-occlusion` (EnviousWispr's macOS runs,
+2026-10-27/28; Vexa saw that class never change in one web meeting); Slack's
+classes, identifiers, and measured mark timing (anomalyco/hex#859 on Windows,
+Pipit and Lipik on macOS); the need for `AXManualAccessibility` and
+`AXEnhancedUserInterface` (Pipit#140, kawaz/shhcast, J3tto/callcontrol#3).
+
+Sources: `meeting/speakers.rs`, `meeting/speakers/`, `accessibility.rs`,
+`meeting/transcript.rs` (labelling the rolling and final views), `labs.rs`.
+Checks: `meeting::speakers` (synthetic Teams and Slack trees, including
+docked and detached huddles, self, muted, pending, pinned and selected
+classes, menus, wrong windows, two calls, budgets; timelines with gaps,
+handoffs, lingering marks, window changes, slow readings, clock drift,
+restart, crash tails, hostile files; and names through turns, copies, the
+cursor, Markdown, queries, and search), Labs bit isolation, and translated
+statuses. Not verified: any native read of Teams or Slack, the marks' real
+lag against audio, the Accessibility calls' cost on a large Slack, and the
+`AXEnhancedUserInterface` side effects on Teams.

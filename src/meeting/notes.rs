@@ -57,15 +57,17 @@ pub(super) const NOTES_START: &str = "<!-- hex:notes -->";
 pub(super) const NOTES_END: &str = "<!-- /hex:notes -->";
 
 const NOTES_INSTRUCTIONS: &str = "You title and summarize meeting transcripts. Each line starts \
-with a timestamp and a speaker label: You is the person who recorded the meeting, and Them is \
-one or more other participants. A long meeting is excerpted, and […] marks skipped parts. Write \
+with a timestamp and a speaker label: You is the person who recorded the meeting, Them is one or \
+more other participants, and any other label is the name of the participant the call app showed \
+speaking. A long meeting is excerpted, and […] marks skipped parts. Write \
 one short, specific title for the whole meeting and a summary of at most two short sentences \
 on the main topics and outcomes. Use only what the transcript says; never invent names, dates, \
 or numbers.";
 
 const TITLE_INSTRUCTIONS: &str = "You name meetings from the first part of their transcript. \
 Each line starts with a timestamp and a speaker label: You is the person who recorded the \
-meeting, and Them is one or more other participants. Write one short, specific title naming \
+meeting, Them is one or more other participants, and any other label names a participant. Write \
+one short, specific title naming \
 the main topic. Use only what the transcript says.";
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -135,11 +137,7 @@ pub(super) fn excerpt_budget(context_tokens: usize, cap: usize) -> usize {
 fn transcript_lines(entries: &[TranscriptEntry]) -> Vec<String> {
     let mut lines = Vec::new();
     for turn in coalesce_transcript(entries.iter().cloned()) {
-        let prefix = format!(
-            "[{}] {}: ",
-            format_duration(turn.start_ms),
-            turn.source.label()
-        );
+        let prefix = format!("[{}] {}: ", format_duration(turn.start_ms), turn.label());
         let mut line = prefix.clone();
         for word in turn.text.split_whitespace() {
             if line.len() > prefix.len() && line.len() + 1 + word.len() > LINE_CHARS {
@@ -909,7 +907,8 @@ fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
 }
 
 /// Parses the turns of an exported meeting Markdown file (`**You** · 01:02`
-/// followed by the turn's text).
+/// followed by the turn's text). Any label other than `You` and `Them` is a
+/// participant's name on the call audio.
 #[cfg(any(debug_assertions, test))]
 pub(super) fn entries_from_markdown(markdown: &str) -> Vec<TranscriptEntry> {
     let mut entries: Vec<TranscriptEntry> = Vec::new();
@@ -919,22 +918,26 @@ pub(super) fn entries_from_markdown(markdown: &str) -> Vec<TranscriptEntry> {
             .strip_prefix("**")
             .and_then(|rest| rest.split_once("** · "))
             .and_then(|(label, clock)| {
-                let source = match label {
-                    "You" => super::MeetingSource::Microphone,
-                    "Them" => super::MeetingSource::System,
+                let (source, speaker) = match label {
+                    "You" => (super::MeetingSource::Microphone, None),
+                    "Them" => (super::MeetingSource::System, None),
+                    name if super::speakers::is_valid_name(name) => {
+                        (super::MeetingSource::System, Some(name.to_owned()))
+                    }
                     _ => return None,
                 };
                 let (minutes, seconds) = clock.trim().split_once(':')?;
                 let start_ms =
                     (minutes.parse::<u64>().ok()? * 60 + seconds.parse::<u64>().ok()?) * 1_000;
-                Some((source, start_ms))
+                Some((source, speaker, start_ms))
             });
-        if let Some((source, start_ms)) = header {
+        if let Some((source, speaker, start_ms)) = header {
             entries.push(TranscriptEntry {
                 source,
                 start_ms,
                 end_ms: start_ms,
                 text: String::new(),
+                speaker,
             });
             in_turn = true;
         } else if line.starts_with('#') || line.starts_with(NOTES_START) {
@@ -1055,6 +1058,7 @@ mod tests {
             start_ms,
             end_ms: start_ms + 1_000,
             text: text.into(),
+            speaker: None,
         }
     }
 
@@ -1570,13 +1574,15 @@ mod tests {
                     source: MeetingSource::Microphone,
                     start_ms: 1_000,
                     end_ms: 4_000,
-                    text: "Hi.".into()
+                    text: "Hi.".into(),
+                    speaker: None,
                 },
                 TranscriptEntry {
                     source: MeetingSource::System,
                     start_ms: 4_000,
                     end_ms: 4_400,
-                    text: "Hello.".into()
+                    text: "Hello.".into(),
+                    speaker: None,
                 },
             ]
         );

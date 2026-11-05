@@ -31,7 +31,13 @@ unsafe extern "C" {
     fn AXValueGetTypeID() -> usize;
     fn AXValueCreate(value_type: u32, value: *const c_void) -> CfTypeRef;
     fn AXValueGetValue(value: CfTypeRef, value_type: u32, value_out: *mut c_void) -> bool;
+    fn AXIsProcessTrusted() -> bool;
 }
+
+/// `kAXErrorNoValue` and `kAXErrorAttributeUnsupported`: the element has no
+/// such attribute, rather than a failed read.
+const AX_ERROR_NO_VALUE: i32 = -25212;
+const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25205;
 
 /// `kAXValueTypeCFRange`.
 const AX_VALUE_CF_RANGE: u32 = 4;
@@ -161,6 +167,145 @@ fn request_web_accessibility(pid: i32, application: &CfObject) {
     }
 }
 
+/// Whether Hex may read other apps. Only asks; never prompts.
+pub fn is_trusted() -> bool {
+    // SAFETY: A side-effect-free query of this process's trust.
+    unsafe { AXIsProcessTrusted() }
+}
+
+/// Another app's element for a bounded reader on one background thread: it
+/// never crosses threads and is never Hex's own (see `external_application`).
+#[derive(Clone)]
+pub struct AxElement(CfObject);
+
+/// All windows of process `pid` (`None` when they can't all be read), after asking its Chromium web content for an
+/// accessibility tree. `enhanced` also sets `AXEnhancedUserInterface`, which
+/// the new Teams needs where `AXManualAccessibility` alone does nothing.
+pub fn application_windows(pid: i32, enhanced: bool) -> Option<Vec<AxElement>> {
+    let application = external_application(pid)?;
+    request_web_accessibility(pid, &application);
+    if enhanced {
+        request_enhanced_interface(pid, &application);
+    }
+    copy_all_elements(&application, c"AXWindows", 64)
+}
+
+/// An attribute's elements, all of them or `None`: unlike `copy_elements`, a
+/// failed request, a dropped element, or more than `limit` is not an empty or
+/// shorter list. A missing attribute is no elements.
+fn copy_all_elements(element: &CfObject, name: &CStr, limit: usize) -> Option<Vec<AxElement>> {
+    let attribute = CfObject(cf_string_literal(name)?);
+    let mut value = ptr::null();
+    // SAFETY: A live element and a CFString name; a returned value is owned
+    // by the caller.
+    let status = unsafe { AXUIElementCopyAttributeValue(element.0, attribute.0, &mut value) };
+    if status == AX_ERROR_NO_VALUE || status == AX_ERROR_ATTRIBUTE_UNSUPPORTED {
+        return Some(Vec::new());
+    }
+    if status != 0 || value.is_null() {
+        return None;
+    }
+    let array = CfObject(value);
+    if unsafe { CFGetTypeID(array.0) } != unsafe { CFArrayGetTypeID() } {
+        return None;
+    }
+    let count = unsafe { CFArrayGetCount(array.0) };
+    if count < 0 || count as usize > limit {
+        return None;
+    }
+    (0..count)
+        .map(|index| {
+            // SAFETY: Get rule: the array owns the item, so it is retained
+            // before the array goes.
+            let item = unsafe { CFArrayGetValueAtIndex(array.0, index) };
+            if item.is_null() {
+                return None;
+            }
+            let item = CfObject(unsafe { CFRetain(item) });
+            (unsafe { AXUIElementSetMessagingTimeout(item.0, MESSAGING_TIMEOUT_SECS) } == 0)
+                .then_some(AxElement(item))
+        })
+        .collect()
+}
+
+impl AxElement {
+    pub fn role(&self) -> Option<String> {
+        copy_string(&self.0, c"AXRole")
+    }
+
+    pub fn classes(&self) -> Vec<String> {
+        copy_strings(&self.0, c"AXDOMClassList")
+    }
+
+    pub fn dom_id(&self) -> Option<String> {
+        copy_string(&self.0, c"AXDOMIdentifier")
+    }
+
+    pub fn title(&self) -> Option<String> {
+        copy_string(&self.0, c"AXTitle")
+    }
+
+    pub fn description(&self) -> Option<String> {
+        copy_string(&self.0, c"AXDescription")
+    }
+
+    pub fn value(&self) -> Option<String> {
+        copy_string(&self.0, c"AXValue")
+    }
+
+    /// Every child, or `None` when any of them could not be read: a failed
+    /// request, an element that dropped out, or more than `limit`. A reader
+    /// that must not miss a marked participant treats that as unknown.
+    pub fn children(&self, limit: usize) -> Option<Vec<Self>> {
+        copy_all_elements(&self.0, c"AXChildren", limit)
+    }
+
+    pub fn same(&self, other: &Self) -> bool {
+        // SAFETY: Both are live AXUIElements.
+        unsafe { CFEqual(self.0.0, other.0.0) != 0 }
+    }
+}
+
+/// Sets `AXEnhancedUserInterface`, once per process. Chromium then builds
+/// its full web tree as it does for VoiceOver; the call reports an error on
+/// some builds yet takes effect.
+fn request_enhanced_interface(pid: i32, application: &CfObject) {
+    static ASKED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+    let mut asked = ASKED.lock().unwrap_or_else(|error| error.into_inner());
+    if asked.contains(&pid) {
+        return;
+    }
+    asked.push(pid);
+    let Some(attribute) = cf_string_literal(c"AXEnhancedUserInterface").map(CfObject) else {
+        return;
+    };
+    // SAFETY: A live application element, a CFString name, and the shared
+    // kCFBooleanTrue constant.
+    let status =
+        unsafe { AXUIElementSetAttributeValue(application.0, attribute.0, kCFBooleanTrue) };
+    if status != 0 {
+        tracing::debug!(status, pid, "the app reported an error enabling its tree");
+    }
+}
+
+/// An attribute holding strings (`AXDOMClassList`).
+fn copy_strings(element: &CfObject, name: &CStr) -> Vec<String> {
+    let Some(array) = copy_attribute(element, name) else {
+        return Vec::new();
+    };
+    if unsafe { CFGetTypeID(array.0) } != unsafe { CFArrayGetTypeID() } {
+        return Vec::new();
+    }
+    let count = unsafe { CFArrayGetCount(array.0) }.clamp(0, 64);
+    (0..count)
+        .filter_map(|index| {
+            // SAFETY: Get rule: `array` keeps the item alive while it is read.
+            let item = unsafe { CFArrayGetValueAtIndex(array.0, index) };
+            (!item.is_null()).then(|| cf_string(item)).flatten()
+        })
+        .collect()
+}
+
 /// An element as `browser_page` walks it.
 struct Element(CfObject);
 
@@ -267,6 +412,14 @@ fn copy_string_for_range(element: &CfObject, range: CfRange) -> Option<String> {
 
 struct CfObject(CfTypeRef);
 
+impl Clone for CfObject {
+    fn clone(&self) -> Self {
+        // SAFETY: A live, non-null Core Foundation object; the clone owns
+        // the new reference.
+        Self(unsafe { CFRetain(self.0) })
+    }
+}
+
 impl Drop for CfObject {
     fn drop(&mut self) {
         unsafe { CFRelease(self.0) };
@@ -369,12 +522,14 @@ mod tests {
         assert_eq!(focused_web_url(pid), None);
         assert_eq!(char_before_caret(pid), None);
         assert_eq!(browser_pages(pid), Default::default());
+        assert!(application_windows(pid, true).is_none());
     }
 
     #[test]
     fn invalid_processes_are_rejected_before_native_queries() {
         for pid in [0, -1, i32::MIN] {
             assert!(external_application(pid).is_none());
+            assert!(application_windows(pid, false).is_none());
         }
     }
 
