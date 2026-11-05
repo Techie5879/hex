@@ -803,7 +803,7 @@ Model advertises streaming, GPU device             // dictate.streaming
   │   ├── HUD hidden -> In the HUD's place at the top
   │   ├── Appears with the first words, already drawn; prewarmed, so macOS never
   │   │   reveals the last dictation's words for a frame (Linux, Windows: unverified)
-  │   ├── Grows with the words to 552 pt; the newest stay in view, "…" cutting the start
+  │   ├── Grows with the words to 552 pt; the newest stay in view, with a subtle fade at the older edge
   │   └── Tentative words, when the model has any, are dimmed after the stable ones
   ├── Release, short tap, or a lost microphone -> The recording ends -> Hidden
   ├── Provisional: never pasted, copied, or kept (the final text replaces it)

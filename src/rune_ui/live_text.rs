@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::{
-    Anim, Cx, El, OverlayHandle, OverlayOptions, OverlayPlacement, OverlaySpec, ScreenEdge, row,
-    text,
+    Align, Anim, Cx, El, OverlayHandle, OverlayOptions, OverlayPlacement, OverlaySpec, ScreenEdge,
+    Span, rich, row,
 };
 
 use super::controls::Paint;
@@ -159,10 +159,6 @@ fn is_blank(partial: &Partial) -> bool {
     partial.stable.trim().is_empty() && partial.tentative.trim().is_empty()
 }
 
-/// About one space of the plate's font, between right-to-left stable and
-/// tentative words.
-const RTL_SPACE: f32 = 4.0;
-
 /// Whether the line's first strong letter is right-to-left (Hebrew, Arabic,
 /// Persian, Syriac, Thaana, N'Ko, and their presentation forms).
 fn is_right_to_left(stable: &str, tentative: &str) -> bool {
@@ -193,38 +189,29 @@ fn view(plate: &Plate, cx: &mut Cx<Plate>) -> El {
     if plate.stable.trim().is_empty() && plate.tentative.trim().is_empty() {
         return root;
     }
-    // The newest words stay in view: the start gives way with "…".
-    let stable = text(plate.stable.trim().to_owned())
-        .key("stable")
-        .truncate_head()
-        .font(p.k.ty.ui)
-        .color(p.text());
-    let rtl = is_right_to_left(&plate.stable, &plate.tentative);
-    let tentative = (!plate.tentative.trim().is_empty()).then(|| {
-        let words = text(if rtl {
-            // A leading space would sit on the right-to-left line's far
-            // (right) side; the gap goes between the words instead.
-            plate.tentative.trim().to_owned()
-        } else {
-            plate.tentative.clone()
-        })
-        .key("tentative")
-        .truncate()
-        .font(p.k.ty.ui)
-        .color(p.faint());
-        let spaced = rtl
-            && !plate.stable.trim().is_empty()
-            && plate.tentative.starts_with(char::is_whitespace);
-        if spaced { words.mr(RTL_SPACE) } else { words }
-    });
-    let line = row().key("line").min_w(0.0).shrink();
-    // Right-to-left, the newer (tentative) words read after the stable ones,
-    // so they sit to their left.
-    let line = if rtl {
-        line.children(tentative).child(stable)
+    // Keep stable and tentative words in one text layout. Separate labels
+    // can spend all their width on old words and leave no room for new ones.
+    // Fade the oldest edge instead of prefixing a bright ellipsis.
+    let stable = plate.stable.trim();
+    let tentative = if stable.is_empty() {
+        plate.tentative.trim()
     } else {
-        line.child(stable).children(tentative)
+        plate.tentative.trim_end()
     };
+    let words = format!("{stable}{tentative}");
+    let spans = (!tentative.is_empty())
+        .then(|| Span::new(stable.len(), words.len()).color(p.faint()))
+        .into_iter()
+        .collect();
+    let rtl = is_right_to_left(stable, tentative);
+    let line = row().key("line").min_w(0.0).shrink().child(
+        rich(words, spans)
+            .key("words")
+            .truncate_fade()
+            .align(if rtl { Align::Start } else { Align::End })
+            .font(p.k.ty.ui)
+            .color(p.text()),
+    );
     root.child(
         row()
             .key("plate")
@@ -285,7 +272,7 @@ mod tests {
         assert!(w < SIZE.0 / 2.0, "the plate hugs a short line: {w}");
         assert!((x + w / 2.0 - SIZE.0 / 2.0).abs() < 1.0, "centred: {x} {w}");
         assert!((y + h / 2.0 - SIZE.1 / 2.0).abs() < 1.0, "centred: {y} {h}");
-        assert!(rect(&rt, "tentative").is_none());
+        assert!(rect(&rt, "words").is_some());
     }
 
     #[test]
@@ -300,24 +287,31 @@ mod tests {
                 line_x + line_w <= x + w,
                 "the words fit the plate: {line_x} {line_w}"
             );
-            let [_, _, _, line] = rect(&rt, "stable").unwrap();
+            let [_, _, _, line] = rect(&rt, "words").unwrap();
             assert!(line < PLATE_H, "one line: {line}");
-            assert_eq!(rect(&rt, "tentative").is_some(), !tentative.is_empty());
         }
     }
 
     #[test]
-    fn tentative_words_follow_the_stable_ones_in_reading_order() {
-        let rt = runtime(SHORT, " is to finish", false);
-        let [sx, _, sw, _] = rect(&rt, "stable").unwrap();
-        let [tx, _, _, _] = rect(&rt, "tentative").unwrap();
-        assert!(tx >= sx + sw - 0.5, "left to right: {sx} {sw} {tx}");
-
-        let rt = runtime(HEBREW, " והיום", false);
-        let [sx, _, _, _] = rect(&rt, "stable").unwrap();
-        let [tx, _, tw, _] = rect(&rt, "tentative").unwrap();
-        assert!(tx + tw < sx, "right to left, after a space: {tx} {tw} {sx}");
-
+    fn stable_and_tentative_words_share_one_layout_without_inserted_dots() {
+        for (stable, tentative, expected) in [
+            (SHORT, " is to finish", "So the plan for today is to finish"),
+            (
+                "",
+                "  The budget is 7300, not 4300.",
+                "The budget is 7300, not 4300.",
+            ),
+            (HEBREW, " והיום", "אז התוכנית להיום והיום"),
+        ] {
+            let rt = runtime(stable, tentative, false);
+            let words = rt
+                .elements()
+                .into_iter()
+                .find(|element| element.key.as_deref() == Some("words"))
+                .unwrap();
+            assert_eq!(words.text.as_deref(), Some(expected));
+            assert!(!words.text.unwrap().starts_with('…'));
+        }
         assert!(is_right_to_left(HEBREW, ""));
         assert!(is_right_to_left("  ", " مرحبا"));
         assert!(!is_right_to_left(SHORT, " שלום"));
@@ -370,17 +364,40 @@ mod tests {
         assert!(!blank("so", ""));
     }
 
-    /// Renders the plate to `HEX_LIVE_TEXT_SNAPS/live-text-*.png` in both
-    /// appearances, to look at.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn goldens() {
+        let Some(gpu) = crate::rune_ui::tests::gpu() else {
+            assert!(
+                std::env::var_os("HEX_REQUIRE_GPU").is_none(),
+                "GPU required"
+            );
+            return;
+        };
+        render_snapshots(&gpu, |name, width, height, pixels| {
+            crate::rune_ui::tests::check_rendered_golden(name, width, height, pixels);
+        });
+    }
+
+    /// Renders the plate to `HEX_LIVE_TEXT_SNAPS/rune-live-text-*.png`.
     #[test]
     #[ignore = "set HEX_LIVE_TEXT_SNAPS to a folder; needs a GPU"]
     fn snapshots() {
         let folder = std::path::PathBuf::from(std::env::var("HEX_LIVE_TEXT_SNAPS").unwrap());
         let gpu = rune::render::Gpu::try_new(rune::render::Gpu::instance(), None).unwrap();
+        render_snapshots(&gpu, |name, width, height, pixels| {
+            let path = folder.join(format!("rune-{name}.png"));
+            rune::render::write_png(&path, width, height, pixels).unwrap();
+        });
+    }
+
+    fn render_snapshots(gpu: &rune::render::Gpu, mut save: impl FnMut(&str, u32, u32, &[u8])) {
         for (name, stable, tentative) in [
             ("short", SHORT, ""),
             ("long", LONG, ""),
             ("tentative", SHORT, " is to finish"),
+            ("mixed-long", LONG, " and keep the final words visible"),
+            ("whisper", "", LONG),
             ("rtl", HEBREW, " והיום"),
         ] {
             for dark in [false, true] {
@@ -407,8 +424,12 @@ mod tests {
                 target.copy(&mut encoder);
                 gpu.queue.submit([encoder.finish()]);
                 let theme = if dark { "dark" } else { "light" };
-                let path = folder.join(format!("live-text-{name}-{theme}.png"));
-                rune::render::write_png(&path, w, h, &target.read(&gpu.device)).unwrap();
+                save(
+                    &format!("live-text-{name}-{theme}"),
+                    w,
+                    h,
+                    &target.read(&gpu.device),
+                );
             }
         }
     }

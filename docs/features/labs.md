@@ -1089,9 +1089,11 @@ vocabulary list itself (rewriting and search), and Linux's Terminal paste.
   [rune_ui/live_text.rs](../../src/rune_ui/live_text.rs), whose opt-in
   `snapshots` renders the line in light and dark; and
   `live_text_hangs_just_past_the_plate_wherever_it_sits` in
-  [rune_hud/hud_placement.rs](../../src/rune_hud/hud_placement.rs). The line has no golden
-  and no `--snap` scene (overlays have none), and nothing headless checks
-  how it appears and hides on screen.
+  [rune_hud/hud_placement.rs](../../src/rune_hud/hud_placement.rs).
+  The `goldens` test also renders short, long, tentative-only Whisper,
+  mixed, and right-to-left text in both appearances. It checks overflow
+  without inserting a leading ellipsis. Native visibility still needs an
+  on-screen check; there is no `--snap` scene for this overlay.
 - Playground: Rune's playground in the window (every OS), `labs.playground`
   (off by default, applied at once). While on, a **Playground** sidebar item,
   ⇧⌘D (View › Playground on macOS), or Ctrl+Shift+D swaps the window for a list of
