@@ -3,8 +3,9 @@
 Record a call locally: Hex captures the other participants (system audio) and
 you (microphone) as separate tracks, transcribes them on this Mac, and saves a
 Markdown transcript with `You` and `Them` turns. Recording starts automatically
-only for calls from a website or app set to Always record, and never stops
-automatically unless Labs › Stop when the call ends is on (see
+only for calls from a website or app set to Always record; other detected
+calls are offered. A recording never stops automatically unless Labs › Stop
+when the call ends is on, and then only a detected call's (see
 [meetings.auto-stop](#record)). This map describes macOS; [Linux and Windows](#linux-and-windows)
 lists where they differ.
 
@@ -528,7 +529,8 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
 
 Detected app leaves the microphone for about 3 s     // meetings.call-ended
   -> "Zoom left the call" capsule: Keep recording / Stop & transcribe
-  -> No timeout; nothing stops automatically
+  -> No timeout; nothing stops automatically (Labs › Stop when the call ends
+     changes this for a detected call's recording, below)
 
 Labs › Movable meeting capsules (macOS, off by default; #1093) // meetings.panel-drag
   The panel capsules: offer, reminder, left the call, Meeting transcript
@@ -548,15 +550,27 @@ Labs › Movable meeting capsules (macOS, off by default; #1093) // meetings.pan
   there
 
 Labs › Stop when the call ends (macOS, off by default; #835) // meetings.auto-stop
-  Only a recording Hex started on its own (Always record); manual, offered,
-  and calendar recordings are never stopped
+  Only a detected call's recording: one Always record started, or one the
+  user started from that call's offer (Record, or … › Always record). The
+  watched app is the offered call's own (`MeetingCandidate::application`);
+  another app on the microphone never keeps it alive. An accepted offer
+  still never says "Started automatically". Manual recordings (menu bar,
+  `hex meetings record`) and calendar-reminder recordings saw no call when
+  they began and are never stopped
   -> The call app counts as present while it holds the microphone OR any of
      its Core Audio processes plays output (WhatsApp keeps the microphone
      while muted; its output stays open until hang-up)
   -> Both off for about 3 s -> capsule says "Hex stops recording in 30 s
      unless you keep recording."
-     ├── App back on the microphone or output within 30 s -> nothing stops
-     ├── Keep recording -> nothing stops for this absence; leaving again re-arms
+     ├── App back on the microphone or output within 30 s -> nothing stops;
+     │   the countdown capsule closes and the recording indicator returns,
+     │   preserving its elapsed time and Copy state (`AutoStopCancelled`)
+     ├── Microphone read fails -> counts as present: the stop is dropped and
+     │   a new absence starts once reads work, with its full 30 s
+     ├── Lab turned off mid-countdown -> nothing stops; the capsule says
+     │   "Hex is still recording."
+     ├── Keep recording -> nothing stops for this absence; the recording
+     │   indicator returns (`RecordingContinued`); leaving again re-arms
      ├── Stop & transcribe -> stops now
      └── 30 s pass -> Stop & Transcribe, as the menu bar's; logged
          "meeting recording stopped automatically after its call ended"
@@ -597,14 +611,22 @@ check `a_meeting_recording_error_can_be_dismissed`).
 Checks: `call_end_is_reported_once_per_sustained_absence`,
 `an_ended_call_stops_after_the_grace_unless_it_comes_back_or_is_kept` in
 [meeting/detection.rs](../../src/meeting/detection.rs),
-`only_automatic_recordings_stop_when_the_call_ends_and_only_with_the_lab_on` and
-`keep_recording_disarms_a_pending_automatic_stop` in
-[meeting/watcher.rs](../../src/meeting/watcher.rs),
-`an_automatic_stop_says_so_and_keep_recording_cancels_it` in
+`an_accepted_teams_or_slack_offer_stops_30_s_after_its_call_ends`,
+`always_record_still_stops_and_still_says_it_started_automatically`,
+`manual_and_calendar_recordings_never_stop_when_a_call_ends`,
+`with_the_lab_off_an_accepted_offer_records_until_stop`,
+`a_muted_call_or_a_failed_read_never_stops_an_accepted_offer`, and
+`a_returning_call_keep_recording_or_the_lab_off_cancels_the_stop` in
+[meeting/watcher.rs](../../src/meeting/watcher.rs) (the controller with a
+fake recorder and synthetic microphone readings),
+`an_automatic_stop_says_so_and_keep_recording_cancels_it` and
+`a_cancelled_countdown_never_says_hex_stops`, and
+`continuing_a_recording_dismisses_only_its_call_ended_panel` in
 [meeting_capsules.rs](../../src/rune_ui/meeting_capsules.rs) (auto-stop; not
 yet observed on a real Mac: the output read
 `microphone_activity::application_running_output` against a live WhatsApp
-call, a muted call, and Zoom or Teams helpers),
+call, a muted call, and Zoom or Teams helpers, or an accepted Teams or Slack
+offer stopping after hang-up),
 `paste_cursor_counts_coalesced_turns_and_advances_only_on_success` in
 [meeting/tests.rs](../../src/meeting/tests.rs),
 `meeting_delta_coalesces_turns_in_time_order` in

@@ -269,7 +269,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
                 Feature::StopWhenCallEnds,
                 &TIMER,
                 tr("Stop when the call ends"),
-                tr("Stop a recording Hex started on its own 30 s after the call app leaves the microphone and goes quiet"),
+                tr("Stop a detected call's recording 30 s after its call app leaves the microphone and goes quiet"),
             ));
         }
     }

@@ -251,11 +251,7 @@ pub struct CallPresence {
 
 impl CallPresence {
     /// Returns true once per absence that lasts long enough.
-    pub fn observe(&mut self, present: bool) -> bool {
-        self.observe_at(present, Instant::now())
-    }
-
-    fn observe_at(&mut self, present: bool, now: Instant) -> bool {
+    pub(crate) fn observe_at(&mut self, present: bool, now: Instant) -> bool {
         if present {
             self.absent = None;
             self.prompted = false;
@@ -270,12 +266,12 @@ impl CallPresence {
     }
 }
 
-/// How long an automatic recording keeps going after its call ended, under
-/// Labs › Stop when the call ends (#835).
+/// How long a detected call's recording keeps going after its call ended,
+/// under Labs › Stop when the call ends (#835).
 pub const AUTO_STOP_GRACE: Duration = Duration::from_secs(30);
 
-/// Labs › Stop when the call ends: the deadline at which a recording Hex
-/// started on its own stops, armed when [`CallPresence`] reports the call
+/// Labs › Stop when the call ends: the deadline at which a detected call's
+/// recording (Always record, or an accepted offer) stops, armed when [`CallPresence`] reports the call
 /// ended and dropped when the call app comes back or the user keeps
 /// recording.
 #[derive(Default)]
@@ -285,11 +281,7 @@ pub struct AutoStop {
 
 impl AutoStop {
     /// The call ended: stop after the grace.
-    pub fn arm(&mut self) {
-        self.arm_at(Instant::now());
-    }
-
-    fn arm_at(&mut self, now: Instant) {
+    pub(crate) fn arm_at(&mut self, now: Instant) {
         self.deadline = Some(now + AUTO_STOP_GRACE);
     }
 
@@ -300,11 +292,7 @@ impl AutoStop {
     }
 
     /// Whether the grace has run out; true once, then disarmed.
-    pub fn due(&mut self) -> bool {
-        self.due_at(Instant::now())
-    }
-
-    fn due_at(&mut self, now: Instant) -> bool {
+    pub(crate) fn due_at(&mut self, now: Instant) -> bool {
         if self.deadline.is_some_and(|deadline| now >= deadline) {
             self.deadline = None;
             return true;

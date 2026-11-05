@@ -400,6 +400,24 @@ pub(crate) struct MeetingCapsules {
     generation: Arc<AtomicU64>,
     /// The recording capsule's elapsed-time ticker runs while this is set.
     ticking: Arc<Mutex<Option<String>>>,
+    /// Host-side panel state, updated before overlay operations are queued.
+    /// A cancellation must never close a newer ready or call-ended panel.
+    panel_state: PanelState,
+}
+
+#[derive(Default)]
+struct PanelState {
+    call_ended: bool,
+}
+
+impl PanelState {
+    fn show(&mut self, kind: &Kind) {
+        self.call_ended = matches!(kind, Kind::CallEnded { .. });
+    }
+
+    fn dismiss_call_ended(&mut self) -> bool {
+        std::mem::take(&mut self.call_ended)
+    }
 }
 
 impl MeetingCapsules {
@@ -483,6 +501,7 @@ impl MeetingCapsules {
             recording,
             generation: Arc::default(),
             ticking: Arc::default(),
+            panel_state: PanelState::default(),
         }
     }
 
@@ -555,7 +574,9 @@ impl MeetingCapsules {
                 });
             }
             ControllerEvent::CallEnded { app, auto_stop } => {
-                self.close_recording();
+                // Preserve the elapsed time, copy state and ticker while
+                // the end prompt temporarily occupies the same corner.
+                self.recording.hide();
                 self.show_panel(
                     Kind::CallEnded {
                         app: app.clone(),
@@ -564,6 +585,20 @@ impl MeetingCapsules {
                     None,
                 );
             }
+            ControllerEvent::AutoStopCancelled { returned } => {
+                if *returned {
+                    self.continue_recording();
+                } else if self.panel_state.call_ended {
+                    let current = self.generation.clone();
+                    let generation = current.load(Ordering::SeqCst);
+                    self.panel.update(move |capsule, _| {
+                        if current.load(Ordering::SeqCst) == generation {
+                            cancel_countdown(&mut capsule.kind);
+                        }
+                    });
+                }
+            }
+            ControllerEvent::RecordingContinued => self.continue_recording(),
             ControllerEvent::Finished(manifest) => {
                 self.close_recording();
                 self.show_panel(Kind::Ready(manifest.clone()), Some(READY_TIMEOUT));
@@ -585,7 +620,8 @@ impl MeetingCapsules {
         }
     }
 
-    fn show_panel(&self, kind: Kind, timeout: Option<Duration>) {
+    fn show_panel(&mut self, kind: Kind, timeout: Option<Duration>) {
+        self.panel_state.show(&kind);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let reminder = matches!(kind, Kind::Reminder { .. });
         // With Labs › Movable meeting capsules the panel shows in the saved
@@ -675,10 +711,26 @@ impl MeetingCapsules {
     // Hide through the handle, not `Capsule::close`: a hide requested inside
     // an update runs on the event loop after a show queued in the same batch,
     // so closing then showing a capsule would leave it hidden.
-    fn close_panel(&self) {
+    fn close_panel(&mut self) {
+        self.panel_state.call_ended = false;
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.panel.update(|capsule, _| capsule.kind = None);
         self.panel.hide();
+    }
+
+    fn continue_recording(&mut self) {
+        if !self.panel_state.dismiss_call_ended() {
+            return;
+        }
+        // Queue the hide here, before any following event queues a show.
+        // Hiding from an overlay update could hide that newer panel.
+        self.close_panel();
+        if crate::app_settings::meeting_indicator_enabled()
+            && self.ticking.lock().unwrap().is_some()
+        {
+            float_on_xwayland(&self.recording);
+            self.recording.show();
+        }
     }
 
     fn show_recording(&self, id: String, title: String, automatic: bool) {
@@ -859,16 +911,9 @@ fn view_body(capsule: &Capsule, cx: &mut Cx<Capsule>) -> El {
             .to_owned(),
             vec![
                 button(p, "keep-recording", tr("Keep recording"), false, |c| {
-                    if matches!(
-                        c.kind,
-                        Some(Kind::CallEnded {
-                            auto_stop: true,
-                            ..
-                        })
-                    ) {
-                        c.send(ControllerCommand::KeepRecording);
+                    if c.send(ControllerCommand::KeepRecording) {
+                        c.close();
                     }
-                    c.close();
                 }),
                 button(p, "stop-meeting", tr("Stop & transcribe"), true, |c| {
                     if c.send(ControllerCommand::Stop) {
@@ -880,6 +925,15 @@ fn view_body(capsule: &Capsule, cx: &mut Cx<Capsule>) -> El {
         Kind::Ready(manifest) => ready(p, manifest, capsule.copied),
     };
     pill(p, dot, &title, &subtitle, actions, capsule.movable)
+}
+
+/// The lab turned off while the call stayed away: keep the prompt, without
+/// claiming there is still an automatic stop pending.
+fn cancel_countdown(kind: &mut Option<Kind>) {
+    let Some(Kind::CallEnded { auto_stop, .. }) = kind else {
+        return;
+    };
+    *auto_stop = false;
 }
 
 /// The panel capsule's width for `kind`, room for its title beside its
@@ -1948,11 +2002,58 @@ mod tests {
         ));
         assert!(rt.state.kind.is_none());
 
-        // Without the lab, Keep recording only closes the capsule.
+        // Without the lab, Keep recording still restores the indicator.
         let (mut rt, commands, _) = runtime(call_ended(), false, true, CALL_ENDED);
         assert!(texts(&rt).contains(&"Hex is still recording.".to_string()));
         tap(&mut rt, "keep-recording");
-        assert!(commands.try_recv().is_err());
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(ControllerCommand::KeepRecording)
+        ));
+    }
+
+    #[test]
+    fn a_cancelled_countdown_never_says_hex_stops() {
+        let countdown = || {
+            Some(Kind::CallEnded {
+                app: MeetingSource::Teams.label().into(),
+                auto_stop: true,
+            })
+        };
+        // The lab turned off while the call stayed away: it says Hex is
+        // still recording, with Stop & transcribe still there.
+        let mut kind = countdown();
+        cancel_countdown(&mut kind);
+        assert!(matches!(
+            kind,
+            Some(Kind::CallEnded {
+                auto_stop: false,
+                ..
+            })
+        ));
+        // A capsule without a countdown, or another capsule, stays as it is.
+        let mut kind = Some(call_ended());
+        cancel_countdown(&mut kind);
+        assert!(kind.is_some());
+        let mut kind = Some(ready_transcript());
+        cancel_countdown(&mut kind);
+        assert!(matches!(kind, Some(Kind::Ready(_))));
+    }
+
+    #[test]
+    fn continuing_a_recording_dismisses_only_its_call_ended_panel() {
+        let mut panel = PanelState::default();
+        assert!(!panel.dismiss_call_ended());
+        panel.show(&call_ended());
+        assert!(panel.dismiss_call_ended());
+        // A return followed by another absence can show a fresh warning.
+        panel.show(&call_ended());
+        assert!(panel.call_ended);
+        // Once finished, a late continuation must not hide the ready panel.
+        panel.show(&ready_transcript());
+        assert!(!panel.dismiss_call_ended());
+        panel.show(&Kind::Offer(slack_huddle()));
+        assert!(!panel.dismiss_call_ended());
     }
 
     #[test]

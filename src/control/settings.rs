@@ -447,7 +447,7 @@ const KEYS: &[Key] = &[
     key(
         "labs.stop_when_call_ends",
         Kind::Bool,
-        "Labs: a meeting recording Hex started on its own stops 30 s after its call app leaves the microphone and goes quiet, unless you keep recording (macOS)",
+        "Labs: a detected call's meeting recording (Always record, or an offer you accepted) stops 30 s after its call app leaves the microphone and goes quiet, unless you keep recording (macOS)",
     ),
     key(
         "labs.movable_meeting_capsules",
