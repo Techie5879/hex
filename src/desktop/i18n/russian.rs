@@ -138,7 +138,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Copy recent dictations", "Копирование последних диктовок"),
     ("Copy one of your last five dictations from the menu bar, under Paste Last Dictation", "Копируйте одну из пяти последних диктовок в строке меню, в разделе «Вставить последнюю диктовку»"),
     ("Stop when the call ends", "Останавливать по окончании звонка"),
-    ("Stop a recording Hex started on its own 30 s after the call app leaves the microphone and goes quiet", "Останавливает запись, которую Hex начал сам, через 30 с после того, как приложение звонка освободит микрофон и затихнет"),
+    ("Stop a detected call's recording 30 s after its call app leaves the microphone and goes quiet", "Останавливает запись обнаруженного звонка через 30 с после того, как его приложение освободит микрофон и затихнет"),
     ("Hex stops recording in 30 s unless you keep recording.", "Hex остановит запись через 30 с, если вы не продолжите запись."),
     ("Record your screen, draw on it, and talk over it", "Записывайте экран, рисуйте на нём и комментируйте голосом"),
     ("Hex Microphone virtual input and real-time voice filters", "Виртуальный вход Hex Microphone и голосовые фильтры в реальном времени"),

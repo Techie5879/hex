@@ -125,7 +125,7 @@ const TRANSLATIONS: &[(&str, &str)] = &[
     ("Use model files where they are", "Usar arquivos de modelo onde estão"),
     ("Add a speech model file without copying it, so several accounts can share one file", "Adiciona um arquivo de modelo de voz sem copiá-lo, para que várias contas compartilhem um só arquivo"),
     ("Stop when the call ends", "Parar quando a chamada terminar"),
-    ("Stop a recording Hex started on its own 30 s after the call app leaves the microphone and goes quiet", "Para uma gravação que o Hex iniciou sozinho 30 s depois que o app de chamada solta o microfone e fica em silêncio"),
+    ("Stop a detected call's recording 30 s after its call app leaves the microphone and goes quiet", "Para a gravação de uma chamada detectada 30 s depois que o app da chamada solta o microfone e fica em silêncio"),
     ("Hex stops recording in 30 s unless you keep recording.", "O Hex para de gravar em 30 s, a menos que você continue gravando."),
     ("Turn off the mic when not dictating", "Desligar o microfone quando não estiver ditando"),
     ("The mic opens only while you dictate; the first moment can be clipped", "O microfone abre só enquanto você dita; o primeiro instante pode ser cortado"),

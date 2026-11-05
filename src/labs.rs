@@ -567,7 +567,7 @@ impl Feature {
                 "Shorten long pauses before a whole dictation goes to the model, so slow computers paste sooner"
             }
             Self::StopWhenCallEnds => {
-                "Stop a meeting recording Hex started on its own 30 s after the call app leaves the microphone and goes quiet"
+                "Stop a detected call's meeting recording 30 s after its call app leaves the microphone and goes quiet"
             }
             Self::OutputFixes => {
                 "Offer Vocabulary and Fix this beside Output's Try result, to correct a wrong result"
@@ -1047,9 +1047,9 @@ pub fn skip_pauses() -> bool {
     on(SKIP_PAUSES) && Feature::SkipPauses.on_this_os()
 }
 
-/// A meeting recording Hex started on its own stops once its call app has
-/// left the microphone and gone quiet for a grace period (macOS; read on
-/// each pass of the meeting controller).
+/// A detected call's meeting recording (Always record, or an accepted offer)
+/// stops once its call app has left the microphone and gone quiet for a
+/// grace period (macOS; read on each pass of the meeting controller).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn stop_when_call_ends() -> bool {
     on(STOP_WHEN_CALL_ENDS) && Feature::StopWhenCallEnds.on_this_os()
