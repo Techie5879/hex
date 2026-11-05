@@ -1,8 +1,11 @@
-//! Slack huddles, in the huddle window or docked in the main window.
+//! Slack huddles in their expanded or compact pop-out window.
+//! Bottom-bar mode exposes no reliable participant name and stays unnamed.
 //!
-//! Evidence (third-party, published; never observed by this project):
-//! Slack is Electron, so its web tree exists only once a client sets
-//! `AXManualAccessibility`, and every node then carries Chromium's
+//! Initial published evidence, followed by a controlled solo huddle on
+//! Slack 4.53.280 (2026-11-05) confirming container, cells and profile labels.
+//! The active-speaker class still needs a native remote-voice check:
+//! Slack is Electron; clients can request its web tree using
+//! `AXManualAccessibility`. Nodes expose Chromium's
 //! `AXDOMIdentifier` and `AXDOMClassList` (Pipit PR #140, kawaz/shhcast
 //! 2026-09-30, both on macOS). The huddle lives in a `p-huddle_window_content`
 //! container (Lipik, macOS). Each participant is a `p-huddle_peer_tile`
@@ -26,7 +29,9 @@ const CONTAINER: &str = "p-huddle_window_content";
 const TILE: &str = "p-huddle_peer_tile";
 const ACTIVE: &str = "p-huddle_peer_tile__overlay--active_speaker";
 const NAME_OVERLAY: &str = "p-huddle_peer_tile__name_overlay";
-const MUTED: &str = "p-huddle_peer_tile__name_overlay--muted";
+const UNMUTED: &str = "p-huddle_peer_tile__name_overlay--unmuted";
+const MIC_OVERLAY: &str = "p-huddle_peer_tile__mic_overlay";
+const BOTTOM_BAR: &str = "p-huddle_peer_tile--bottom_bar";
 const CELL_PREFIX: &str = "huddle-grid-gridcell-";
 const SELF_CELL_PREFIX: &str = "huddle-grid-gridcell-self_";
 /// The offscreen node that describes a tile for screen readers.
@@ -84,6 +89,7 @@ fn find_container<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<N, 
         .map(|window| (window, 0))
         .collect::<Vec<_>>();
     let mut found = Vec::new();
+    let mut bottom_bar = false;
     while let Some((node, depth)) = stack.pop() {
         if !budget.visit() {
             return Err(NoCall::Unknown);
@@ -92,6 +98,7 @@ fn find_container<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<N, 
             found.push(node);
             continue;
         }
+        bottom_bar |= has_class(&node, BOTTOM_BAR);
         // Conversations are left out on purpose; anything else unread could
         // hide a second huddle.
         if skipped(&node) {
@@ -103,6 +110,7 @@ fn find_container<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<N, 
         stack.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
     }
     match found.len() {
+        0 if bottom_bar => Err(NoCall::Unknown),
         0 => Err(NoCall::Absent),
         1 => Ok(found.remove(0)),
         // A docked huddle and a huddle window at once, or a stale one.
@@ -114,7 +122,6 @@ fn find_container<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<N, 
 struct Tile {
     cell: Option<String>,
     profile: Option<String>,
-    overlay: Option<String>,
     speaking: bool,
     muted: bool,
 }
@@ -126,13 +133,10 @@ impl Tile {
             .is_some_and(|cell| cell.starts_with(SELF_CELL_PREFIX))
     }
 
-    /// The participant's name, from its profile button, else the text of its
-    /// name overlay.
+    /// The participant's name from its English profile label. Overlay
+    /// buttons expose audio/video state, not a reliable name.
     fn name(&self) -> Option<String> {
-        self.profile
-            .as_deref()
-            .or(self.overlay.as_deref())
-            .and_then(names::clean)
+        self.profile.as_deref().and_then(names::clean)
     }
 }
 
@@ -142,6 +146,11 @@ fn read_tiles<N: AxNode>(region: &N, budget: &mut Budget) -> Result<Reading, NoC
     while let Some((node, depth, cell)) = stack.pop() {
         if !budget.visit() {
             return Err(NoCall::Unknown);
+        }
+        // Chromium mirrors the grid cells under AXColumn as well as rows.
+        // Reading the column copy repeats each tile, not another participant.
+        if node.role().as_deref() == Some("AXColumn") {
+            continue;
         }
         let cell = cell.or_else(|| cell_id(&node));
         if has_class(&node, TILE) {
@@ -194,9 +203,9 @@ fn read_tile<N: AxNode>(
         cell,
         ..Tile::default()
     };
-    let mut stack = vec![(tile.clone(), 0, false)];
+    let mut stack = vec![(tile.clone(), 0)];
     let mut visited = 0;
-    while let Some((node, depth, in_overlay)) = stack.pop() {
+    while let Some((node, depth)) = stack.pop() {
         visited += 1;
         if visited > TILE_NODES || !budget.visit() {
             return Err(NoCall::Unknown);
@@ -208,23 +217,22 @@ fn read_tile<N: AxNode>(
         }
         found.cell = found.cell.or_else(|| cell_id(&node));
         found.speaking |= classes.iter().any(|class| class == ACTIVE);
-        found.muted |= classes.iter().any(|class| class == MUTED);
+        found.muted |= classes.iter().any(|class| class == MIC_OVERLAY)
+            || (classes.iter().any(|class| class == NAME_OVERLAY)
+                && !classes.iter().any(|class| class == UNMUTED));
         if found.profile.is_none() {
-            found.profile = node.description().as_deref().and_then(profile_name);
-        }
-        if in_overlay && found.overlay.is_none() && node.role().as_deref() == Some("AXStaticText") {
-            found.overlay = node
-                .value()
-                .or_else(|| node.title())
-                .filter(|text| !is_state_text(text));
+            found.profile = node
+                .description()
+                .as_deref()
+                .and_then(profile_name)
+                .or_else(|| node.title().as_deref().and_then(profile_name));
         }
         // A mark below what was read could be on this tile.
         let children = budget
             .children_at(&node, depth, TILE_DEPTH)
             .ok_or(NoCall::Unknown)?;
-        let in_overlay = in_overlay || classes.iter().any(|class| class == NAME_OVERLAY);
         for child in children.into_iter().rev() {
-            stack.push((child, depth + 1, in_overlay));
+            stack.push((child, depth + 1));
         }
     }
     Ok(found)
@@ -239,12 +247,6 @@ fn profile_name(label: &str) -> Option<String> {
     Some(name.trim().to_owned()).filter(|name| !name.is_empty())
 }
 
-/// The overlay's own description of a tile's audio and video.
-fn is_state_text(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    lower.contains("audio is") || lower.contains("video is") || lower.contains("muted")
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -257,13 +259,18 @@ mod tests {
     }
 
     fn tile(cell: &str, name: &str, speaking: bool) -> Builder {
-        let mut overlay = Node::element("AXGroup").class(NAME_OVERLAY);
-        overlay = overlay.child(Node::element("AXStaticText").value(name));
-        let mut tile = Node::element("AXGroup")
+        let profile = format!("View {name}'s profile");
+        let mut tile = Node::element("AXCell")
             .class(TILE)
             .id(&format!("{CELL_PREFIX}{cell}"))
-            .child(Node::element("AXButton").description(&format!("View {name}'s profile")))
-            .child(overlay);
+            .title(&profile)
+            .description(&profile)
+            .child(
+                Node::element("AXButton")
+                    .class(NAME_OVERLAY)
+                    .class(UNMUTED)
+                    .description("video is off, audio is on"),
+            );
         if speaking {
             tile = tile.child(Node::element("AXGroup").class(ACTIVE));
         }
@@ -284,7 +291,7 @@ mod tests {
             Node::element("AXGroup")
                 .class("c-message_kit__message")
                 .child(
-                    Node::element("AXStaticText").value("Grace is speaking: View Grace's profile"),
+                    Node::element("AXStaticText").title("Grace is speaking: View Grace's profile"),
                 )
                 .child(Node::element("AXGroup").class(ACTIVE)),
         );
@@ -325,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn a_huddle_docked_in_the_main_window_reads_the_same_without_touching_messages() {
+    fn a_full_grid_container_reads_without_touching_adjacent_messages() {
         let main = window(Some(huddle([
             tile(REMOTE, "Dev Patel", false),
             tile(OTHER, "Eli Novak", true),
@@ -401,9 +408,9 @@ mod tests {
         assert_eq!(reading(vec![hostile]), Ok(Reading::Uncertain));
 
         let muted = Node::element("AXWindow")
-            .child(huddle([tile(REMOTE, "Dev Patel", true).child(
-                Node::element("AXGroup").class(NAME_OVERLAY).class(MUTED),
-            )]))
+            .child(huddle([
+                tile(REMOTE, "Dev Patel", true).child(Node::element("AXGroup").class(MIC_OVERLAY))
+            ]))
             .build();
         assert_eq!(reading(vec![muted]), Ok(Reading::Uncertain));
     }
@@ -440,17 +447,72 @@ mod tests {
     }
 
     #[test]
-    fn a_non_english_slack_still_reads_the_overlay_name_but_not_its_audio_state() {
+    fn overlay_state_text_is_never_used_as_a_participant_name() {
         let window = Node::element("AXWindow")
-            .child(huddle([Node::element("AXGroup")
+            .child(huddle([Node::element("AXCell")
                 .class(TILE)
                 .id(&format!("{CELL_PREFIX}{REMOTE}"))
-                .child(Node::element("AXButton").description("Profil von Dev Patel anzeigen"))
-                .child(Node::element("AXGroup").class(NAME_OVERLAY).children([
-                    Node::element("AXStaticText").value("video is off, audio is on"),
-                    Node::element("AXStaticText").value("Dev Patel"),
-                ]))
+                .description("Profil von Dev Patel anzeigen")
+                .child(
+                    Node::element("AXButton")
+                        .class(NAME_OVERLAY)
+                        .class(UNMUTED)
+                        .description("Video aus, Audio an"),
+                )
                 .child(Node::element("AXGroup").class(ACTIVE))]))
+            .build();
+        assert_eq!(reading(vec![window]), Ok(Reading::Uncertain));
+    }
+
+    #[test]
+    fn compact_cells_need_no_name_overlay_but_require_a_profile_label() {
+        let window = Node::element("AXWindow")
+            .child(huddle([Node::element("AXCell")
+                .class(TILE)
+                .id(&format!("{CELL_PREFIX}{REMOTE}"))
+                .title("View Dev Patel's profile")
+                .child(Node::element("AXGroup").class(ACTIVE))]))
+            .build();
+        assert_eq!(
+            reading(vec![window]),
+            Ok(Reading::Speaking("Dev Patel".into()))
+        );
+    }
+
+    #[test]
+    fn a_muted_overlay_without_the_unmuted_modifier_rejects_a_lingering_mark() {
+        let window = Node::element("AXWindow")
+            .child(huddle([tile(REMOTE, "Dev Patel", true).child(
+                Node::element("AXButton")
+                    .class(NAME_OVERLAY)
+                    .description("video is off, audio is off"),
+            )]))
+            .build();
+        assert_eq!(reading(vec![window]), Ok(Reading::Uncertain));
+    }
+
+    #[test]
+    fn bottom_bar_without_a_full_grid_is_unavailable_not_absent() {
+        let bar = || Node::element("AXGroup").class(BOTTOM_BAR);
+        assert_eq!(reading(vec![window(Some(bar()))]), Err(NoCall::Unknown));
+        let expanded = Node::element("AXWindow")
+            .child(huddle([tile(REMOTE, "Dev Patel", true)]))
+            .build();
+        assert_eq!(
+            reading(vec![window(Some(bar())), expanded]),
+            Ok(Reading::Speaking("Dev Patel".into()))
+        );
+    }
+
+    #[test]
+    fn duplicate_column_cells_are_not_read_again() {
+        let window = Node::element("AXWindow")
+            .child(huddle([
+                tile(REMOTE, "Dev Patel", true),
+                Node::element("AXColumn")
+                    .unreadable()
+                    .child(tile(REMOTE, "Dev Patel", true)),
+            ]))
             .build();
         assert_eq!(
             reading(vec![window]),

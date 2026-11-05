@@ -295,9 +295,14 @@ impl Writer {
                 (binding, observed, Status::Reading)
             }
             // Binding 0 is no call: a stretch never continues across it.
-            Sample::NoCall(NoCall::Absent | NoCall::Unknown) => {
-                (0, Observed::Uncertain, Status::Waiting)
-            }
+            Sample::NoCall(reason) => (
+                0,
+                Observed::Uncertain,
+                match reason {
+                    NoCall::Absent => Status::Waiting,
+                    NoCall::Unknown => Status::Unavailable,
+                },
+            ),
             Sample::PermissionRequired => (0, Observed::Uncertain, Status::PermissionRequired),
         };
         // Before the call audio starts there is nothing to name.
@@ -419,6 +424,19 @@ mod tests {
         );
         assert_eq!(status, Status::PermissionRequired);
         assert!(!directory.path().join(FILE).exists());
+    }
+
+    #[test]
+    fn an_unreadable_live_call_stops_naming_and_reports_unavailable() {
+        let mut samples = (0..8)
+            .map(|_| speaking(1, "Ada Lovelace"))
+            .collect::<Vec<_>>();
+        samples.push(Sample::NoCall(NoCall::Unknown));
+        let (directory, status) = record(samples, Some(Provider::Slack));
+        assert_eq!(status, Status::Unavailable);
+        let timeline = Timeline::load(directory.path());
+        assert_eq!(timeline.speaker_for(0, 1_500), Some("Ada Lovelace"));
+        assert_eq!(timeline.speaker_for(3_000, 4_500), None);
     }
 
     #[test]
