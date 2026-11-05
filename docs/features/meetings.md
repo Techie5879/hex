@@ -1622,7 +1622,11 @@ cells. It also exposed the bottom-bar limitation described above. The test
 used a silent virtual input, no invitees, no AI notes, no captions, and no
 user audio; temporary settings were restored and its private solo test
 channel was archived. These observations informed synthetic regressions,
-not copied private AX fixtures.
+not copied private AX fixtures. The corrected production adapter was also
+replayed privately against the recorded native trees: silent pop-out views
+remained silent, bottom-bar mode became unavailable, and the start modal
+remained absent. Native strict Clippy and 841 isolated headless checks passed
+on the correction.
 Not verified: Slack's active-speaker class and remote-name attribution with
 a second distinct account, the complete installed-app path, Teams self-speaking,
 non-English or shared-screen layouts, large-call performance, exact audio
