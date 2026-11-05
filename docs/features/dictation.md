@@ -821,6 +821,8 @@ Model advertises streaming, GPU device             // dictate.streaming
   Whisper + Labs Live text -> Rolling preview on the same loaded model
   ├── After 2 s of audio, decode the latest <= 12 s; wait >= 1 s between decodes
   ├── One replaceable audio buffer; stale preview work never queues up
+  ├── macOS: split each preview into smaller Metal command-buffer submissions
+  │   -> Restore prior GPU scheduling before any final or other-model run
   ├── Words can change with context; all preview words are tentative
   ├── Turning Live text off stops new preview decodes and hides the line
   ├── Stop/cancel aborts the preview; no late preview words publish

@@ -1024,7 +1024,7 @@ impl Worker {
                                         .ok_or_else(|| "preview model changed".to_string())?;
                                     let model = held(model, &selection)
                                         .ok_or_else(|| "preview model changed".to_string())?;
-                                    crate::transcription::gguf_session::with_job_cancel(
+                                    crate::transcription::gguf_session::with_live_preview(
                                         &cancel,
                                         || transcribe_clip(model, samples),
                                     )
