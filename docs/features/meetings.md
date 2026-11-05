@@ -1565,9 +1565,11 @@ Markdown, `hex meetings` (`speaker` in `--json`), subtitles, MCP search and
 `get_transcript` (`speaker` takes a name; `them` is still all call audio),
 notes, and chapters all show the name and never merge two people into one
 turn. The paste cursor still follows time per source, so a line copied as
-`Them` is not copied again once named. Names stay on this computer; meeting
-notes send them to OpenCode only where they already send the transcript, and
-the meeting-mirror script leaves `speakers.ndjson` behind.
+`Them` is not copied again once named. Raw speaker readings are stored locally,
+and the meeting-mirror script leaves `speakers.ndjson` behind. Names embedded
+in transcripts follow the existing copy, export, and configured meeting-mirror
+paths. Meeting notes also send names to OpenCode where they already send the
+transcript.
 
 Evidence for the selectors is third-party and published, never observed by
 this project: Teams' `hangup-button` via `AXDOMIdentifier`
@@ -1588,4 +1590,6 @@ restart, crash tails, hostile files; and names through turns, copies, the
 cursor, Markdown, queries, and search), Labs bit isolation, and translated
 statuses. Not verified: any native read of Teams or Slack, the marks' real
 lag against audio, the Accessibility calls' cost on a large Slack, and the
-`AXEnhancedUserInterface` side effects on Teams.
+`AXEnhancedUserInterface` side effects on Teams. Incorrect mark timing or a
+dominant-speaker indicator during overlapping speech can assign the wrong
+name; falling back to `Them` cannot prevent every attribution error.

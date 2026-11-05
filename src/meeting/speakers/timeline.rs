@@ -32,7 +32,8 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SAMPLE_GAP_MS: u64 = 1_500;
 /// How long after someone starts talking the app marks them. The sources
 /// disagree (500 ms to 1.5 s) and none measured it against audio, so this is
-/// an initial value. Too small a value yields `Them`, not another person.
+/// an initial value. Incorrect timing can leave a line unnamed or attribute
+/// it to the previous speaker, so native audio-aligned checks are required.
 const ONSET_LAG_MS: u64 = 500;
 /// How long a mark outlasts the voice: Slack's was measured by a third party
 /// at about 1.5 s; Teams' is unmeasured.
