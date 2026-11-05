@@ -25,6 +25,7 @@ mod meetings;
 mod persistence;
 mod post_processing;
 pub use post_processing::DictationPostProcessing;
+mod screenshots;
 mod shortcut_repair;
 
 #[cfg(hex_capture)]
@@ -34,8 +35,12 @@ pub use hotkeys::*;
 pub use labs::*;
 pub use meeting_folder::default_meeting_output_folder;
 pub use meetings::*;
+#[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
+pub use screenshots::{ScreenshotSettings, screenshot_hotkey, screenshot_settings};
 
 static RECORDING_DUCK_VOLUME: AtomicU32 = AtomicU32::new(0.2_f32.to_bits());
+// Until settings load, "While dictating" is its default, not Mute: the
+// hotkey pre-roll depends on it.
 static RECORDING_AUDIO_BEHAVIOR: AtomicU8 =
     AtomicU8::new(RecordingAudioBehavior::DoNothing.encoded());
 static DOUBLE_TAP_LOCK: AtomicBool = AtomicBool::new(true);
@@ -299,6 +304,8 @@ pub struct AppSettings {
     pub experimental: ExperimentalSettings,
     /// The Labs features' own switches (`crate::labs`).
     pub labs: LabsSettings,
+    /// Labs › Screenshots' shortcut and folder (macOS).
+    pub screenshots: ScreenshotSettings,
     /// Start listening when Hex opens (Windows and Linux, where the
     /// listener can be off).
     pub enable_on_launch: bool,
@@ -419,6 +426,7 @@ impl Default for AppSettings {
             capture_from_other_build: None,
             experimental: ExperimentalSettings::default(),
             labs: LabsSettings::default(),
+            screenshots: ScreenshotSettings::default(),
             enable_on_launch: true,
             paste_with_shift: false,
             gnome_keyboard_shortcuts: false,
@@ -751,6 +759,7 @@ impl AppSettings {
         crate::labs::apply(&self.labs);
         #[cfg(target_os = "macos")]
         crate::dictation::audio_archive::set_retention(self.audio_retention);
+        screenshots::apply_screenshots(self);
         #[cfg(hex_capture)]
         {
             *CAPTURE_SETTINGS
@@ -972,6 +981,12 @@ impl AppSettings {
             capture: self.capture_on().then(|| self.capture.hotkey.runtime()),
             #[cfg(not(hex_capture))]
             capture: None,
+            #[cfg(hex_capture)]
+            capture_replay: self
+                .active_capture_replay_hotkey()
+                .map(HotkeyBinding::runtime),
+            #[cfg(not(hex_capture))]
+            capture_replay: None,
             raw_dictation: self
                 .raw_dictation_hotkey
                 .as_ref()
@@ -1006,6 +1021,24 @@ impl AppSettings {
     #[cfg(hex_capture)]
     pub fn capture_on(&self) -> bool {
         self.capture.enabled
+    }
+
+    /// Labs › Annotate 15 s replay's shortcut while it takes effect: macOS 27+,
+    /// Annotate and the Lab on, bound, and sharing no key with another active
+    /// shortcut.
+    #[cfg(hex_capture)]
+    pub fn active_capture_replay_hotkey(&self) -> Option<&HotkeyBinding> {
+        if !cfg!(target_os = "macos")
+            || !self.capture_on()
+            || !self.labs.annotate_replay
+            || !crate::labs::Feature::AnnotateReplay.on_this_os()
+        {
+            return None;
+        }
+        self.capture
+            .replay_hotkey
+            .as_ref()
+            .filter(|binding| !self.hotkey_in_use(HotkeySlot::CaptureReplay, binding))
     }
 
     /// A shortcut saved as a bare left click swallowed every click, so its
@@ -1049,6 +1082,16 @@ impl AppSettings {
             tracing::warn!("replaced a left-click capture shortcut with the default");
             self.capture.hotkey = HotkeyBinding::capture_default();
         }
+        #[cfg(hex_capture)]
+        if self
+            .capture
+            .replay_hotkey
+            .as_ref()
+            .is_some_and(HotkeyBinding::is_bare_primary_click)
+        {
+            tracing::warn!("cleared a left-click capture replay shortcut");
+            self.capture.replay_hotkey = None;
+        }
     }
 }
 
@@ -1069,10 +1112,15 @@ pub enum HotkeySlot {
     RawDictation,
     #[cfg(hex_capture)]
     Capture,
+    /// Labs › Annotate 15 s replay shortcut (macOS 27+).
+    #[cfg(hex_capture)]
+    CaptureReplay,
     /// Labs › Second dictation shortcut (macOS).
     SecondDictation,
     /// Toggle mode's cancel shortcut.
     Cancel,
+    /// Labs › Screenshots (macOS).
+    Screenshot,
 }
 
 impl AppSettings {
@@ -1111,6 +1159,18 @@ impl AppSettings {
         #[cfg(hex_capture)]
         if slot != HotkeySlot::Capture && self.capture_on() {
             others.push(self.capture.hotkey.clone());
+        }
+        #[cfg(hex_capture)]
+        if slot != HotkeySlot::CaptureReplay
+            && cfg!(target_os = "macos")
+            && self.capture_on()
+            && self.labs.annotate_replay
+            && let Some(replay) = &self.capture.replay_hotkey
+        {
+            others.push(replay.clone());
+        }
+        if slot != HotkeySlot::Screenshot && cfg!(target_os = "macos") && self.labs.screenshots {
+            others.push(self.screenshots.hotkey.clone());
         }
         hotkey_conflicts(binding, others)
     }
@@ -1275,6 +1335,7 @@ pub fn runtime_hotkeys() -> RuntimeHotkeys {
     #[cfg(hex_capture)]
     if scrawl_app_running() {
         hotkeys.capture = None;
+        hotkeys.capture_replay = None;
     }
     hotkeys
 }

@@ -3,12 +3,15 @@
 //! setup again. A feature with its own pane (Meetings, Voice Filter,
 //! Playground) joins the main sidebar while on and is hidden while off.
 
+#[cfg(all(target_os = "macos", hex_capture))]
+mod screenshots;
+
 use rune::{El, Icon, Tx, row, text};
 
 use super::controls::{
     self, CardRow, Paint, card, icon_row, icon_row_tagged, pressable_row, row_switch,
 };
-use super::icons::{BOOK, GLOBE, KEYBOARD, MOUSE, SPARKLES, TERMINAL, TIMER, WAVE};
+use super::icons::{BOOK, CAMERA, GLOBE, KEYBOARD, MOUSE, SPARKLES, TERMINAL, TIMER, WAVE};
 use super::lists::{Tone, tone_tag};
 use super::sidebar::{NAV_ROW_GAP, NAV_ROW_HEIGHT, VOICE_FILTER_ICON};
 use super::{Pane, Ui};
@@ -564,12 +567,31 @@ fn rows(ui: &Ui) -> Vec<Row> {
         tr("Keep the audio of dictations saved to History, so you can transcribe them again with another model"),
     ));
     }
+    if caps.meetings {
+        rows.push(row(Feature::FollowLiveTranscript, &BOOK, tr("Follow live transcript"), tr("While a meeting records, the transcript scrolls to the newest line. Scroll up to read earlier text; scroll back to the bottom to follow again.")));
+        rows.push(row(
+            Feature::CollapsibleMeetingSections,
+            &BOOK,
+            tr("Collapsible meeting sections"),
+            tr("Fold the summary, chapters, and day groups in Meetings"),
+        ));
+    }
+    if caps.os == super::platform::Os::Macos {
+        rows.push(row(Feature::Screenshots, &CAMERA, tr("Screenshots"), tr("Press ⌘⇧4 to capture an area, or press Space for a window. The shot goes on the clipboard and into a folder")));
+        if Feature::AnnotateReplay.on_this_os() {
+            rows.push(row(Feature::AnnotateReplay, Pane::Annotate.icon(), tr("Annotate 15 s replay"), tr("Save the last 15 seconds of your screen. macOS shows the screen-recording dot the whole time it's on")));
+        }
+    }
     rows.push(row(Feature::ProviderFallback, &SPARKLES, tr("Provider quota fallback"), tr("Try the configured provider when rewriting hits a usage limit. Timeouts keep the previous text.")));
     rows
 }
 
 fn row_key(feature: Feature) -> &'static str {
     match feature {
+        Feature::Screenshots => "lab-screenshots",
+        Feature::FollowLiveTranscript => "lab-follow-live-transcript",
+        Feature::CollapsibleMeetingSections => "lab-collapsible-meeting-sections",
+        Feature::AnnotateReplay => "lab-annotate-replay",
         Feature::MeetingPlatformIcons => "lab-meeting-platform-icons",
         Feature::MeetingSnapshots => "lab-meeting-snapshots",
         Feature::GnomeMeetingCapsules => "lab-gnome-meeting-capsules",
@@ -680,10 +702,23 @@ pub(super) fn page(ui: &Ui, p: Paint) -> El {
     let mut cards: Vec<CardRow> = Vec::new();
     for row in rows(ui).into_iter().filter(|row| row.feature.shipped()) {
         let unload_idle = row.feature == Feature::UnloadIdle && row.on;
+        #[cfg(all(target_os = "macos", hex_capture))]
+        let screenshot_settings = row.feature == Feature::Screenshots && row.on;
         let flashing = ui
             .lab_flash
             .is_some_and(|(feature, _)| feature == row.feature);
         cards.push(feature_row(p, row, flashing));
+        #[cfg(all(target_os = "macos", hex_capture))]
+        if screenshot_settings {
+            cards.push(
+                screenshots::body(
+                    ui,
+                    p,
+                    ui.live() && crate::screenshots::system_takes_shortcut(),
+                )
+                .into(),
+            );
+        }
         if unload_idle {
             cards.push(unload_after_row(ui, p));
         }

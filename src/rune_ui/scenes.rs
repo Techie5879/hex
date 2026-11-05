@@ -633,6 +633,12 @@ pub(super) const SCENES: &[Scene] = &[
         ui.labs_open = true;
         ui.lab_flash = Some((crate::labs::Feature::VocabularyBiasing, Instant::now()));
     }),
+    // Labs › Screenshots' drawer (macOS only: elsewhere the lab has no row).
+    ("mac-labs-screenshots", |ui| {
+        labs_with_some_on(ui);
+        ui.settings.labs.screenshots = true;
+        ui.labs_open = true;
+    }),
     ("mac-production", |ui| {
         *ui = mac_fixture();
         ui.settings.meetings.enabled = false;
@@ -873,6 +879,7 @@ pub(super) fn fixture(shortcuts: DesktopShortcuts) -> Ui {
         },
         update_status: DesktopUpdateStatus::Current,
         update_notes: None,
+        update_blocked: None,
         editing: false,
     });
     ui
