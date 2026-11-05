@@ -554,6 +554,20 @@ mod tests {
     }
 
     #[test]
+    fn a_heavily_styled_teams_tile_keeps_its_speaking_marker() {
+        let mut styled =
+            Node::element("AXMenuItem").description("Ada Lovelace, Context menu is available");
+        for index in 0..164 {
+            styled = styled.class(&format!("fixture-class-{index}"));
+        }
+        let styled = styled.child(Node::element("AXGroup").class(FRAME));
+        assert_eq!(
+            reading(vec![meeting("Sync", [styled])]),
+            Ok(Reading::Speaking("Ada Lovelace".into()))
+        );
+    }
+
+    #[test]
     fn a_failed_class_request_cannot_hide_a_second_speaker() {
         let window = meeting(
             "Sync | Microsoft Teams",

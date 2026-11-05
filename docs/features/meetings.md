@@ -1537,6 +1537,29 @@ wall clock, so a drift below the writer's 1 s padding threshold doesn't move
 names onto the wrong line. These values are initial: none was measured
 against a real call's audio.
 
+Accessibility class lists are read completely up to 512 names. A controlled
+read-only diagnosis during a Teams call on 2026-11-05 found that the earlier
+64-class cap rejected legitimate 70–164-class lists, invalidating every poll
+and leaving no speaker sidecar. The complete Teams tree was only 1,128
+elements and took 161 ms, so neither the walk budget nor permission was the
+cause. The native CFArray regression checks 65, 160, 164, and 512 classes,
+including a speaking marker at the end, and refuses oversized arrays without
+truncating them. A rejected oversized list now logs its count once without
+names or text. A private macOS harness compiling the pinned source passed
+26 native accessibility, Teams, names, and tree-reading tests. Restoring
+the 64-class cap made the native array regression fail; the synthetic
+Teams-tree test alone does not exercise that decoder.
+
+Three setter-free shadow polls of the live Teams tree returned Speaking
+with the patch in 117–178 ms, while three polls with the old cap returned
+Unknown in 115–175 ms. Only verdicts, counts, and timing were emitted, with
+no names or meeting content retained. These polls used the already-exposed
+Accessibility tree and do not verify the initial attribute writes. No
+full app build, install, or patched in-app capture was performed during
+the ongoing recording; those checks remain pending until it ends.
+An affected recording without saved observations cannot gain participant
+names from this fix retroactively.
+
 Teams (`speakers/teams.rs`): a window holding the `hangup-button` control (or
 the compact view, "Meeting compact view | …") is the call; its gallery tile
 (`AXMenuItem`) holding the `vdi-frame-occlusion` frame is the speaker, named
