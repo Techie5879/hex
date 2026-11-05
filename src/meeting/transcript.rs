@@ -35,6 +35,8 @@ use super::{
     format_duration, set_owner_only, sync_directory,
 };
 
+mod segments;
+
 const RATE: usize = 16_000;
 const FRAME: usize = RATE / 50;
 /// Pause cuts closer than this to the chunk start are ignored.
@@ -236,6 +238,7 @@ impl TrackTranscript {
         let chunk_ms = self.origin_ms + samples_ms(chunk.start);
         let duration_ms = samples_ms(chunk.samples.len());
         let next_seam = chunk_ms + duration_ms - samples_ms(chunk.tail) / 2;
+        let previous_settled = self.settled_ms;
         self.settled_ms = self.settled_ms.max(next_seam);
         let untimed = !transcript.segments.is_empty() || !transcript.text.trim().is_empty();
         if !transcript.words.is_empty() || (!untimed && !self.words.is_empty()) {
@@ -243,66 +246,7 @@ impl TrackTranscript {
             self.publish_sentences(next_seam, chunk.tail == 0);
             return;
         }
-        // A model without word timings (Apple Speech) took over mid-track.
-        self.finish();
-        let segments = transcript.segments;
-        // A model that gives no usable time range for a segment (Cohere
-        // reports one segment at zero) keeps its text over the whole chunk.
-        let timed = |segment: &TranscriptSegment| {
-            let start = (segment.start_ms.max(0) as u64).min(duration_ms);
-            let end = (segment.end_ms.max(0) as u64).min(duration_ms);
-            segment.text.trim().is_empty() || end > start
-        };
-        let segmented = !segments.is_empty() && segments.iter().all(timed);
-        let text = if segmented || !transcript.text.trim().is_empty() {
-            transcript.text
-        } else {
-            segments
-                .iter()
-                .map(|segment| segment.text.trim())
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let mut incoming: Vec<TranscriptEntry> = if segmented {
-            segments
-                .into_iter()
-                .filter_map(|segment| {
-                    let text = segment.text.trim().to_string();
-                    let start = (segment.start_ms.max(0) as u64).min(duration_ms);
-                    let end = (segment.end_ms.max(0) as u64).min(duration_ms);
-                    (!text.is_empty() && end > start).then(|| TranscriptEntry {
-                        source: self.source,
-                        start_ms: chunk_ms + start,
-                        end_ms: chunk_ms + end,
-                        text,
-                    })
-                })
-                .collect()
-        } else {
-            let text = text.trim();
-            (!text.is_empty())
-                .then(|| TranscriptEntry {
-                    source: self.source,
-                    start_ms: chunk_ms,
-                    end_ms: chunk_ms + duration_ms,
-                    text: text.into(),
-                })
-                .into_iter()
-                .collect()
-        };
-        if chunk.overlap > 0 {
-            if segmented {
-                let seam = chunk_ms + samples_ms(chunk.overlap) / 2;
-                self.entries.retain(|entry| entry.start_ms < seam);
-                incoming.retain(|entry| entry.start_ms >= seam);
-            }
-            if let (Some(previous), Some(first)) = (self.entries.last(), incoming.first_mut()) {
-                first.text = strip_repeated_prefix(&previous.text, &first.text);
-            }
-            incoming.retain(|entry| !entry.text.is_empty());
-        }
-        self.entries.extend(incoming);
+        self.accept_segments(chunk, chunk_ms, duration_ms, transcript, previous_settled);
     }
 
     /// Joins a chunk's timed words at the seam word by word, so a sentence
@@ -722,6 +666,21 @@ enum Chunked {
     Unavailable(color_eyre::Report),
 }
 
+/// Keep 200 ms before the first audible frame. This removes long leading
+/// and trailing silence which coarse models otherwise assign to words,
+/// without discarding quiet onsets. Restore this offset after inference.
+fn speech_bounds(samples: &[f32]) -> std::ops::Range<usize> {
+    let threshold = 10_f32.powf(SILENT_DB / 10.0);
+    let audible = |frame: &[f32]| {
+        frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32 >= threshold
+    };
+    let Some(first) = samples.chunks(FRAME).position(audible) else {
+        return 0..samples.len();
+    };
+    let last = samples.chunks(FRAME).rposition(audible).unwrap_or(first);
+    (first * FRAME).saturating_sub(RATE / 5)..((last + 1) * FRAME + RATE / 5).min(samples.len())
+}
+
 impl ChunkModel {
     pub(super) fn new(selection: TranscriptionSelection) -> Self {
         Self {
@@ -734,6 +693,27 @@ impl ChunkModel {
     /// Fails with the chunk's own transcription error. A chunk without
     /// detected speech returns an empty transcript without the model.
     fn transcribe(&mut self, samples: &[f32]) -> Result<Chunked> {
+        let bounds = speech_bounds(samples);
+        let offset = bounds.start;
+        let input = &samples[bounds];
+        let mut result = self.transcribe_untrimmed(input)?;
+        if let Chunked::Done(transcript) = &mut result {
+            if transcript.words.is_empty() {
+                segments::bound_end(
+                    transcript,
+                    crate::transcription::speech_detector::speech_end(input),
+                );
+            }
+            let offset_ms = samples_ms(offset) as i64;
+            for segment in transcript.segments.iter_mut().chain(&mut transcript.words) {
+                segment.start_ms += offset_ms;
+                segment.end_ms += offset_ms;
+            }
+        }
+        Ok(result)
+    }
+
+    fn transcribe_untrimmed(&mut self, samples: &[f32]) -> Result<Chunked> {
         // Quitting drops the dictation engine; a model loaded now would
         // outlast the drain.
         if crate::desktop::process_exit::quitting() {
@@ -1628,7 +1608,7 @@ fn rolling_view(
             .entries
             .iter()
             .filter(move |entry| {
-                entry.start_ms < settled && through.is_none_or(|through| entry.end_ms <= through)
+                entry.end_ms <= settled && through.is_none_or(|through| entry.end_ms <= through)
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -2558,6 +2538,64 @@ mod tests {
             texts,
             [(21_000, "we should ship the beta"), (30_200, "on Friday.")]
         );
+    }
+
+    #[test]
+    fn coarse_segment_crossing_a_seam_keeps_new_sentences_and_negations() {
+        let mut track = TrackTranscript::new(MeetingSource::System, 0);
+        let result = |text: &str, end_ms| Transcript {
+            text: text.into(),
+            segments: vec![TranscriptSegment {
+                start_ms: 0,
+                end_ms,
+                text: text.into(),
+            }],
+            ..Default::default()
+        };
+        track.accept(
+            &Chunk {
+                start: 18 * RATE,
+                overlap: 2 * RATE,
+                tail: 2 * RATE,
+                samples: vec![0.; 12 * RATE],
+            },
+            result(
+                "Keep the original deadline. Assign the review to Morgan.",
+                12000,
+            ),
+        );
+        track.accept(
+            &Chunk {
+                start: 28 * RATE,
+                overlap: 2 * RATE,
+                tail: 0,
+                samples: vec![0.; 12 * RATE],
+            },
+            result(
+                "Assign the review to Morgan. The reference is 42, not 43.",
+                5000,
+            ),
+        );
+        let text = track
+            .entries
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            text,
+            "Keep the original deadline. Assign the review to Morgan. The reference is 42, not 43."
+        );
+    }
+
+    #[test]
+    fn leading_silence_retains_quiet_onsets_and_restorable_offset() {
+        let mut samples = vec![0.; 10 * RATE];
+        samples[8 * RATE..].fill(0.01);
+        assert_eq!(speech_bounds(&samples).start, 8 * RATE - RATE / 5);
+        assert_eq!(speech_bounds(&vec![0.; RATE]).start, 0);
+        samples[..FRAME].fill(0.002);
+        assert_eq!(speech_bounds(&samples).start, 0);
     }
 
     #[test]

@@ -646,6 +646,15 @@ While recording                                      // meetings.rolling
      ├── No speech detected (Silero, once installed) -> empty transcript, no
      │   inference; coverage still advances
      └── A dictation request or live stream came first -> retried once idle
+  -> Leading and trailing level-silent frames are trimmed with 200 ms of context retained;
+     the removed leading offset is restored to segment and word timestamps.
+     If Silero is available, long nonspeech tails are excluded from coarse
+     segment end times with 200 ms padding; recognized text is never removed
+  -> Segment-only backends preserve text crossing a seam; only confirmed
+     repeated text is removed, never a whole sentence based on its start alone.
+     Unpublished partials may be replaced by a longer observation of the same
+     onset; negations and numbers must survive. Publish after the segment ends
+     before the settled boundary, so later overlaps cannot retract shown text
   -> Timed words joined word by word at a shared word near each overlap's middle
      -> sentences (punctuation or a 600 ms pause)
   -> transcript.rolling.ndjson: per-track coverage line, then entries
@@ -697,6 +706,16 @@ Hex quits during Stop & Transcribe's final pass (#1284)
      ├── Quit again or model not installed -> stays pending
      └── Other failure -> stays Interrupted with the error and its draft
 ```
+
+Observed on macOS 2026-11-05 with Whisper Large v3 Turbo Q8 and Silero:
+two previously captured synthetic speech pairs retained all twelve clauses
+without overlap fragments after the fix. An 85-second real-time run through
+the microphone fixture and Core Audio system playback showed live text,
+published the final transcript 0.587 s after Stop, and retained it after two
+reopens with summaries disabled. First visible words arrived 21.508 s after
+Start, 13.508 s after speech began. One name remained misspelled by the model
+("Maya" as "Myha"). These checks do not establish physical-microphone or Teams
+speech delivery, and segment timestamps remain coarse rather than word-aligned.
 
 Quitting gives its workers 5 s before `_exit`, and the final pass of a long
 meeting can take longer, or load a model once the dictation engine is gone.
