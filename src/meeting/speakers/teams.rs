@@ -78,6 +78,10 @@ struct Window<N> {
 }
 
 pub fn read<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<N>, NoCall> {
+    super::ax::read_complete(windows, |windows| read_windows(windows, budget))
+}
+
+fn read_windows<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<N>, NoCall> {
     let mut meeting = Vec::new();
     for window in windows {
         let title = window.title().unwrap_or_default();
@@ -509,6 +513,20 @@ mod tests {
             [tile("Ben Okafor, Context menu is available", true)],
         );
         assert_eq!(reading(vec![one, two]), Err(NoCall::Unknown));
+    }
+
+    #[test]
+    fn a_failed_class_request_cannot_hide_a_second_speaker() {
+        let window = meeting(
+            "Sync | Microsoft Teams",
+            [
+                tile("Ada Lovelace, Context menu is available", true),
+                Node::element("AXMenuItem")
+                    .description("Grace Hopper, Context menu is available")
+                    .child(Node::element("AXGroup").class(FRAME).unreadable_classes()),
+            ],
+        );
+        assert_eq!(reading(vec![window]), Err(NoCall::Unknown));
     }
 
     #[test]

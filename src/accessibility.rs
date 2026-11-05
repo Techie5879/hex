@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
+use std::rc::Rc;
 
 type CfTypeRef = *const c_void;
 type CfStringRef = *const c_void;
@@ -176,7 +178,7 @@ pub fn is_trusted() -> bool {
 /// Another app's element for a bounded reader on one background thread: it
 /// never crosses threads and is never Hex's own (see `external_application`).
 #[derive(Clone)]
-pub struct AxElement(CfObject);
+pub struct AxElement(CfObject, Rc<Cell<bool>>);
 
 /// All windows of process `pid` (`None` when they can't all be read), after asking its Chromium web content for an
 /// accessibility tree. `enhanced` also sets `AXEnhancedUserInterface`, which
@@ -187,13 +189,18 @@ pub fn application_windows(pid: i32, enhanced: bool) -> Option<Vec<AxElement>> {
     if enhanced {
         request_enhanced_interface(pid, &application);
     }
-    copy_all_elements(&application, c"AXWindows", 64)
+    copy_all_elements(&application, c"AXWindows", 64, &Rc::default())
 }
 
 /// An attribute's elements, all of them or `None`: unlike `copy_elements`, a
 /// failed request, a dropped element, or more than `limit` is not an empty or
 /// shorter list. A missing attribute is no elements.
-fn copy_all_elements(element: &CfObject, name: &CStr, limit: usize) -> Option<Vec<AxElement>> {
+fn copy_all_elements(
+    element: &CfObject,
+    name: &CStr,
+    limit: usize,
+    failed: &Rc<Cell<bool>>,
+) -> Option<Vec<AxElement>> {
     let attribute = CfObject(cf_string_literal(name)?);
     let mut value = ptr::null();
     // SAFETY: A live element and a CFString name; a returned value is owned
@@ -223,41 +230,83 @@ fn copy_all_elements(element: &CfObject, name: &CStr, limit: usize) -> Option<Ve
             }
             let item = CfObject(unsafe { CFRetain(item) });
             (unsafe { AXUIElementSetMessagingTimeout(item.0, MESSAGING_TIMEOUT_SECS) } == 0)
-                .then_some(AxElement(item))
+                .then_some(AxElement(item, failed.clone()))
         })
         .collect()
 }
 
 impl AxElement {
+    /// A failure on any attribute in this poll invalidates its whole tree.
+    pub fn read_failed(&self) -> bool {
+        self.1.get()
+    }
+
+    fn attribute(&self, name: &CStr) -> Option<CfObject> {
+        let Some(attribute) = cf_string_literal(name).map(CfObject) else {
+            self.1.set(true);
+            return None;
+        };
+        let mut value = ptr::null();
+        // SAFETY: Live element and attribute; a successful value is retained.
+        let status = unsafe { AXUIElementCopyAttributeValue(self.0.0, attribute.0, &mut value) };
+        let result = (!value.is_null()).then(|| CfObject(value));
+        match status {
+            0 if result.is_some() => result,
+            AX_ERROR_NO_VALUE | AX_ERROR_ATTRIBUTE_UNSUPPORTED => None,
+            _ => {
+                self.1.set(true);
+                None
+            }
+        }
+    }
+
+    fn string(&self, name: &CStr) -> Option<String> {
+        let value = self.attribute(name)?;
+        let text = cf_string(value.0);
+        if text.is_none() {
+            self.1.set(true);
+        }
+        text
+    }
+
     pub fn role(&self) -> Option<String> {
-        copy_string(&self.0, c"AXRole")
+        self.string(c"AXRole")
     }
 
     pub fn classes(&self) -> Vec<String> {
-        copy_strings(&self.0, c"AXDOMClassList")
+        let Some(array) = self.attribute(c"AXDOMClassList") else {
+            return Vec::new();
+        };
+        let strings = strings_from_array(&array);
+        if strings.is_none() {
+            self.1.set(true);
+        }
+        strings.unwrap_or_default()
     }
 
     pub fn dom_id(&self) -> Option<String> {
-        copy_string(&self.0, c"AXDOMIdentifier")
+        self.string(c"AXDOMIdentifier")
     }
 
     pub fn title(&self) -> Option<String> {
-        copy_string(&self.0, c"AXTitle")
+        self.string(c"AXTitle")
     }
 
     pub fn description(&self) -> Option<String> {
-        copy_string(&self.0, c"AXDescription")
+        self.string(c"AXDescription")
     }
 
     pub fn value(&self) -> Option<String> {
-        copy_string(&self.0, c"AXValue")
+        self.string(c"AXValue")
     }
 
-    /// Every child, or `None` when any of them could not be read: a failed
-    /// request, an element that dropped out, or more than `limit`. A reader
-    /// that must not miss a marked participant treats that as unknown.
+    /// Every child, or a failed poll if the list is incomplete.
     pub fn children(&self, limit: usize) -> Option<Vec<Self>> {
-        copy_all_elements(&self.0, c"AXChildren", limit)
+        let children = copy_all_elements(&self.0, c"AXChildren", limit, &self.1);
+        if children.is_none() {
+            self.1.set(true);
+        }
+        children
     }
 
     pub fn same(&self, other: &Self) -> bool {
@@ -288,18 +337,18 @@ fn request_enhanced_interface(pid: i32, application: &CfObject) {
     }
 }
 
-/// An attribute holding strings (`AXDOMClassList`).
-fn copy_strings(element: &CfObject, name: &CStr) -> Vec<String> {
-    let Some(array) = copy_attribute(element, name) else {
-        return Vec::new();
-    };
+/// An entire bounded class list, never a partial list after a failed read.
+fn strings_from_array(array: &CfObject) -> Option<Vec<String>> {
     if unsafe { CFGetTypeID(array.0) } != unsafe { CFArrayGetTypeID() } {
-        return Vec::new();
+        return None;
     }
-    let count = unsafe { CFArrayGetCount(array.0) }.clamp(0, 64);
+    let count = unsafe { CFArrayGetCount(array.0) };
+    if !(0..=64).contains(&count) {
+        return None;
+    }
     (0..count)
-        .filter_map(|index| {
-            // SAFETY: Get rule: `array` keeps the item alive while it is read.
+        .map(|index| {
+            // SAFETY: Get rule: `array` keeps each item alive while read.
             let item = unsafe { CFArrayGetValueAtIndex(array.0, index) };
             (!item.is_null()).then(|| cf_string(item)).flatten()
         })

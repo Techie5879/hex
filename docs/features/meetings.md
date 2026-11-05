@@ -1504,7 +1504,8 @@ Labs › Meeting speaker names                     // labs.meeting_speaker_names
 │   ├── Hex not trusted for Accessibility -> "Allow Accessibility…"; never prompts
 │   ├── no verified call, two calls, two copies of the app -> no evidence
 │   ├── anything left unread (budget, depth 64, a failed child or window list,
-│   │   over 512 children, a tile deeper than 16) -> no evidence, never a partial reading
+│   │   over 512 children, a tile deeper than 16, a failed attribute request)
+│   │   -> no evidence, never a partial reading
 │   └── verified call -> the one remote participant marked speaking, silence, or uncertain
 ├── speakers.ndjson beside the manifest (owner-only, ≤ 4 MiB, Trash with its meeting)
 │   └── times on the system track's own timeline (capture clock + audio position)
@@ -1554,7 +1555,9 @@ search, and reads text only inside participant tiles. A tile
 class `p-huddle_peer_tile__overlay--active_speaker` is the speaker, named from
 "View <Name>'s profile" or its name overlay. The user's own tile is silence;
 an unresolved (`_pending`), muted, or nameless marked tile, or two people, is
-uncertain; two containers are no evidence. Slack moves the mark as a turn, so
+uncertain; two containers are no evidence. The current window list is checked
+again on every poll, including after a huddle has been bound. A manual
+recording names no lines while a competing provider is unresolved. Slack moves the mark as a turn, so
 two people talking over each other read as one: that overlap can be misnamed.
 
 Names are hostile input (`speakers/names.rs`): control and Markdown

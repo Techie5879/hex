@@ -6,7 +6,7 @@ use std::time::Duration;
 use objc2_app_kit::NSRunningApplication;
 use objc2_foundation::NSString;
 
-use super::ax::{AxNode, Binder, Budget, Call, NoCall};
+use super::ax::{AxNode, Binder, Budget, Call, NoCall, unique_call};
 use super::{Provider, Sample, Source, slack, teams};
 use crate::accessibility::{self, AxElement};
 
@@ -17,6 +17,9 @@ const NODES: usize = 6_000;
 const TIME: Duration = Duration::from_millis(600);
 
 impl AxNode for AxElement {
+    fn read_failed(&self) -> bool {
+        AxElement::read_failed(self)
+    }
     fn role(&self) -> Option<String> {
         AxElement::role(self)
     }
@@ -62,13 +65,22 @@ impl Reader {
 
     fn read_provider(&self, provider: Provider) -> Result<(i32, Call<AxElement>), NoCall> {
         let pid = only_process(provider.bundle_id())?;
+        if self.providers.len() > 1 && self.found != Some(provider) {
+            // A manual recording must resolve every competing app, even
+            // after one provider was selected on a previous poll.
+            match crate::microphone_activity::application_input_devices(provider.bundle_id()) {
+                Ok(devices) if devices.is_empty() => return Err(NoCall::Absent),
+                Ok(_) => {}
+                Err(_) => return Err(NoCall::Unknown),
+            }
+        }
         // A window list that can't be read whole could hide the call.
         let windows = accessibility::application_windows(pid, provider == Provider::Teams)
             .ok_or(NoCall::Unknown)?;
         let mut budget = Budget::new(NODES, TIME);
         let call = match provider {
             Provider::Teams => teams::read(windows, &mut budget),
-            Provider::Slack => slack::read(windows, self.binder.region(pid), &mut budget),
+            Provider::Slack => slack::read(windows, &mut budget),
         }?;
         Ok((pid, call))
     }
@@ -84,48 +96,26 @@ impl Source for Reader {
             return Sample::PermissionRequired;
         }
         objc2::rc::autoreleasepool(|_| {
-            let candidates = match self.found {
-                Some(provider) => vec![provider],
-                // A recording started by hand looks only at an app holding
-                // the microphone, so an idle Slack or Teams is never walked.
-                None if self.providers.len() > 1 => self
-                    .providers
-                    .iter()
-                    .copied()
-                    .filter(|provider| holds_microphone(*provider))
-                    .collect(),
-                None => self.providers.clone(),
-            };
-            let mut calls = candidates
-                .into_iter()
-                .map(|provider| (provider, self.read_provider(provider)))
-                .collect::<Vec<_>>();
-            let found = calls.iter().filter(|(_, call)| call.is_ok()).count();
-            if found > 1 {
-                return Sample::NoCall(NoCall::Unknown);
-            }
-            match calls.iter().position(|(_, call)| call.is_ok()) {
-                Some(index) => {
-                    let (provider, call) = calls.swap_remove(index);
-                    let Ok((pid, call)) = call else {
-                        unreachable!()
-                    };
+            let calls = self
+                .providers
+                .iter()
+                .copied()
+                .map(|provider| self.read_provider(provider).map(|call| (provider, call)));
+            match unique_call(calls) {
+                Ok((provider, _)) if self.found.is_some_and(|found| found != provider) => {
+                    self.binder.lose();
+                    Sample::NoCall(NoCall::Unknown)
+                }
+                Ok((provider, (pid, call))) => {
                     self.found = Some(provider);
                     Sample::Call {
                         binding: self.binder.bind(pid, call.region),
                         reading: call.reading,
                     }
                 }
-                None => {
+                Err(reason) => {
                     self.binder.lose();
-                    let unknown = calls
-                        .into_iter()
-                        .any(|(_, call)| call.err() == Some(NoCall::Unknown));
-                    Sample::NoCall(if unknown {
-                        NoCall::Unknown
-                    } else {
-                        NoCall::Absent
-                    })
+                    Sample::NoCall(reason)
                 }
             }
         })
@@ -147,9 +137,4 @@ fn only_process(bundle_id: &str) -> Result<i32, NoCall> {
         [pid] => Ok(*pid),
         _ => Err(NoCall::Unknown),
     }
-}
-
-fn holds_microphone(provider: Provider) -> bool {
-    crate::microphone_activity::application_input_devices(provider.bundle_id())
-        .is_ok_and(|devices| !devices.is_empty())
 }

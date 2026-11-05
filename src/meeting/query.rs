@@ -468,7 +468,7 @@ impl Library {
         let speaker = query
             .speaker
             .as_deref()
-            .map(parse_speaker)
+            .map(|speaker| parse_speaker(speaker, &meeting.entries))
             .transpose()?
             .flatten();
         if let Some(filter @ SpeakerFilter::Named(name)) = &speaker

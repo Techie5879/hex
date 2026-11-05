@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 /// One element. Each method is one bounded request to the other app; the
 /// adapters ask for text only inside a call they have already verified.
 pub trait AxNode: Sized + Clone {
+    /// Whether any attribute request in this poll failed.
+    fn read_failed(&self) -> bool;
     fn role(&self) -> Option<String>;
     /// Chromium's `AXDOMClassList`.
     fn classes(&self) -> Vec<String>;
@@ -22,6 +24,36 @@ pub trait AxNode: Sized + Clone {
     /// The same live element as `other`, which identifies a bound window or
     /// call region across readings.
     fn same_element(&self, other: &Self) -> bool;
+}
+
+/// Missing attributes are allowed, but failed requests cannot support a
+/// positive result, or a claim that a competing call is absent.
+pub fn read_complete<N: AxNode>(
+    windows: Vec<N>,
+    read: impl FnOnce(Vec<N>) -> Result<Call<N>, NoCall>,
+) -> Result<Call<N>, NoCall> {
+    let watched = windows.clone();
+    let result = read(windows);
+    if watched.iter().any(AxNode::read_failed) {
+        Err(NoCall::Unknown)
+    } else {
+        result
+    }
+}
+
+/// Select exactly one verified call only if every competitor is absent.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn unique_call<T>(calls: impl IntoIterator<Item = Result<T, NoCall>>) -> Result<T, NoCall> {
+    let mut chosen = None;
+    for call in calls {
+        match call {
+            Err(NoCall::Unknown) => return Err(NoCall::Unknown),
+            Err(NoCall::Absent) => {}
+            Ok(call) if chosen.is_none() => chosen = Some(call),
+            Ok(_) => return Err(NoCall::Unknown),
+        }
+    }
+    chosen.ok_or(NoCall::Absent)
 }
 
 pub fn has_class<N: AxNode>(node: &N, class: &str) -> bool {
@@ -148,11 +180,6 @@ impl<N: AxNode> Binder<N> {
         self.epoch
     }
 
-    /// The bound region, for an adapter that can read it again directly.
-    pub fn region(&self, pid: i32) -> Option<&N> {
-        (self.pid == pid).then_some(self.region.as_ref()).flatten()
-    }
-
     /// The call is gone; the next one is new even if it reuses the element.
     pub fn lose(&mut self) {
         self.region = None;
@@ -179,6 +206,7 @@ pub mod fake {
         pub children: Vec<Node>,
         /// The app fails to list this element's children.
         pub unreadable: bool,
+        pub unreadable_classes: bool,
     }
 
     /// Shared reads count text requests, to prove where adapters look.
@@ -187,6 +215,7 @@ pub mod fake {
         pub data: Rc<Data>,
         pub text_reads: Rc<RefCell<Vec<String>>>,
         pub alive: Rc<Cell<bool>>,
+        pub read_failed: Rc<Cell<bool>>,
     }
 
     impl Node {
@@ -264,6 +293,10 @@ pub mod fake {
             self.0.unreadable = true;
             self
         }
+        pub fn unreadable_classes(mut self) -> Self {
+            self.0.unreadable_classes = true;
+            self
+        }
         pub fn child(mut self, child: Builder) -> Self {
             self.0.children.push(child.build_detached());
             self
@@ -279,35 +312,49 @@ pub mod fake {
                 data: Rc::new(self.0),
                 text_reads: Rc::default(),
                 alive: Rc::new(Cell::new(true)),
+                read_failed: Rc::default(),
             }
         }
         /// The finished tree, every node sharing one read log.
         pub fn build(self) -> Node {
             let log = Rc::new(RefCell::new(Vec::new()));
             let alive = Rc::new(Cell::new(true));
-            share(self.build_detached(), &log, &alive)
+            share(self.build_detached(), &log, &alive, &Rc::default())
         }
     }
 
-    fn share(node: Node, log: &Rc<RefCell<Vec<String>>>, alive: &Rc<Cell<bool>>) -> Node {
+    fn share(
+        node: Node,
+        log: &Rc<RefCell<Vec<String>>>,
+        alive: &Rc<Cell<bool>>,
+        failed: &Rc<Cell<bool>>,
+    ) -> Node {
         let data = Rc::try_unwrap(node.data).unwrap_or_else(|_| unreachable!());
         let children = data
             .children
             .into_iter()
-            .map(|child| share(child, log, alive))
+            .map(|child| share(child, log, alive, failed))
             .collect();
         Node {
             data: Rc::new(super::fake::Data { children, ..data }),
             text_reads: log.clone(),
             alive: alive.clone(),
+            read_failed: failed.clone(),
         }
     }
 
     impl AxNode for Node {
+        fn read_failed(&self) -> bool {
+            self.read_failed.get()
+        }
         fn role(&self) -> Option<String> {
             self.alive.get().then(|| self.data.role.clone())
         }
         fn classes(&self) -> Vec<String> {
+            if self.data.unreadable_classes {
+                self.read_failed.set(true);
+                return Vec::new();
+            }
             if self.alive.get() {
                 self.data.classes.clone()
             } else {
@@ -339,5 +386,26 @@ pub mod fake {
         fn same_element(&self, other: &Self) -> bool {
             std::rc::Rc::ptr_eq(&self.data, &other.data)
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_competitors_prevent_selecting_a_verified_call() {
+        for calls in [
+            vec![Ok(1), Err(NoCall::Unknown)],
+            vec![Err(NoCall::Unknown), Ok(1)],
+            vec![Ok(1), Ok(2)],
+        ] {
+            assert_eq!(unique_call(calls), Err(NoCall::Unknown));
+        }
+        assert_eq!(unique_call([Err(NoCall::Absent), Ok(1)]), Ok(1));
+        assert_eq!(
+            unique_call::<i32>([Err(NoCall::Absent)]),
+            Err(NoCall::Absent)
+        );
     }
 }

@@ -67,19 +67,14 @@ fn skipped<N: AxNode>(node: &N) -> bool {
         })
 }
 
-/// The huddle in `windows`: the container bound last time when it is still
-/// one, else the only container any window holds.
-pub fn read<N: AxNode>(
-    windows: Vec<N>,
-    bound: Option<&N>,
-    budget: &mut Budget,
-) -> Result<Call<N>, NoCall> {
-    let region = match bound.filter(|region| has_class(*region, CONTAINER)) {
-        Some(region) => region.clone(),
-        None => find_container(windows, budget)?,
-    };
-    let reading = read_tiles(&region, budget)?;
-    Ok(Call { region, reading })
+/// Revalidate the unique huddle region in current windows every poll;
+/// a previously bound region can survive after its call stops or moves.
+pub fn read<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<N>, NoCall> {
+    super::ax::read_complete(windows, |windows| {
+        let region = find_container(windows, budget)?;
+        let reading = read_tiles(&region, budget)?;
+        Ok(Call { region, reading })
+    })
 }
 
 fn find_container<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<N, NoCall> {
@@ -306,7 +301,7 @@ mod tests {
     }
 
     fn reading(windows: Vec<Node>) -> Result<Reading, NoCall> {
-        read(windows, None, &mut budget()).map(|call| call.reading)
+        read(windows, &mut budget()).map(|call| call.reading)
     }
 
     const REMOTE: &str = "a2c1e0_U01AAAAAAAA";
@@ -477,19 +472,22 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_container_is_read_again_directly_and_a_lost_one_is_searched_for() {
-        let window = Node::element("AXWindow")
+    fn every_poll_revalidates_the_unique_current_container() {
+        let first = Node::element("AXWindow")
             .child(huddle([tile(REMOTE, "Dev Patel", true)]))
             .build();
-        let call = read(vec![window.clone()], None, &mut budget()).unwrap();
-        let bound = call.region;
-        let again = read(Vec::<Node>::new(), Some(&bound), &mut budget()).unwrap();
-        assert!(again.region.same_element(&bound));
-        bound.alive.set(false);
+        let second = Node::element("AXWindow")
+            .child(huddle([tile(OTHER, "Eli Novak", true)]))
+            .build();
+        let old = read(vec![first.clone()], &mut budget()).unwrap().region;
         assert_eq!(
-            read(Vec::<Node>::new(), Some(&bound), &mut budget()).map(|call| call.reading),
-            Err(NoCall::Absent)
+            reading(vec![first.clone(), second.clone()]),
+            Err(NoCall::Unknown)
         );
+        assert_eq!(reading(Vec::<Node>::new()), Err(NoCall::Absent));
+        let current = read(vec![second], &mut budget()).unwrap();
+        assert!(!current.region.same_element(&old));
+        assert_eq!(current.reading, Reading::Speaking("Eli Novak".into()));
     }
 
     #[test]
@@ -497,10 +495,22 @@ mod tests {
         let window = window(Some(huddle([tile(REMOTE, "Dev Patel", true)])));
         let mut small = Budget::new(3, Duration::from_secs(5));
         assert_eq!(
-            read(vec![window], None, &mut small).map(|call| call.reading),
+            read(vec![window], &mut small).map(|call| call.reading),
             Err(NoCall::Unknown)
         );
         assert!(small.truncated());
+    }
+
+    #[test]
+    fn a_failed_class_request_cannot_hide_a_second_speaker() {
+        let window = Node::element("AXWindow")
+            .child(huddle([
+                tile(REMOTE, "Dev Patel", true),
+                tile(OTHER, "Eli Novak", false)
+                    .child(Node::element("AXGroup").class(ACTIVE).unreadable_classes()),
+            ]))
+            .build();
+        assert_eq!(reading(vec![window]), Err(NoCall::Unknown));
     }
 
     #[test]
