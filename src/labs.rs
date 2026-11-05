@@ -114,10 +114,11 @@ pub enum Feature {
     FollowLiveTranscript,
     CollapsibleMeetingSections,
     AnnotateReplay,
+    MeetingSpeakerNames,
 }
 
 impl Feature {
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 56] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -173,6 +174,7 @@ impl Feature {
         Self::FollowLiveTranscript,
         Self::CollapsibleMeetingSections,
         Self::AnnotateReplay,
+        Self::MeetingSpeakerNames,
     ];
 
     /// The features this OS and build have.
@@ -246,6 +248,7 @@ impl Feature {
             | Self::GnomeMeetingCapsules
             | Self::MeetingPlatformIcons
             | Self::MeetingSnapshots
+            | Self::MeetingSpeakerNames
             | Self::Screenshots
             | Self::FollowLiveTranscript
             | Self::CollapsibleMeetingSections
@@ -287,7 +290,8 @@ impl Feature {
             | Self::SubtitleExport
             | Self::StopWhenCallEnds
             | Self::MovableMeetingCapsules
-            | Self::MeetingSnapshots => cfg!(target_os = "macos"),
+            | Self::MeetingSnapshots
+            | Self::MeetingSpeakerNames => cfg!(target_os = "macos"),
             Self::VoiceFilter => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::TerminalPaste | Self::ShareShortcut => cfg!(target_os = "windows"),
             Self::LocalPolish | Self::SaveDictationAudio | Self::ProfileSync => {
@@ -403,6 +407,7 @@ impl Feature {
             Self::GnomeMeetingCapsules => "gnome-meeting-capsules",
             Self::MeetingPlatformIcons => "meeting-platform-icons",
             Self::MeetingSnapshots => "meeting-snapshots",
+            Self::MeetingSpeakerNames => "meeting-speaker-names",
             Self::Screenshots => "screenshots",
             Self::FollowLiveTranscript => "follow-live-transcript",
             Self::CollapsibleMeetingSections => "collapsible-meeting-sections",
@@ -464,6 +469,7 @@ impl Feature {
             Self::GnomeMeetingCapsules => "labs.gnome_meeting_capsules",
             Self::MeetingPlatformIcons => "labs.meeting_platform_icons",
             Self::MeetingSnapshots => "labs.meeting_snapshots",
+            Self::MeetingSpeakerNames => "labs.meeting_speaker_names",
             Self::Screenshots => "labs.screenshots",
             Self::FollowLiveTranscript => "labs.follow_live_transcript",
             Self::CollapsibleMeetingSections => "labs.collapsible_meeting_sections",
@@ -606,6 +612,9 @@ impl Feature {
             Self::MeetingSnapshots => {
                 "Save local snapshots of shared content during native Teams meetings, starting with the next recording (macOS)"
             }
+            Self::MeetingSpeakerNames => {
+                "Name the people who speak in Teams calls and Slack huddles, read from the call app while recording, starting with the next recording (macOS)"
+            }
             Self::MeetingPlatformIcons => {
                 "Show a small icon for the app or website each meeting was recorded from, beside its name in Meetings"
             }
@@ -682,6 +691,7 @@ impl Feature {
             Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules,
             Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons,
             Self::MeetingSnapshots => settings.labs.meeting_snapshots,
+            Self::MeetingSpeakerNames => settings.labs.meeting_speaker_names,
             Self::Screenshots => settings.labs.screenshots,
             Self::FollowLiveTranscript => settings.labs.follow_live_transcript,
             Self::CollapsibleMeetingSections => settings.labs.collapsible_meeting_sections,
@@ -745,6 +755,7 @@ impl Feature {
             &mut labs.gnome_meeting_capsules,
             &mut labs.meeting_platform_icons,
             &mut labs.meeting_snapshots,
+            &mut labs.meeting_speaker_names,
             &mut labs.screenshots,
             &mut labs.follow_live_transcript,
             &mut labs.collapsible_meeting_sections,
@@ -808,6 +819,7 @@ impl Feature {
             Self::GnomeMeetingCapsules => settings.labs.gnome_meeting_capsules = on,
             Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons = on,
             Self::MeetingSnapshots => settings.labs.meeting_snapshots = on,
+            Self::MeetingSpeakerNames => settings.labs.meeting_speaker_names = on,
             Self::Screenshots => settings.labs.screenshots = on,
             Self::FollowLiveTranscript => settings.labs.follow_live_transcript = on,
             Self::CollapsibleMeetingSections => {
@@ -867,10 +879,17 @@ const LOCAL_POLISH: u64 = 1 << 30;
 const PROVIDER_FALLBACK: u64 = 1 << 31;
 const SAVE_DICTATION_AUDIO: u64 = 1 << 32;
 const MEETING_SNAPSHOTS: u64 = 1 << 33;
+const MEETING_SPEAKER_NAMES: u64 = 1 << 36;
 
 /// Capture is supported only by native macOS Teams. Saved settings travel across OSes.
 pub(crate) fn meeting_snapshots() -> bool {
     cfg!(target_os = "macos") && on(MEETING_SNAPSHOTS)
+}
+
+/// Names Teams and Slack speakers from the call app; only macOS has a
+/// reader. Checked as a recording starts and before each reading is stored.
+pub(crate) fn meeting_speaker_names() -> bool {
+    cfg!(target_os = "macos") && on(MEETING_SPEAKER_NAMES)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1162,6 +1181,11 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             settings.meeting_snapshots,
             MEETING_SNAPSHOTS,
         ),
+        (
+            Feature::MeetingSpeakerNames,
+            settings.meeting_speaker_names,
+            MEETING_SPEAKER_NAMES,
+        ),
         (Feature::LiveText, settings.live_text, LIVE_TEXT),
         (Feature::LiveChapters, settings.live_chapters, LIVE_CHAPTERS),
         (Feature::Playground, settings.playground, PLAYGROUND),
@@ -1443,12 +1467,43 @@ pub fn run_retired_experiments() -> Result<()> {
 mod tests {
     #[test]
     fn upstream_capture_bits_do_not_enable_fork_cleanup_or_recordings() {
-        let fork_bits = LOCAL_POLISH | PROVIDER_FALLBACK | SAVE_DICTATION_AUDIO | MEETING_SNAPSHOTS;
+        let fork_bits = LOCAL_POLISH
+            | PROVIDER_FALLBACK
+            | SAVE_DICTATION_AUDIO
+            | MEETING_SNAPSHOTS
+            | MEETING_SPEAKER_NAMES;
         assert_eq!((SCREENSHOTS | ANNOTATE_REPLAY) & fork_bits, 0);
         assert_eq!(SCREENSHOTS & ANNOTATE_REPLAY, 0);
         assert_eq!(
             (SCREENSHOTS | ANNOTATE_REPLAY) & (MINUTES_MASK << MINUTES_SHIFT),
             0
+        );
+    }
+
+    #[test]
+    fn meeting_speaker_names_are_off_by_default_and_do_not_overlap_other_bits() {
+        let mut labs = LabsSettings::default();
+        assert!(!labs.meeting_speaker_names);
+        assert_eq!(encode_where(&labs, |_| true) & MEETING_SPEAKER_NAMES, 0);
+        labs.meeting_speaker_names = true;
+        labs.unload_idle_minutes = 1440;
+        let bits = encode_where(&labs, |_| true);
+        assert_eq!(bits & MEETING_SPEAKER_NAMES, MEETING_SPEAKER_NAMES);
+        for other in [
+            LOCAL_POLISH,
+            PROVIDER_FALLBACK,
+            SAVE_DICTATION_AUDIO,
+            MEETING_SNAPSHOTS,
+            SCREENSHOTS,
+            ANNOTATE_REPLAY,
+            MINUTES_MASK << MINUTES_SHIFT,
+        ] {
+            assert_eq!(MEETING_SPEAKER_NAMES & other, 0);
+        }
+        assert_eq!((bits >> MINUTES_SHIFT) & MINUTES_MASK, 1440);
+        assert_eq!(
+            Feature::MeetingSpeakerNames.on_this_os(),
+            cfg!(target_os = "macos")
         );
     }
 

@@ -74,6 +74,11 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 ├── Meeting snapshots no labs.meeting_snapshots (macOS)
 │                                        local snapshots of shared content in native Teams meetings, starting with the next recording; Screen Recording permission required
 │                                        pause/resume, browse, and delete images in the meeting detail; see meetings.md
+├── Meeting speaker names no labs.meeting_speaker_names (macOS; the saved setting does nothing elsewhere)
+│                                        names who speaks on the call audio of Teams desktop calls and Slack huddles, read from the
+│                                        participant the call app marks as speaking, starting with the next recording; You stays You,
+│                                        and lines Hex can't attribute stay Them; see meetings.md#speaker-names
+│                                        // checks: meeting::speakers (synthetic trees and timelines only); not observed on a real call
 ├── Meeting platform icons no labs.meeting_platform_icons (every OS with Meetings)
 │                                        each recording in the Meetings list shows its call service's icon (Zoom, Google Meet, Teams, Slack, Webex)
 │                                        before its title, a neutral call icon otherwise (#1290)

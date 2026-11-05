@@ -33,6 +33,7 @@ fn transcript_entries_coalesce_into_source_turns_without_hiding_long_pauses() {
         start_ms,
         end_ms,
         text: text.into(),
+        speaker: None,
     };
     let turns = coalesce_transcript([
         entry(MeetingSource::Microphone, 0, 1_000, "First."),
@@ -60,6 +61,7 @@ fn final_transcript_replaces_the_rolling_transcript_atomically() {
         start_ms: 0,
         end_ms: 500,
         text: "rolling transcript".into(),
+        speaker: None,
     };
     fs::write(
         directory.join(transcript::ROLLING_FILE),
@@ -79,6 +81,7 @@ fn final_transcript_replaces_the_rolling_transcript_atomically() {
         start_ms: 0,
         end_ms: 500,
         text: "final transcript".into(),
+        speaker: None,
     };
     fs::write(
         directory.join("transcript.ndjson"),
@@ -114,6 +117,7 @@ fn reading_a_transcript_ignores_an_in_flight_trailing_write() {
         start_ms: 0,
         end_ms: 500,
         text: "complete".into(),
+        speaker: None,
     };
     fs::write(
         &path,
@@ -665,6 +669,7 @@ fn paste_cursor_counts_coalesced_turns_and_advances_only_on_success() {
         start_ms,
         end_ms,
         text: text.into(),
+        speaker: None,
     };
     let initial = vec![
         entry(MeetingSource::Microphone, 0, 1_000, "First."),
@@ -724,6 +729,7 @@ fn paste_cursor_neither_repeats_nor_drops_text_when_the_transcript_is_rewritten(
         start_ms,
         end_ms,
         text: text.into(),
+        speaker: None,
     };
     let mut cursor = MeetingPasteCursor::default();
     let mut pasted = Vec::new();
@@ -786,6 +792,7 @@ fn paste_cursor_pastes_text_the_final_pass_recovers_for_skipped_audio() {
         start_ms,
         end_ms,
         text: text.into(),
+        speaker: None,
     };
     let mut cursor = MeetingPasteCursor::default();
     let mut paste = |entries: &[TranscriptEntry]| {
@@ -868,7 +875,7 @@ fn writer_fills_a_capture_gap_with_silence_and_records_it() {
         sender.send(packet_at(source, arrival_ms, 1_600)).unwrap();
     }
     drop(sender);
-    let stats = write_tracks(&directory, receiver, None).unwrap();
+    let stats = write_tracks(&directory, receiver, None, &speakers::ClockSync::default()).unwrap();
     assert_eq!(stats.microphone.samples, 4_800);
     assert!(stats.microphone.gaps.is_empty());
     assert_eq!(stats.system.gaps.len(), 1);

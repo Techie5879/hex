@@ -551,7 +551,9 @@ impl Pipeline {
         let feed = rolling.feed();
         let writer = {
             let directory = directory.to_path_buf();
-            thread::spawn(move || write_tracks(&directory, receiver, feed))
+            thread::spawn(move || {
+                write_tracks(&directory, receiver, feed, &speakers::ClockSync::default())
+            })
         };
         Self { writer, rolling }
     }

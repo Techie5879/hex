@@ -52,6 +52,7 @@ pub mod query;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) mod runtime;
 pub(crate) mod snapshots;
+pub(crate) mod speakers;
 mod transcript;
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) mod watcher;
@@ -282,12 +283,36 @@ fn missing_samples(track: &TrackManifest, packet: &AudioPacket) -> u64 {
 
 #[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct TranscriptEntry {
+    /// Which recording it came from. Echo suppression and the paste cursor
+    /// work on this alone; a name never changes it.
     pub source: MeetingSource,
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
+    /// The participant the call app showed speaking throughout a system-audio
+    /// entry (Labs › Meeting speaker names); absent means `Them`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
+impl TranscriptEntry {
+    /// `You`, `Them`, or the participant's name. A name is shown only on
+    /// system audio and only while it is a valid name, whatever a file says.
+    pub fn label(&self) -> &str {
+        match (&self.source, self.speaker.as_deref()) {
+            (MeetingSource::System, Some(name)) if speakers::is_valid_name(name) => name,
+            (source, _) => source.label(),
+        }
+    }
+
+    /// The participant's name, when [`label`](Self::label) shows one.
+    pub fn speaker_name(&self) -> Option<&str> {
+        (self.label() != self.source.label()).then(|| self.label())
+    }
+}
+
+/// Joins consecutive entries by one speaker: the same source and, for the
+/// call audio, the same name, so two people never share a turn.
 pub fn coalesce_transcript(
     entries: impl IntoIterator<Item = TranscriptEntry>,
 ) -> Vec<TranscriptEntry> {
@@ -295,6 +320,7 @@ pub fn coalesce_transcript(
     for entry in entries {
         if let Some(turn) = turns.last_mut()
             && turn.source == entry.source
+            && turn.label() == entry.label()
             && entry.start_ms.saturating_sub(turn.end_ms) <= TRANSCRIPT_TURN_GAP_MS
         {
             if !turn.text.ends_with(char::is_whitespace) {
@@ -456,7 +482,10 @@ pub fn record(
         let rolling_feed = rolling.feed();
         let flush_registration = transcript::register_flusher(&manifest.id, rolling.flusher());
         let writer_dir = meeting_dir.clone();
-        let writer = thread::spawn(move || write_tracks(&writer_dir, receiver, rolling_feed));
+        let speaker_clock = Arc::new(speakers::ClockSync::default());
+        let writer_clock = speaker_clock.clone();
+        let writer =
+            thread::spawn(move || write_tracks(&writer_dir, receiver, rolling_feed, &writer_clock));
         let cleanup_failed_setup =
             |sender: SyncSender<AudioPacket>, writer: thread::JoinHandle<Result<CaptureStats>>| {
                 drop(sender);
@@ -501,6 +530,13 @@ pub fn record(
             capture_clock,
             start.application.as_deref(),
         );
+        let speaker_names = speakers::Session::start(
+            &manifest.id,
+            &meeting_dir,
+            capture_clock,
+            speaker_clock,
+            start.application.as_deref(),
+        );
         let titles = notes::ProvisionalTitles::start(manifest.id.clone());
         let live_chapters = crate::labs::live_chapters()
             .then(|| chapters::LiveChapters::start(manifest.id.clone()));
@@ -519,6 +555,9 @@ pub fn record(
         }
         if let Some(snapshots) = &snapshots {
             snapshots.request_stop();
+        }
+        if let Some(speaker_names) = &speaker_names {
+            speaker_names.request_stop();
         }
         drop(flush_registration);
         drop(system_capture);
@@ -540,6 +579,8 @@ pub fn record(
         manifest.system = stats.system;
         manifest.microphone = stats.microphone;
         drop(snapshots);
+        // Its last readings are on disk before the final transcript reads them.
+        drop(speaker_names);
         if crate::desktop::process_exit::quitting() && has_recorded_audio(&manifest) {
             // Final transcription would outlast quitting's drain.
             drop(rolling.finish());
@@ -755,6 +796,7 @@ fn write_tracks(
     directory: &Path,
     receiver: Receiver<AudioPacket>,
     mut rolling: Option<transcript::RollingFeed>,
+    speaker_clock: &speakers::ClockSync,
 ) -> Result<CaptureStats> {
     let mut system = None;
     let mut microphone = None;
@@ -813,9 +855,17 @@ fn write_tracks(
             }
             track.samples += missing;
         }
-        track.first_arrival_us.get_or_insert(packet.arrival_us);
+        let first_arrival_us = *track.first_arrival_us.get_or_insert(packet.arrival_us);
         packet.position = track.samples;
         track.samples += packet.samples.len() as u64;
+        if packet.source == MeetingSource::System {
+            speaker_clock.observe(
+                first_arrival_us,
+                packet.arrival_us,
+                track.samples,
+                packet.sample_rate,
+            );
+        }
         for &sample in &packet.samples {
             writer.write_sample(sample)?;
         }
@@ -1098,7 +1148,7 @@ pub fn transcript_markdown(entries: &[TranscriptEntry]) -> String {
         .map(|turn| {
             format!(
                 "**{}** · {}\n{}",
-                turn.source.label(),
+                turn.label(),
                 format_duration(turn.start_ms),
                 turn.text.trim()
             )
@@ -1345,7 +1395,7 @@ fn markdown_line(entry: &TranscriptEntry) -> String {
     format!(
         "**{} {}**  {}",
         format_duration(entry.start_ms),
-        entry.source.label(),
+        entry.label(),
         entry.text
     )
 }

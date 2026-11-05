@@ -355,6 +355,7 @@ impl TrackTranscript {
                     .map(|word| word.text.as_str())
                     .collect::<Vec<_>>()
                     .join(" "),
+                speaker: None,
             });
         }
     }
@@ -1151,6 +1152,8 @@ struct RollingWorker<'a, M> {
     /// Every copy's cut per track, capture-clock, for a track rebuilt from
     /// its WAV after Stop.
     cuts: [Vec<i64>; 2],
+    /// Who the call app showed speaking (Labs), as it is written.
+    speakers: super::speakers::Follower,
 }
 
 impl<'a, M: ChunkTranscriber> RollingWorker<'a, M> {
@@ -1164,6 +1167,7 @@ impl<'a, M: ChunkTranscriber> RollingWorker<'a, M> {
             model_failed: false,
             microphone_shown_ms: 0,
             cuts: [Vec::new(), Vec::new()],
+            speakers: super::speakers::Follower::new(directory),
         }
     }
 
@@ -1195,6 +1199,7 @@ impl<'a, M: ChunkTranscriber> RollingWorker<'a, M> {
             &self.tracks,
             &mut self.microphone_shown_ms,
             &self.envelope,
+            self.speakers.refresh(),
         );
     }
 
@@ -1266,11 +1271,16 @@ impl<'a, M: ChunkTranscriber> RollingWorker<'a, M> {
             copy.settled_ms = copy.settled_ms.max(copy.origin_ms + samples_ms(track.fed));
             copy.finish();
         }
-        let view = rolling_view(
+        let mut view = rolling_view(
             provisional.each_ref().map(Option::as_ref),
             system_advancing(&self.tracks),
             self.microphone_shown_ms,
             &self.envelope,
+        );
+        self.speakers.refresh().label(
+            &mut view.entries,
+            view_origin_ms(provisional.each_ref().map(Option::as_ref)),
+            provisional[0].as_ref().map(|track| track.origin_ms),
         );
         tracing::info!(
             elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1664,14 +1674,22 @@ fn write_rolling_snapshot(
     tracks: &[Option<RollingTrack>; 2],
     microphone_shown_ms: &mut u64,
     envelope: &EchoEnvelope,
+    speakers: &super::speakers::Timeline,
 ) {
     let result = (|| -> Result<()> {
         let [system, microphone] = tracks;
-        let view = rolling_view(
-            [system, microphone].map(|track| track.as_ref().map(|track| &track.transcript)),
+        let transcripts =
+            [system, microphone].map(|track| track.as_ref().map(|track| &track.transcript));
+        let mut view = rolling_view(
+            transcripts,
             system_advancing(tracks),
             *microphone_shown_ms,
             envelope,
+        );
+        speakers.label(
+            &mut view.entries,
+            view_origin_ms(transcripts),
+            system.as_ref().map(|track| track.transcript.origin_ms),
         );
         if let (Some(covered), Some(microphone)) = (view.covered_ms.microphone, microphone) {
             let origin_ms = tracks
@@ -1806,7 +1824,15 @@ pub(super) fn transcribe(
     .unwrap_or_default()
         / 1_000;
     let entries = tracks.into_iter().flat_map(|track| track.entries).collect();
-    Ok(join_entries(entries, origin_ms, &envelope))
+    let (mut entries, dropped) = join_entries(entries, origin_ms, &envelope);
+    // Names come from the readings stored while recording, so a final pass
+    // after a restart names the same lines.
+    super::speakers::Timeline::load(directory).label(
+        &mut entries,
+        origin_ms,
+        manifest.system.first_arrival_us.map(|us| us / 1_000),
+    );
+    Ok((entries, dropped))
 }
 
 /// Transcribes a track's WAV into `transcript`, a new one that may carry
@@ -1983,7 +2009,7 @@ pub(super) fn echo_report(
                 "  {} {:>6} {:<5} {:<6} {}",
                 if kept { "KEEP" } else { "drop" },
                 entry.start_ms,
-                entry.source.label(),
+                entry.label(),
                 match signal {
                     Some(Some(Signal::Bleed)) => "bleed",
                     Some(Some(Signal::Local)) => "local",
@@ -2130,7 +2156,7 @@ pub(super) fn render_markdown(manifest: &MeetingManifest, entries: &[TranscriptE
     for turn in turns {
         markdown.push_str(&format!(
             "**{}** · {}\n{}\n\n",
-            turn.source.label(),
+            turn.label(),
             format_duration(turn.start_ms),
             turn.text.trim()
         ));
@@ -2304,6 +2330,7 @@ mod tests {
             start_ms,
             end_ms,
             text: text.into(),
+            speaker: None,
         }
     }
 

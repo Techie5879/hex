@@ -24,8 +24,10 @@ use crate::meeting::query::{Library, ListQuery, OffsetRange, SearchQuery, Transc
 const RESOURCE_SCHEME: &str = "hex-meeting://";
 
 const INSTRUCTIONS: &str = "Kit's locally recorded Hex meetings (calls captured on his Mac). \
-Speakers are `You` (Kit, his microphone) and `Them` (everyone else, system audio); individual \
-remote speakers are not separated. Transcripts come from local speech recognition and contain \
+Speakers are `You` (Kit, his microphone) and `Them` (everyone else, system audio). With Labs › \
+Meeting speaker names on, call audio from Teams or a Slack huddle is labelled with the \
+participant the call app showed speaking, when Hex could tell; everything else stays `Them`. \
+Transcripts come from local speech recognition and contain \
 misheard words, so search is stemmed and fuzzy by default. Typical flow: list_meetings or \
 search_transcripts to find a meeting and timestamp, then get_transcript around it, and \
 get_meeting_notes for a stored title and two-sentence summary, and get_chapters for the topics \
@@ -122,7 +124,8 @@ pub struct GetTranscriptArgs {
     /// Same as `end`; give one or the other.
     #[serde(default)]
     pub to: Option<Offset>,
-    /// `you`, `them`, or `all` (default).
+    /// `you`, `them` (all call audio, named or not), a participant's name, or
+    /// `all` (default).
     #[serde(default)]
     pub speaker: Option<String>,
     /// Maximum transcript characters to return (default 20000).
@@ -234,7 +237,8 @@ and fuzzy for speech-recognition errors (Dax/DAX/Dacks).",
     }
 
     #[tool(
-        description = "Read a meeting transcript as merged You/Them turns with mm:ss offsets and \
+        description = "Read a meeting transcript as merged turns (You, Them, or a participant's \
+name) with mm:ss offsets and \
 local clock times. Optionally limit to a time range (start/end, or the same as from/to, as mm:ss, \
 h:mm:ss, or seconds; entries overlapping it are included, and a start not before the end or after \
 the meeting's end is an error) or one speaker. Long results stop at max_chars and return next_cursor to \

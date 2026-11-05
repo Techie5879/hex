@@ -259,6 +259,7 @@ fn turns(entries: &[crate::meeting::TranscriptEntry]) -> Vec<Turn> {
             previous_end = Some(previous_end.map_or(turn.end_ms, |end| end.max(turn.end_ms)));
             Turn {
                 mine: turn.source == crate::meeting::MeetingSource::Microphone,
+                speaker: turn.speaker_name().map(str::to_owned),
                 start_ms: turn.start_ms,
                 text: turn.text,
                 pause_before_ms,
@@ -365,6 +366,7 @@ mod tests {
             start_ms,
             end_ms,
             text: text.into(),
+            speaker: None,
         };
         let entries = [
             line(181_000, 188_000, "Next, the motion lint."),

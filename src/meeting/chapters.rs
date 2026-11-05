@@ -59,14 +59,16 @@ const MAX_TITLE_CHARS: usize = 100;
 
 const INSTRUCTIONS: &str = "You split a meeting in progress into chapters by topic. Each \
 transcript line starts with [mm:ss] and a speaker: You is the person who recorded the meeting, \
-and Them is one or more other participants. Name what most of the new lines are about in two to \
+Them is one or more other participants, and any other speaker is a participant's name. Name what \
+most of the new lines are about in two to \
 five words, judging them on their own, and say what they cover in one short sentence. Then say \
 whether they are still about the current chapter named after them. Small talk, tangents, and follow-up questions on the same subject stay in the \
 current chapter. Use only what the transcript says; never invent names, dates, or numbers.";
 
 const REFINE_INSTRUCTIONS: &str = "You find where a finished meeting changed topic. Each \
 line starts with an L number, [mm:ss], and a speaker: You is the person who recorded the \
-meeting, and Them is one or more other participants. The lines run from the end of the chapter \
+meeting, Them is one or more other participants, and any other speaker is a participant's name. \
+The lines run from the end of the chapter \
 before into the chapter after. List the L number of every line about the chapter after, \
 including the line that introduces it. Use only L numbers shown.";
 
@@ -407,7 +409,7 @@ pub(super) fn pass_window(
             format!(
                 "[{}] {}: {}",
                 format_duration(turn.start_ms),
-                turn.source.label(),
+                turn.label(),
                 truncate_words(turn.text.trim(), max_chars)
             )
         })
@@ -702,7 +704,7 @@ fn sections(entries: &[TranscriptEntry], chapters: &[Chapter], max_chars: usize)
                         "L{} [{}] {}: {}",
                         index + 1,
                         format_duration(entry.start_ms),
-                        entry.source.label(),
+                        entry.label(),
                         truncate_words(entry.text.trim(), REFINE_LINE_CHARS)
                     ),
                 })

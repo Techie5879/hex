@@ -53,6 +53,8 @@ impl Status {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Turn {
     pub(super) mine: bool,
+    /// The call-audio participant's name (Labs); `Them` without one.
+    pub(super) speaker: Option<String>,
     pub(super) start_ms: u64,
     pub(super) text: String,
     /// A silence of 30 s or more before this turn.
@@ -209,6 +211,15 @@ pub(super) fn clock_offset(milliseconds: u64) -> String {
     format!("{:02}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// `You`, `Them`, or the participant's name, untranslated, as copies say it.
+fn speaker_label(turn: &Turn) -> &str {
+    match (&turn.speaker, turn.mine) {
+        (_, true) => "You",
+        (Some(name), false) => name,
+        (None, false) => "Them",
+    }
+}
+
 /// Speaker turns as Markdown, as `meeting::transcript_markdown`.
 fn transcript_markdown(turns: &[Turn]) -> String {
     turns
@@ -216,7 +227,7 @@ fn transcript_markdown(turns: &[Turn]) -> String {
         .map(|turn| {
             format!(
                 "**{}** · {}\n{}",
-                if turn.mine { "You" } else { "Them" },
+                speaker_label(turn),
                 clock_offset(turn.start_ms),
                 turn.text.trim()
             )
@@ -287,6 +298,7 @@ impl MeetingsPane {
     pub(super) fn fixture() -> Self {
         let turn = |mine, seconds: u64, text: &str| Turn {
             mine,
+            speaker: None,
             start_ms: seconds * 1_000,
             text: text.into(),
             pause_before_ms: None,
@@ -1037,6 +1049,14 @@ fn detail(ui: &Ui, p: Paint, meeting: &Meeting, layer: &mut Vec<El>) -> El {
     if let Some(snapshots) = super::meeting_snapshots::view(ui, p, meeting) {
         body = body.child(snapshots);
     }
+    if let Some(names) = crate::meeting::speakers::active_status(&meeting.id) {
+        body = body.child(
+            text(tr(names.label()))
+                .key("speaker-names")
+                .font(DESCRIPTION)
+                .color(p.faint()),
+        );
+    }
     if !meeting.chapters.is_empty() {
         body = body.child(chapters(ui, p, meeting, &copied));
     }
@@ -1299,10 +1319,18 @@ pub(super) fn turn_line(p: Paint, index: usize, turn: &Turn) -> Vec<El> {
                     .key("speaker")
                     .gap(8.0)
                     .child(
-                        text(if turn.mine { tr("You") } else { tr("Them") })
-                            .key("name")
-                            .font(p.k.ty.small_medium)
-                            .color(if turn.mine { p.text() } else { p.faint() }),
+                        text(match (&turn.speaker, turn.mine) {
+                            (_, true) => tr("You"),
+                            (Some(name), false) => name.as_str(),
+                            (None, false) => tr("Them"),
+                        })
+                        .key("name")
+                        .font(p.k.ty.small_medium)
+                        .color(if turn.mine {
+                            p.text()
+                        } else {
+                            p.faint()
+                        }),
                     )
                     .child(
                         text(clock_offset(turn.start_ms))

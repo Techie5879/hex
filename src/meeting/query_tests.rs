@@ -708,7 +708,7 @@ fn sounds_like_spellings_and_split_words_alias_a_term() {
     aliased.sort_unstable();
     assert_eq!(aliased, [0, 2], "only adjacent words alias the term");
     // Fuzzy off searches the words as written.
-    let passages = texts.map(|text| Passage::new(PassageKind::Notes, 0, text.into()));
+    let passages = texts.map(|text| Passage::new(PassageKind::Notes, "Notes", 0, text.into()));
     let refs = passages.iter().collect::<Vec<_>>();
     let exact = score(
         &refs,

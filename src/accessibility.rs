@@ -1,5 +1,7 @@
+use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr;
+use std::rc::Rc;
 
 type CfTypeRef = *const c_void;
 type CfStringRef = *const c_void;
@@ -31,7 +33,13 @@ unsafe extern "C" {
     fn AXValueGetTypeID() -> usize;
     fn AXValueCreate(value_type: u32, value: *const c_void) -> CfTypeRef;
     fn AXValueGetValue(value: CfTypeRef, value_type: u32, value_out: *mut c_void) -> bool;
+    safe fn AXIsProcessTrusted() -> bool;
 }
+
+/// `kAXErrorNoValue` and `kAXErrorAttributeUnsupported`: the element has no
+/// such attribute, rather than a failed read.
+const AX_ERROR_NO_VALUE: i32 = -25212;
+const AX_ERROR_ATTRIBUTE_UNSUPPORTED: i32 = -25205;
 
 /// `kAXValueTypeCFRange`.
 const AX_VALUE_CF_RANGE: u32 = 4;
@@ -161,6 +169,191 @@ fn request_web_accessibility(pid: i32, application: &CfObject) {
     }
 }
 
+/// Whether Hex may read other apps. Only asks; never prompts.
+pub fn is_trusted() -> bool {
+    AXIsProcessTrusted()
+}
+
+/// Another app's element for a bounded reader on one background thread: it
+/// never crosses threads and is never Hex's own (see `external_application`).
+#[derive(Clone)]
+pub struct AxElement(CfObject, Rc<Cell<bool>>);
+
+/// All windows of process `pid` (`None` when they can't all be read), after asking its Chromium web content for an
+/// accessibility tree. `enhanced` also sets `AXEnhancedUserInterface`, which
+/// the new Teams needs where `AXManualAccessibility` alone does nothing.
+pub fn application_windows(pid: i32, enhanced: bool) -> Option<Vec<AxElement>> {
+    let application = external_application(pid)?;
+    request_web_accessibility(pid, &application);
+    if enhanced {
+        request_enhanced_interface(pid, &application);
+    }
+    copy_all_elements(&application, c"AXWindows", 64, &Rc::default())
+}
+
+/// An attribute's elements, all of them or `None`: unlike `copy_elements`, a
+/// failed request, a dropped element, or more than `limit` is not an empty or
+/// shorter list. A missing attribute is no elements.
+fn copy_all_elements(
+    element: &CfObject,
+    name: &CStr,
+    limit: usize,
+    failed: &Rc<Cell<bool>>,
+) -> Option<Vec<AxElement>> {
+    let attribute = CfObject(cf_string_literal(name)?);
+    let mut value = ptr::null();
+    // SAFETY: A live element and a CFString name; a returned value is owned
+    // by the caller.
+    let status = unsafe { AXUIElementCopyAttributeValue(element.0, attribute.0, &mut value) };
+    if status == AX_ERROR_NO_VALUE || status == AX_ERROR_ATTRIBUTE_UNSUPPORTED {
+        return Some(Vec::new());
+    }
+    if status != 0 || value.is_null() {
+        return None;
+    }
+    let array = CfObject(value);
+    if unsafe { CFGetTypeID(array.0) } != unsafe { CFArrayGetTypeID() } {
+        return None;
+    }
+    let count = unsafe { CFArrayGetCount(array.0) };
+    if count < 0 || count as usize > limit {
+        return None;
+    }
+    (0..count)
+        .map(|index| {
+            // SAFETY: Get rule: the array owns the item, so it is retained
+            // before the array goes.
+            let item = unsafe { CFArrayGetValueAtIndex(array.0, index) };
+            if item.is_null() {
+                return None;
+            }
+            let item = CfObject(unsafe { CFRetain(item) });
+            (unsafe { AXUIElementSetMessagingTimeout(item.0, MESSAGING_TIMEOUT_SECS) } == 0)
+                .then_some(AxElement(item, failed.clone()))
+        })
+        .collect()
+}
+
+impl AxElement {
+    /// A failure on any attribute in this poll invalidates its whole tree.
+    pub fn read_failed(&self) -> bool {
+        self.1.get()
+    }
+
+    fn attribute(&self, name: &CStr) -> Option<CfObject> {
+        let Some(attribute) = cf_string_literal(name).map(CfObject) else {
+            self.1.set(true);
+            return None;
+        };
+        let mut value = ptr::null();
+        // SAFETY: Live element and attribute; a successful value is retained.
+        let status = unsafe { AXUIElementCopyAttributeValue(self.0.0, attribute.0, &mut value) };
+        let result = (!value.is_null()).then(|| CfObject(value));
+        match status {
+            0 if result.is_some() => result,
+            AX_ERROR_NO_VALUE | AX_ERROR_ATTRIBUTE_UNSUPPORTED => None,
+            _ => {
+                self.1.set(true);
+                None
+            }
+        }
+    }
+
+    fn string(&self, name: &CStr) -> Option<String> {
+        let value = self.attribute(name)?;
+        let text = cf_string(value.0);
+        if text.is_none() {
+            self.1.set(true);
+        }
+        text
+    }
+
+    pub fn role(&self) -> Option<String> {
+        self.string(c"AXRole")
+    }
+
+    pub fn classes(&self) -> Vec<String> {
+        let Some(array) = self.attribute(c"AXDOMClassList") else {
+            return Vec::new();
+        };
+        let strings = strings_from_array(&array);
+        if strings.is_none() {
+            self.1.set(true);
+        }
+        strings.unwrap_or_default()
+    }
+
+    pub fn dom_id(&self) -> Option<String> {
+        self.string(c"AXDOMIdentifier")
+    }
+
+    pub fn title(&self) -> Option<String> {
+        self.string(c"AXTitle")
+    }
+
+    pub fn description(&self) -> Option<String> {
+        self.string(c"AXDescription")
+    }
+
+    pub fn value(&self) -> Option<String> {
+        self.string(c"AXValue")
+    }
+
+    /// Every child, or a failed poll if the list is incomplete.
+    pub fn children(&self, limit: usize) -> Option<Vec<Self>> {
+        let children = copy_all_elements(&self.0, c"AXChildren", limit, &self.1);
+        if children.is_none() {
+            self.1.set(true);
+        }
+        children
+    }
+
+    pub fn same(&self, other: &Self) -> bool {
+        // SAFETY: Both are live AXUIElements.
+        unsafe { CFEqual(self.0.0, other.0.0) != 0 }
+    }
+}
+
+/// Sets `AXEnhancedUserInterface`, once per process. Chromium then builds
+/// its full web tree as it does for VoiceOver; the call reports an error on
+/// some builds yet takes effect.
+fn request_enhanced_interface(pid: i32, application: &CfObject) {
+    static ASKED: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+    let mut asked = ASKED.lock().unwrap_or_else(|error| error.into_inner());
+    if asked.contains(&pid) {
+        return;
+    }
+    asked.push(pid);
+    let Some(attribute) = cf_string_literal(c"AXEnhancedUserInterface").map(CfObject) else {
+        return;
+    };
+    // SAFETY: A live application element, a CFString name, and the shared
+    // kCFBooleanTrue constant.
+    let status =
+        unsafe { AXUIElementSetAttributeValue(application.0, attribute.0, kCFBooleanTrue) };
+    if status != 0 {
+        tracing::debug!(status, pid, "the app reported an error enabling its tree");
+    }
+}
+
+/// An entire bounded class list, never a partial list after a failed read.
+fn strings_from_array(array: &CfObject) -> Option<Vec<String>> {
+    if unsafe { CFGetTypeID(array.0) } != unsafe { CFArrayGetTypeID() } {
+        return None;
+    }
+    let count = unsafe { CFArrayGetCount(array.0) };
+    if !(0..=64).contains(&count) {
+        return None;
+    }
+    (0..count)
+        .map(|index| {
+            // SAFETY: Get rule: `array` keeps each item alive while read.
+            let item = unsafe { CFArrayGetValueAtIndex(array.0, index) };
+            (!item.is_null()).then(|| cf_string(item)).flatten()
+        })
+        .collect()
+}
+
 /// An element as `browser_page` walks it.
 struct Element(CfObject);
 
@@ -267,6 +460,14 @@ fn copy_string_for_range(element: &CfObject, range: CfRange) -> Option<String> {
 
 struct CfObject(CfTypeRef);
 
+impl Clone for CfObject {
+    fn clone(&self) -> Self {
+        // SAFETY: A live, non-null Core Foundation object; the clone owns
+        // the new reference.
+        Self(unsafe { CFRetain(self.0) })
+    }
+}
+
 impl Drop for CfObject {
     fn drop(&mut self) {
         unsafe { CFRelease(self.0) };
@@ -369,12 +570,14 @@ mod tests {
         assert_eq!(focused_web_url(pid), None);
         assert_eq!(char_before_caret(pid), None);
         assert_eq!(browser_pages(pid), Default::default());
+        assert!(application_windows(pid, true).is_none());
     }
 
     #[test]
     fn invalid_processes_are_rejected_before_native_queries() {
         for pid in [0, -1, i32::MIN] {
             assert!(external_application(pid).is_none());
+            assert!(application_windows(pid, false).is_none());
         }
     }
 
