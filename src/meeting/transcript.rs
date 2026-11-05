@@ -695,8 +695,15 @@ impl ChunkModel {
     fn transcribe(&mut self, samples: &[f32]) -> Result<Chunked> {
         let bounds = speech_bounds(samples);
         let offset = bounds.start;
-        let mut result = self.transcribe_untrimmed(&samples[bounds])?;
+        let input = &samples[bounds];
+        let mut result = self.transcribe_untrimmed(input)?;
         if let Chunked::Done(transcript) = &mut result {
+            if transcript.words.is_empty() {
+                segments::bound_end(
+                    transcript,
+                    crate::transcription::speech_detector::speech_end(input),
+                );
+            }
             let offset_ms = samples_ms(offset) as i64;
             for segment in transcript.segments.iter_mut().chain(&mut transcript.words) {
                 segment.start_ms += offset_ms;

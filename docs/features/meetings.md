@@ -647,7 +647,9 @@ While recording                                      // meetings.rolling
      │   inference; coverage still advances
      └── A dictation request or live stream came first -> retried once idle
   -> Leading and trailing level-silent frames are trimmed with 200 ms of context retained;
-     the removed leading offset is restored to segment and word timestamps
+     the removed leading offset is restored to segment and word timestamps.
+     If Silero is available, long nonspeech tails are excluded from coarse
+     segment end times with 200 ms padding; recognized text is never removed
   -> Segment-only backends preserve text crossing a seam; only confirmed
      repeated text is removed, never a whole sentence based on its start alone.
      Unpublished partials may be replaced by a longer observation of the same

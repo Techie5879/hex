@@ -177,6 +177,21 @@ fn reconcile(
     incoming.retain(|e| !e.text.is_empty());
 }
 
+/// Ignore a long nonspeech tail in coarse native timestamps, without
+/// trimming the input or removing any recognized text. Keep 200 ms context;
+/// small differences stay approximate rather than pretending word alignment.
+pub(super) fn bound_end(transcript: &mut Transcript, speech_end: Option<usize>) {
+    let Some(end) = speech_end else {
+        return;
+    };
+    let end_ms = samples_ms(end.saturating_add(RATE / 5)) as i64;
+    for segment in &mut transcript.segments {
+        if segment.end_ms.saturating_sub(end_ms) > 1000 && segment.start_ms < end_ms {
+            segment.end_ms = end_ms;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +203,25 @@ mod tests {
             text: text.into(),
         }
     }
+    #[test]
+    fn nonspeech_tail_does_not_extend_a_coarse_sentence() {
+        let mut transcript = Transcript {
+            text: "Keep all 12 files, not 10.".into(),
+            segments: vec![TranscriptSegment {
+                start_ms: 0,
+                end_ms: 8760,
+                text: "Keep all 12 files, not 10.".into(),
+            }],
+            ..Default::default()
+        };
+        bound_end(&mut transcript, Some(2240 * RATE / 1000));
+        assert_eq!(transcript.segments[0].end_ms, 2440);
+        assert_eq!(transcript.text, "Keep all 12 files, not 10.");
+        assert_eq!(transcript.segments[0].text, transcript.text);
+        bound_end(&mut transcript, None);
+        assert_eq!(transcript.segments[0].end_ms, 2440);
+    }
+
     #[test]
     fn revised_partial_name_does_not_leave_an_orphan() {
         let mut old = vec![entry(44800, 45460, "Mahia will")];

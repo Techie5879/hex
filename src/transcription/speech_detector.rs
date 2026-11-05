@@ -63,6 +63,26 @@ pub(crate) fn contains_speech(samples: &[f32]) -> Option<bool> {
     }
 }
 
+/// Last detected speech sample, for bounding coarse transcript timestamps.
+/// This never removes input audio or transcript text. Unavailable/empty
+/// detection leaves the model's timing unchanged.
+pub(crate) fn speech_end(samples: &[f32]) -> Option<usize> {
+    #[cfg(test)]
+    {
+        let _ = samples;
+        None
+    }
+    #[cfg(not(test))]
+    {
+        let mut state = lock_state();
+        let session = loaded_session(&mut state)?;
+        detect_extent(session, samples)
+            .ok()
+            .flatten()
+            .map(|(_, end)| end)
+    }
+}
+
 /// Loads an installed detector in the background so the first dictation does
 /// not pay for it. It never downloads: preparation at launch stays offline.
 pub(crate) fn prewarm() {
@@ -148,12 +168,26 @@ fn load(path: &Path) -> Result<VadSession> {
 }
 
 fn detect(session: &mut VadSession, samples: &[f32]) -> Result<bool> {
+    Ok(detect_extent(session, samples)?.is_some())
+}
+
+fn detect_extent(session: &mut VadSession, samples: &[f32]) -> Result<Option<(usize, usize)>> {
     let options = VadOptions {
         threshold: THRESHOLD,
         min_speech_ms: MIN_SPEECH_MS,
         ..VadOptions::default()
     };
-    Ok(!session.run(samples, &options)?.segments.is_empty())
+    let result = session.run(samples, &options)?;
+    Ok(result
+        .segments
+        .first()
+        .zip(result.segments.last())
+        .map(|(first, last)| {
+            (
+                (first.start_sample.max(0) as usize).min(samples.len()),
+                (last.end_sample.max(0) as usize).min(samples.len()),
+            )
+        }))
 }
 
 #[cfg(test)]
