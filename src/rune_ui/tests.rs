@@ -2382,7 +2382,7 @@ fn annotate_pane_snapshots() {
 
 /// One device for every golden, used one render at a time: creating Vulkan
 /// devices from parallel test threads crashed Mesa's RADV on Linux.
-fn gpu() -> Option<std::sync::MutexGuard<'static, Gpu>> {
+pub(super) fn gpu() -> Option<std::sync::MutexGuard<'static, Gpu>> {
     static GPU: std::sync::OnceLock<Option<std::sync::Mutex<Gpu>>> = std::sync::OnceLock::new();
     GPU.get_or_init(|| {
         Gpu::try_new(Gpu::instance(), None)
@@ -2461,21 +2461,25 @@ fn check_golden(scene: &str, dark: bool, size: (f32, f32)) {
         eprintln!("skipping golden {name}: no GPU adapter");
         return;
     };
+    check_rendered_golden(&name, width, height, &pixels);
+}
+
+pub(super) fn check_rendered_golden(name: &str, width: u32, height: u32, pixels: &[u8]) {
     if let Some(folder) = std::env::var_os("HEX_GOLDEN_RENDERS") {
         let folder = std::path::PathBuf::from(folder);
         std::fs::create_dir_all(&folder).unwrap();
-        rune::render::write_png(&folder.join(format!("{name}.png")), width, height, &pixels)
+        rune::render::write_png(&folder.join(format!("{name}.png")), width, height, pixels)
             .unwrap();
     }
-    let path = golden_path(&name);
+    let path = golden_path(name);
     if std::env::var_os("HEX_UPDATE_GOLDENS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        rune::render::write_png(&path, width, height, &pixels).unwrap();
+        rune::render::write_png(&path, width, height, pixels).unwrap();
         return;
     }
     if !path.exists() {
         let actual = std::env::temp_dir().join(format!("rune-settings-{name}-actual.png"));
-        rune::render::write_png(&actual, width, height, &pixels).unwrap();
+        rune::render::write_png(&actual, width, height, pixels).unwrap();
         let miss = format!(
             "{} is missing; run with HEX_UPDATE_GOLDENS=1 (render at {})",
             path.display(),
@@ -2508,7 +2512,7 @@ fn check_golden(scene: &str, dark: bool, size: (f32, f32)) {
     let limit = (width * height) as usize / 500;
     if differing > limit {
         let actual = std::env::temp_dir().join(format!("rune-settings-{name}-actual.png"));
-        rune::render::write_png(&actual, width, height, &pixels).unwrap();
+        rune::render::write_png(&actual, width, height, pixels).unwrap();
         let miss = format!(
             "{name}: {differing} pixels differ (limit {limit}); actual render at {}",
             actual.display()

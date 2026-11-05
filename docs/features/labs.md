@@ -1056,7 +1056,7 @@ vocabulary list itself (rewriting and search), and Linux's Terminal paste.
   once. Checks: `labs_run_setup_again_opens_the_first_run` and
   `run_setup_again_opens_the_first_run_on_linux_and_windows` in
   [panes.rs](../../src/rune_ui/tests/panes.rs).
-- Live text: a streaming dictation shows what you have said so far while
+- Live text: a streaming dictation or Whisper rolling preview shows what you have said so far while
   you dictate, as one click-through line just past the recording HUD (every
   OS; see [Streaming Finish](dictation.md#streaming-finish)). Off macOS the
   line is placed with the HUD's own edge placement (`OverlayHandle::place`),
@@ -1066,7 +1066,11 @@ vocabulary list itself (rewriting and search), and Linux's Terminal paste.
   is `labs.live_text` (off by default), asked as each dictation starts. The
   gate, `labs::live_text()`, is where the work starts: with it off, the engine gives a hotkey capture's
   live stream no partial slot and never reads the model's text between
-  feeds, and no host adds the line's overlay. Each dictation's `finished
+  feeds. Whisper performs no preview decoding with the toggle off. With it on,
+  the same loaded Whisper model decodes a bounded recent window; these words
+  can revise and never replace the complete final transcription or its cleanup.
+  See [Streaming Finish](dictation.md#streaming-finish) for timing and checks.
+  No host adds the line's overlay with the toggle off. Each dictation's `finished
   live stream` line in process.log counts its text changes (`partials`);
   `RUST_LOG=hex=debug` adds a `live text` line per change with the audio
   fed and the word counts, never the words. Checks:
@@ -1085,9 +1089,13 @@ vocabulary list itself (rewriting and search), and Linux's Terminal paste.
   [rune_ui/live_text.rs](../../src/rune_ui/live_text.rs), whose opt-in
   `snapshots` renders the line in light and dark; and
   `live_text_hangs_just_past_the_plate_wherever_it_sits` in
-  [rune_hud/hud_placement.rs](../../src/rune_hud/hud_placement.rs). The line has no golden
-  and no `--snap` scene (overlays have none), and nothing headless checks
-  how it appears and hides on screen.
+  [rune_hud/hud_placement.rs](../../src/rune_hud/hud_placement.rs).
+  The `goldens` test also renders short, long, tentative-only Whisper,
+  mixed, and right-to-left text in both appearances. It checks overflow
+  without inserting a leading ellipsis. Native English Whisper visibility
+  and lifecycle were checked with synthetic audio on macOS; see the
+  [verification limits](dictation.md#streaming-finish). There is no `--snap`
+  scene for this overlay.
 - Playground: Rune's playground in the window (every OS), `labs.playground`
   (off by default, applied at once). While on, a **Playground** sidebar item,
   ⇧⌘D (View › Playground on macOS), or Ctrl+Shift+D swaps the window for a list of

@@ -8,6 +8,7 @@
 //! order on one thread, because a live stream holds the model's compute lease.
 
 use std::collections::VecDeque;
+mod preview;
 mod streaming;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -89,6 +90,7 @@ pub(crate) enum Command {
         /// Where the stream publishes its text after each feed, when live
         /// text is on (Labs).
         partials: Option<Partials>,
+        preview: Option<Arc<Mutex<preview::Input>>>,
     },
     Feed {
         stream: u64,
@@ -417,6 +419,7 @@ pub struct LiveStream {
     /// The stream's text so far, with live text on, and the last version
     /// [`Self::take_partial`] returned.
     partials: Option<(Partials, u64)>,
+    preview: Option<Arc<Mutex<preview::Input>>>,
 }
 
 impl LiveStream {
@@ -439,6 +442,19 @@ impl LiveStream {
             return;
         }
         self.fed += samples.len();
+        if let Some(preview) = &self.preview {
+            let notify = preview
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(samples);
+            if notify {
+                let _ = self.commands.send(Command::Feed {
+                    stream: self.id,
+                    samples: Vec::new(),
+                });
+            }
+            return;
+        }
         let _ = self.commands.send(Command::Feed {
             stream: self.id,
             samples: samples.to_vec(),
@@ -449,6 +465,9 @@ impl LiveStream {
 impl Drop for LiveStream {
     fn drop(&mut self) {
         if !self.finished {
+            if self.preview.is_some() {
+                self.cancel.cancel();
+            }
             let _ = self.commands.send(Command::Cancel { stream: self.id });
         }
     }
@@ -606,20 +625,28 @@ impl TranscriptionEngine {
         self
     }
 
-    /// Opens a live stream when the loaded model can stream on this device.
+    /// Opens native streaming, or a bounded Whisper preview with Live text on.
     pub fn begin(&self) -> Option<LiveStream> {
-        if !self.streams.load(Ordering::Acquire) {
-            return None;
-        }
+        let live_text = (self.live_text)();
+        let preview = if !self.streams.load(Ordering::Acquire) {
+            let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
+            if !live_text || !held.as_ref().is_some_and(preview::supported) {
+                return None;
+            }
+            Some(Arc::new(Mutex::new(preview::Input::new(self.live_text))))
+        } else {
+            None
+        };
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = CancelToken::new();
-        let partials = (self.live_text)().then(Partials::default);
+        let partials = live_text.then(Partials::default);
         self.requests.fetch_add(1, Ordering::AcqRel);
         self.commands
             .send(Command::Begin {
                 stream: id,
                 cancel: cancel.clone(),
                 partials: partials.clone(),
+                preview: preview.clone(),
             })
             .ok()?;
         Some(LiveStream {
@@ -629,6 +656,7 @@ impl TranscriptionEngine {
             finished: false,
             commands: self.commands.clone(),
             partials: partials.map(|partials| (partials, 0)),
+            preview,
         })
     }
 
@@ -691,7 +719,14 @@ impl TranscriptionEngine {
         let (stream, stream_cancel) = match stream {
             Some(mut stream) => {
                 stream.finished = true;
-                (Some(stream.id), Some(stream.cancel.clone()))
+                if stream.preview.is_some() {
+                    // Abort only the preview. The complete clip is still
+                    // transcribed through the ordinary final pipeline.
+                    stream.cancel.cancel();
+                    (None, None)
+                } else {
+                    (Some(stream.id), Some(stream.cancel.clone()))
+                }
             }
             None => (None, None),
         };
@@ -965,10 +1000,46 @@ impl Worker {
                     stream,
                     cancel,
                     partials,
+                    preview,
                 } => {
                     self.dictating.store(true, Ordering::Release);
                     crate::dictation::vocabulary::for_dictation(|| {
-                        self.stream(stream, &cancel, partials.as_ref(), &commands, &mut next);
+                        if let Some(input) = preview {
+                            self.running.enter(&cancel);
+                            let command = preview::drive(
+                                stream,
+                                &cancel,
+                                &input,
+                                partials.as_ref(),
+                                &commands,
+                                &mut next,
+                                |samples| {
+                                    let model = self
+                                        .model()
+                                        .ok_or_else(|| "preview model unavailable".to_string())?;
+                                    let selection = model
+                                        .gguf_selection()
+                                        .filter(|selection| preview::supported(selection))
+                                        .cloned()
+                                        .ok_or_else(|| "preview model changed".to_string())?;
+                                    let model = held(model, &selection)
+                                        .ok_or_else(|| "preview model changed".to_string())?;
+                                    crate::transcription::gguf_session::with_job_cancel(
+                                        &cancel,
+                                        || transcribe_clip(model, samples),
+                                    )
+                                    .map_err(|e| format!("{e:#}"))
+                                },
+                            );
+                            if let Some(partials) = &partials {
+                                partials.publish(Partial::default());
+                            }
+                            if let Some(command) = command {
+                                next.push_back(command);
+                            }
+                        } else {
+                            self.stream(stream, &cancel, partials.as_ref(), &commands, &mut next);
+                        }
                     });
                     self.dictating.store(false, Ordering::Release);
                 }

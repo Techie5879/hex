@@ -766,6 +766,20 @@ speaker playing the tone.
 
 ### Streaming Finish
 
+Whisper preview scheduling and final-output separation are covered by
+`transcription::engine::preview::tests`. Native verification on November 5,
+2026 at `886c496e` used Whisper Large v3 Turbo Q8_0 on an M4 Max with
+synthetic microphone audio. In a 41-second capture, the first caption was
+observed at 3.38 seconds, with roughly 1.2-second observation intervals;
+preview decodes took 273–336 ms. The latest words stayed visible without a
+leading ellipsis, the waveform stayed visible, and Stop cleared the caption
+and returned the complete final transcript in 0.901 seconds. Earlier checks
+at `f56ba398` also passed cancel/restart, the Live text switch, and synthetic
+final text processing. No physical microphone, non-English native speech,
+or native Windows/Linux overlay was tested by these checks. RTL, mixed
+stable/tentative text, and both appearances have layout tests and render
+goldens. These short runs do not prove long-duration resource stability.
+
 ```ts
 Model advertises streaming, GPU device             // dictate.streaming
   // Metal on macOS, Vulkan on Linux and x64 Windows
@@ -798,12 +812,20 @@ Model advertises streaming, GPU device             // dictate.streaming
   │   ├── HUD hidden -> In the HUD's place at the top
   │   ├── Appears with the first words, already drawn; prewarmed, so macOS never
   │   │   reveals the last dictation's words for a frame (Linux, Windows: unverified)
-  │   ├── Grows with the words to 552 pt; the newest stay in view, "…" cutting the start
+  │   ├── Grows with the words to 552 pt; the newest stay in view, with a subtle fade at the older edge
   │   └── Tentative words, when the model has any, are dimmed after the stable ones
   ├── Release, short tap, or a lost microphone -> The recording ends -> Hidden
   ├── Provisional: never pasted, copied, or kept (the final text replaces it)
   ├── A failed or interrupted stream clears the text while the capture goes on
   └── process.log: `partials` on "finished live stream"; per change at debug (no words)
+  Whisper + Labs Live text -> Rolling preview on the same loaded model
+  ├── After 2 s of audio, decode the latest <= 12 s; wait >= 1 s between decodes
+  ├── One replaceable audio buffer; stale preview work never queues up
+  ├── Words can change with context; all preview words are tentative
+  ├── Turning Live text off stops new preview decodes and hides the line
+  ├── Stop/cancel aborts the preview; no late preview words publish
+  ├── Stop still transcribes the complete recording, then applies normal cleanup
+  └── No second model, cloud request, preview persistence, or early paste
   Picker -> "Streams" tag on catalog models whose artifact streams   // setup.model-card
   Picker -> The saved language's Recommended/Fastest/Most accurate cards first  // setup.model-routing
   ├── el: Cohere; tr, ms, fil, fa, mk, ar, ja, fi, sv, da: Whisper turbo first
