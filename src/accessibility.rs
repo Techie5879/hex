@@ -9,6 +9,9 @@ type AxUiElementRef = *const c_void;
 
 const CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
 const MESSAGING_TIMEOUT_SECS: f32 = 0.25;
+// Native Teams tiles carry 70–164 generated classes. Keep the complete
+// list, including a speaking marker near its end, within a generous bound.
+const MAX_AX_CLASS_NAMES: isize = 512;
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -74,6 +77,13 @@ unsafe extern "C" {
     fn CFRelease(value: CfTypeRef);
     fn CFRetain(value: CfTypeRef) -> CfTypeRef;
     fn CFEqual(left: CfTypeRef, right: CfTypeRef) -> u8;
+    #[cfg(test)]
+    fn CFArrayCreate(
+        allocator: *const c_void,
+        values: *const CfTypeRef,
+        count: isize,
+        callbacks: *const c_void,
+    ) -> CfTypeRef;
     fn CFArrayGetTypeID() -> usize;
     fn CFArrayGetCount(array: CfTypeRef) -> isize;
     fn CFArrayGetValueAtIndex(array: CfTypeRef, index: isize) -> CfTypeRef;
@@ -338,7 +348,15 @@ fn strings_from_array(array: &CfObject) -> Option<Vec<String>> {
         return None;
     }
     let count = unsafe { CFArrayGetCount(array.0) };
-    if !(0..=64).contains(&count) {
+    if !(0..=MAX_AX_CLASS_NAMES).contains(&count) {
+        static REPORTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                classes = count,
+                limit = MAX_AX_CLASS_NAMES,
+                "accessibility class list exceeds limit; speaker names unavailable"
+            );
+        }
         return None;
     }
     (0..count)
@@ -557,6 +575,49 @@ fn cf_string(value: CfTypeRef) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Null callbacks leave ownership with `strings`, which outlives `array`.
+    fn with_classes<T>(count: usize, inspect: impl FnOnce(&CfObject) -> T) -> T {
+        let strings = (0..count)
+            .map(|index| {
+                let text = if index + 1 == count {
+                    "vdi-frame-occlusion".to_owned()
+                } else {
+                    format!("fixture-class-{index}")
+                };
+                let text = std::ffi::CString::new(text).unwrap();
+                CfObject(cf_string_literal(&text).unwrap())
+            })
+            .collect::<Vec<_>>();
+        let values = strings.iter().map(|string| string.0).collect::<Vec<_>>();
+        // SAFETY: Every pointer remains live for the array's lifetime; null
+        // callbacks mean the array neither retains nor releases its elements.
+        let array =
+            unsafe { CFArrayCreate(ptr::null(), values.as_ptr(), count as isize, ptr::null()) };
+        assert!(!array.is_null());
+        inspect(&CfObject(array))
+    }
+
+    #[test]
+    fn teams_sized_native_class_arrays_are_read_completely() {
+        for count in [65, 160, 164, MAX_AX_CLASS_NAMES as usize] {
+            with_classes(count, |array| {
+                let classes = strings_from_array(array).expect("a normal Teams class list");
+                assert_eq!(classes.len(), count);
+                assert_eq!(
+                    classes.last().map(String::as_str),
+                    Some("vdi-frame-occlusion")
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn oversized_native_class_arrays_are_rejected_without_truncation() {
+        with_classes(MAX_AX_CLASS_NAMES as usize + 1, |array| {
+            assert!(strings_from_array(array).is_none());
+        });
+    }
 
     #[test]
     fn self_queries_never_create_an_accessibility_application() {
