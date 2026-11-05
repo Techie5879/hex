@@ -33,7 +33,7 @@ unsafe extern "C" {
     fn AXValueGetTypeID() -> usize;
     fn AXValueCreate(value_type: u32, value: *const c_void) -> CfTypeRef;
     fn AXValueGetValue(value: CfTypeRef, value_type: u32, value_out: *mut c_void) -> bool;
-    fn AXIsProcessTrusted() -> bool;
+    safe fn AXIsProcessTrusted() -> bool;
 }
 
 /// `kAXErrorNoValue` and `kAXErrorAttributeUnsupported`: the element has no
@@ -171,8 +171,7 @@ fn request_web_accessibility(pid: i32, application: &CfObject) {
 
 /// Whether Hex may read other apps. Only asks; never prompts.
 pub fn is_trusted() -> bool {
-    // SAFETY: A side-effect-free query of this process's trust.
-    unsafe { AXIsProcessTrusted() }
+    AXIsProcessTrusted()
 }
 
 /// Another app's element for a bounded reader on one background thread: it

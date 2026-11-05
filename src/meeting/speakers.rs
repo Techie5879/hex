@@ -87,6 +87,7 @@ pub enum Status {
 }
 
 impl Status {
+    #[cfg(test)]
     pub const ALL: [Self; 4] = [
         Self::Waiting,
         Self::Reading,
@@ -294,7 +295,9 @@ impl Writer {
                 (binding, observed, Status::Reading)
             }
             // Binding 0 is no call: a stretch never continues across it.
-            Sample::NoCall(_) => (0, Observed::Uncertain, Status::Waiting),
+            Sample::NoCall(NoCall::Absent | NoCall::Unknown) => {
+                (0, Observed::Uncertain, Status::Waiting)
+            }
             Sample::PermissionRequired => (0, Observed::Uncertain, Status::PermissionRequired),
         };
         // Before the call audio starts there is nothing to name.

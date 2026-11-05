@@ -236,15 +236,6 @@ pub mod fake {
             field.clone()
         }
 
-        /// Every node below, this one included.
-        pub fn all(&self) -> Vec<Node> {
-            let mut nodes = vec![self.clone()];
-            for child in &self.data.children {
-                nodes.extend(child.all());
-            }
-            nodes
-        }
-
         /// Text read anywhere in this tree.
         pub fn reads(&self) -> Vec<String> {
             self.text_reads.borrow().clone()
