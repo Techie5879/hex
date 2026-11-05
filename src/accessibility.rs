@@ -73,8 +73,7 @@ unsafe extern "C" {
 }
 
 pub fn focused_window_title(pid: i32) -> Option<String> {
-    // SAFETY: AXUIElementCreateApplication returns a retained Core Foundation object.
-    let application = bounded_element(unsafe { AXUIElementCreateApplication(pid) })?;
+    let application = external_application(pid)?;
     let window = copy_element(&application, c"AXFocusedWindow")?;
     copy_string(&window, c"AXTitle").filter(|title| !title.is_empty())
 }
@@ -85,8 +84,7 @@ pub fn focused_window_title(pid: i32) -> Option<String> {
 /// the page itself.
 pub fn focused_web_url(pid: i32) -> Option<String> {
     const MAX_DEPTH: usize = 64;
-    // SAFETY: AXUIElementCreateApplication returns a retained Core Foundation object.
-    let application = bounded_element(unsafe { AXUIElementCreateApplication(pid) })?;
+    let application = external_application(pid)?;
     let mut element = copy_element(&application, c"AXFocusedUIElement")?;
     let mut url = None;
     for _ in 0..MAX_DEPTH {
@@ -108,8 +106,7 @@ pub fn focused_web_url(pid: i32) -> Option<String> {
 /// process; without it a browser behind another app shows windows but no
 /// web areas.
 pub fn browser_pages(pid: i32) -> crate::dictation::browser_page::BrowserPages {
-    // SAFETY: AXUIElementCreateApplication returns a retained Core Foundation object.
-    let Some(application) = bounded_element(unsafe { AXUIElementCreateApplication(pid) }) else {
+    let Some(application) = external_application(pid) else {
         return Default::default();
     };
     request_web_accessibility(pid, &application);
@@ -216,8 +213,7 @@ fn copy_elements(element: &CfObject, name: &CStr) -> Vec<CfObject> {
 /// focused text element, for Labs › Smart spacing. `None` when text is
 /// selected, the cursor is at the start, or the app doesn't say.
 pub fn char_before_caret(pid: i32) -> Option<char> {
-    // SAFETY: AXUIElementCreateApplication returns a retained Core Foundation object.
-    let application = bounded_element(unsafe { AXUIElementCreateApplication(pid) })?;
+    let application = external_application(pid)?;
     let focused = copy_element(&application, c"AXFocusedUIElement")?;
     let selection = copy_range(&focused, c"AXSelectedTextRange")?;
     if selection.length != 0 || selection.location <= 0 {
@@ -275,6 +271,18 @@ impl Drop for CfObject {
     fn drop(&mut self) {
         unsafe { CFRelease(self.0) };
     }
+}
+
+/// Self queries synchronously enter Hex's AccessKit callbacks on the caller's
+/// thread. The background context reader can then re-enter a mutably borrowed
+/// tree and abort across the Objective-C callback boundary. Only query other
+/// processes; application identity still comes from NSWorkspace.
+fn external_application(pid: i32) -> Option<CfObject> {
+    if pid <= 0 || pid as u32 == std::process::id() {
+        return None;
+    }
+    // SAFETY: AXUIElementCreateApplication returns a retained Core Foundation object.
+    bounded_element(unsafe { AXUIElementCreateApplication(pid) })
 }
 
 fn bounded_element(element: AxUiElementRef) -> Option<CfObject> {
@@ -351,6 +359,23 @@ fn cf_string(value: CfTypeRef) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_queries_never_create_an_accessibility_application() {
+        let pid = i32::try_from(std::process::id()).unwrap();
+        assert!(external_application(pid).is_none());
+        assert_eq!(focused_window_title(pid), None);
+        assert_eq!(focused_web_url(pid), None);
+        assert_eq!(char_before_caret(pid), None);
+        assert_eq!(browser_pages(pid), Default::default());
+    }
+
+    #[test]
+    fn invalid_processes_are_rejected_before_native_queries() {
+        for pid in [0, -1, i32::MIN] {
+            assert!(external_application(pid).is_none());
+        }
+    }
 
     #[test]
     fn a_missing_attribute_is_none() {
