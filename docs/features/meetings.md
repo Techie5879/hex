@@ -1544,8 +1544,11 @@ from the tile label read from its end ("<Name>, muted, Context menu is
 available"), or the compact view's "<Name> is speaking". The user's own tile
 ("Myself video, …", "(You)") is silence; a muted marked tile, two marks, a
 mark outside a tile, a label with an unknown part, or a non-English label is
-uncertain. Two meeting windows, or a compact view of another meeting, are no
-evidence.
+uncertain. Pinning is a recognized tile state; it never counts as a speaking
+signal on its own. Compact view's exact "Nobody is speaking" is silence; its
+transient empty speaker name remains uncertain. Conflicting main and compact
+views are uncertain. Two meeting windows, or a compact view of another
+meeting, are no evidence.
 
 Slack (`speakers/slack.rs`): the only `p-huddle_window_content` container,
 in the huddle window or docked in the main window, is the call; Hex looks for
@@ -1557,7 +1560,8 @@ class `p-huddle_peer_tile__overlay--active_speaker` is the speaker, named from
 an unresolved (`_pending`), muted, or nameless marked tile, or two people, is
 uncertain; two containers are no evidence. The current window list is checked
 again on every poll, including after a huddle has been bound. A manual
-recording names no lines while a competing provider is unresolved. Slack moves the mark as a turn, so
+recording names no lines while a competing provider is unresolved. Slack moves
+the mark as a turn, so
 two people talking over each other read as one: that overlap can be misnamed.
 
 Names are hostile input (`speakers/names.rs`): control and Markdown
@@ -1574,8 +1578,7 @@ in transcripts follow the existing copy, export, and configured meeting-mirror
 paths. Meeting notes also send names to OpenCode where they already send the
 transcript.
 
-Evidence for the selectors is third-party and published, never observed by
-this project: Teams' `hangup-button` via `AXDOMIdentifier`
+Initial evidence for the selectors came from published projects: Teams' `hangup-button` via `AXDOMIdentifier`
 (danswett/streamdeck-teams-control#4, J3tto/callcontrol#3); its tile labels,
 compact view, and `vdi-frame-occlusion` (EnviousWispr's macOS runs,
 2026-10-27/28; Vexa saw that class never change in one web meeting); Slack's
@@ -1591,8 +1594,20 @@ classes, menus, wrong windows, two calls, budgets; timelines with gaps,
 handoffs, lingering marks, window changes, slow readings, clock drift,
 restart, crash tails, hostile files; and names through turns, copies, the
 cursor, Markdown, queries, and search), Labs bit isolation, and translated
-statuses. Not verified: any native read of Teams or Slack, the marks' real
-lag against audio, the Accessibility calls' cost on a large Slack, and the
+statuses. A controlled native check on 2026-11-05 used generated speech and
+silence from two disposable local browser guests, without real participants
+or microphone audio. On macOS 27.0.1 and Teams 26289.204.5281.6363 it confirmed
+the call window ID, remote tile labels, the changing frame token, mute and
+pin behavior, video layout, and compact-view speaker/silence labels. The
+indicator cleared roughly 1–2 s after synthetic speech stopped; the exact
+onset lag against captured audio was not measured. Only one remote tile was
+marked at a time, so this does not establish overlap identification or a
+complete Hex capture/transcribe/insert run. No private captures are repository
+fixtures. Slack 4.53.280 exposed Chromium AX classes in idle UI, but its
+huddle selectors have not been observed locally yet.
+Not verified: native Slack huddle attribution, Teams self-speaking,
+non-English or shared-screen layouts, large-call performance, exact audio
+alignment, and the
 `AXEnhancedUserInterface` side effects on Teams. Incorrect mark timing or a
 dominant-speaker indicator during overlapping speech can assign the wrong
 name; falling back to `Them` cannot prevent every attribution error.

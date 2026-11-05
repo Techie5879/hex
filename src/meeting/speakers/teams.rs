@@ -1,6 +1,6 @@
 //! Microsoft Teams (the new desktop app, `com.microsoft.teams2`).
 //!
-//! Evidence (third-party, published; never observed by this project): the
+//! Published evidence and a controlled native check on 2026-11-05: the
 //! macOS app is Chromium-based and exposes `AXDOMIdentifier` and
 //! `AXDOMClassList`; its meeting window holds the `hangup-button` control
 //! (danswett/streamdeck-teams-control #4 and J3tto/callcontrol #3, both read
@@ -35,6 +35,7 @@ const MORE_OPTIONS: &str = " More options";
 const TILE_STATES: &[&str] = &[
     "muted",
     "unmuted",
+    "pinned",
     "organizer",
     "organiser",
     "co-organizer",
@@ -46,7 +47,6 @@ const TILE_STATES: &[&str] = &[
 const TILE_STATE_PREFIXES: &[&str] = &["video is ", "fit to ", "has control of"];
 /// Pieces that mean the label is not one name, wherever they sit.
 const NOT_NAMES: &[&str] = &[
-    "pinned",
     "spotlighted",
     "spotlight",
     "hand raised",
@@ -110,6 +110,7 @@ fn read_windows<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<
     }
     let mut speaking = Vec::new();
     let mut uncertain = false;
+    let mut compact_silent = false;
     for window in main.iter().chain(&compact) {
         uncertain |= window.loose_frame;
         for tile in &window.framed {
@@ -125,6 +126,10 @@ fn read_windows<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<
             if let Some(label) = label(group)
                 && let Some(name) = label.strip_suffix(SPEAKING_SUFFIX)
             {
+                if label == "Nobody is speaking" {
+                    compact_silent = true;
+                    continue;
+                }
                 match clean_name(name) {
                     Some((name, false)) => speaking.push(name),
                     Some((_, true)) => {}
@@ -136,6 +141,7 @@ fn read_windows<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<
     speaking.dedup();
     speaking.sort();
     speaking.dedup();
+    uncertain |= compact_silent && !speaking.is_empty();
     let reading = match (uncertain, speaking.len()) {
         (true, _) => Reading::Uncertain,
         (false, 0) => Reading::Silent,
@@ -385,12 +391,28 @@ mod tests {
     }
 
     #[test]
+    fn pinned_is_a_tile_state_and_never_a_speaking_signal() {
+        for pinned in ["pinned", "Pinned"] {
+            let label =
+                format!("Ana Ruiz Unverified, video is on, {pinned}, Context menu is available");
+            assert_eq!(
+                reading(vec![meeting("Sync", [tile(&label, true)])]),
+                Ok(Reading::Speaking("Ana Ruiz".into()))
+            );
+            assert_eq!(
+                reading(vec![meeting("Sync", [tile(&label, false)])]),
+                Ok(Reading::Silent)
+            );
+        }
+    }
+
+    #[test]
     fn unrecognized_tile_labels_are_uncertain_rather_than_guessed() {
         for label in [
             // Another language's states.
             "Ana Ruiz, stummgeschaltet, Kontextmenü ist verfügbar",
             // A state Hex doesn't know, which would otherwise join the name.
-            "Ana Ruiz, Pinned, Context menu is available",
+            "Ana Ruiz, unknown-state, Context menu is available",
             "Ana Ruiz, hand raised, Context menu is available",
             "Content shared by Ana Ruiz, Context menu is available",
             "Ana, Ben, Cara, Context menu is available",
@@ -482,6 +504,22 @@ mod tests {
                 compact("Sync", "Ana Ruiz is speaking"),
             ]),
             Ok(Reading::Speaking("Ana Ruiz".into()))
+        );
+        assert_eq!(
+            reading(vec![compact("Sync", "Nobody is speaking")]),
+            Ok(Reading::Silent)
+        );
+        assert_eq!(
+            reading(vec![compact("Sync", " is speaking")]),
+            Ok(Reading::Uncertain)
+        );
+        // Different live views cannot establish one speaker.
+        assert_eq!(
+            reading(vec![
+                meeting("Sync", [tile("Ana Ruiz, Context menu is available", true)]),
+                compact("Sync", "Nobody is speaking"),
+            ]),
+            Ok(Reading::Uncertain)
         );
         // Windows of two different meetings.
         assert_eq!(
