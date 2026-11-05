@@ -60,6 +60,21 @@ Recordings list icons                               // Labs › Meeting platform
         Slack, or Webex when the meeting's app names it, else a neutral call
         icon (FaceTime, Discord, WhatsApp, manual recordings); off -> rows as before
         (platform_icon in rune_ui/meetings.rs; labs.md)
+Live transcript scrolling                           // Labs › Follow live transcript, off by default (#1332)
+        on -> while the selected meeting is Starting or Recording (no Stop
+        pending), the detail card's scroll sticks to the bottom: new turns
+        stay in view; scrolling up stops following, scrolling back to the
+        bottom follows again. Finished meetings and off -> scroll by hand as before
+        (follows_live_transcript in rune_ui/meetings.rs; not observed on a real call)
+Folding sections                                    // Labs › Collapsible meeting sections, off by default (#1348)
+        on -> each day heading in the list (Today, Yesterday, a date) and the
+        detail's Summary and Chapters labels are buttons with a chevron
+        (expanded/collapsed for screen readers); pressing one hides the day's
+        rows, the summary text, or the chapter rows, and the heading or label
+        stays. Typing in Search shows every match whatever the folds; a
+        selected meeting in a folded day stays in the detail. Folds last until
+        Hex quits, never saved; everything starts open. Off -> as before
+        (rune_ui/meetings/folds.rs; no scene or golden with folds yet)
 ```
 
 Requires the selected local dictation model, Microphone, and System Audio

@@ -50,6 +50,8 @@ The [vocabulary](vocabulary.md) biases transcription toward names you list.
 models another app already downloaded.
 [Annotate](capture.md) (macOS, Linux,
 and Windows) records the screen while you draw and talk and sends it to an agent.
+[Screenshots](labs.md) (Labs, macOS) takes CleanShot-style ⌘⇧4 area and
+window screenshots.
 The other capabilities stay here until they need their own verification recipe.
 [Hex for Android](android.md) is a separate app with its own map; it shares the
 portable profile with desktop through Labs › Profile sync.
@@ -1010,9 +1012,12 @@ The bar is Rune's `rune_kit::scroll_bar`, used by `scroll_body`, `faded_body`
 and every kit `Menu`, `Select` and `Combobox`. Checks:
 `a_long_transcript_scrolls_by_dragging_its_scroll_bar`, and in Rune the
 `scroll_bar` tests and `page_keys_move_a_scrolling_listbox_highlight_by_what_it_shows`.
-Gaps: dragging content with a touchscreen or pen does not scroll on desktop
-(Rune pans by touch only on the web), and the bar is not verified on a real
-Windows PC.
+A touchscreen (Wayland, X11, Windows; a pen where the system reports it as a
+touch) acts as the primary button (#1337): a tap clicks, dragging a slider or
+the bar drags it, and any other drag pans the scroll area under the finger and
+flings on; a second finger is ignored. Checks:
+`a_finger_pans_the_transcript_and_taps_the_sidebar`, and Rune's touch tests.
+Gaps: the bar and touch are not verified on a real Windows PC or touchscreen.
 
 ## Process Text With Modes
 
@@ -1266,6 +1271,10 @@ Menu bar and Settings                    // maintenance
 Launch Hex                               // maintain.startup
 ├── Setup incomplete / permissions or model missing -> Open setup or Settings
 ├── Show Dock icon on -> Open Settings
+│   └── Started by Launch at login -> No startup window (#1321)
+│       ├── macOS marks the open-application Apple event as a login-item launch
+│       ├── The activation that comes with that launch doesn't reopen the window (#1298)
+│       └── check: login_item_launch_starts_without_the_window (the decision only); not run on a Mac
 └── Show Dock icon off + usable menu-bar item -> No startup window
     ├── Dictation starts independently of the Settings window
     └── Menu-bar Settings / Finder or Spotlight reopen -> Open or focus the window

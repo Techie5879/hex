@@ -381,16 +381,27 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 ├── Routing (Scrawl's routing.md) -> `last.route` once its answer arrives; the
 │   capsule follows refinements and delivery separately, including Queued
 │   (then Sent), how an Undo ended, and a failed send
-│   ├── A saved rule -> "Sending to X", a 3–2–1 second countdown and Undo.
+│   ├── A saved rule -> "Sending to X" and Undo, whose ring drains through the
+│   │   Undo window (5 s) and is gone when Undo is; no words count it down.
 │   │   A repository awaiting its session shows the repository name. Undo
 │   │   cancels before posting. The capsule remains visible until delivery;
 │   │   then it reads "Sent to X" and plays the Sent tone. A picked send still
-│   │   goes immediately with its plain Undo. No runner-up chip for a rule;
+│   │   goes immediately, with the same ring on its Undo. No runner-up chip for a rule;
 │   │   after delivery and the Undo window, the capsule leaves by
 │   │   itself (with the list open it stays; the pointer on it holds it, and a
 │   │   folded list gives it a brief hold). Picking the rule's own session there (without
 │   │   "Always") only closes the list; nothing is sent again
-│   ├── A rule's countdown wakes each second; a pick's Undo wakes only at its end
+│   ├── The Undo ring -> one per send (rule or pick), tied to the window's end
+│   │   (`Done.countdown`) and drawn by `capture_capsule::undo_ring` as render-time
+│   │   opacity tweens, so nothing ticks: the capsule wakes only when the window
+│   │   ends. Reduce Motion steps it a second at a time. It is the Undo chip's
+│   │   own outline, draining clockwise from the top
+│   ├── The pointer on the capsule -> holds the countdown, one that starts
+│   │   under it too: the ring stands still (Reduce Motion too), Undo never
+│   │   runs out, and a rule's send waits (`CaptureCommand::Hold`). Leaving
+│   │   goes on with the time it had left, at least 1 s. A pick already went,
+│   │   so only its Undo waits (`Flow::hold_countdown`)
+├── A finished capture with nowhere sent yet reads "Copied" from the start
 │   ├── Anything else with somewhere to go (a guess, nothing fitting, no
 │   │   answer) -> macOS: "Copied", then Search with the capture shortcut's
 │   │   keycaps (as Settings draws them) and ✕, the suggestions open under
@@ -408,21 +419,26 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   │   │   name each in a rounded-rect badge with its kind's icon (a globe for
 │   │   │   a site, a window for an app, a bubble for the session). Shift+click
 │   │   │   (or ⇧⏎ in the search)
-│   │   │   sends and saves the rule: "Sent to X · saved rule", and its Undo
+│   │   │   sends and saves the rule: "Sent to X · always", and its Undo
 │   │   │   takes back the send and the rule (what the key held before, or
 │   │   │   nothing, comes back). The rule names that session (`ses_…`),
 │   │   │   never its folder: a folder rule goes to the folder's newest
 │   │   │   session, so with SEER and RUNE DESKTOP in one checkout, a rule
 │   │   │   saved for RUNE DESKTOP went to SEER
 │   │   ├── A click -> sends at once: "Sent to X", the Sent tone, and a
-│   │   │   quiet Undo for the same 5 s, with no ring or drain; ✕ closes;
+│   │   │   Undo with its ring for the same 5 s; ✕ closes;
 │   │   │   the capsule then leaves by itself with its exit
 │   │   ├── Search or the capture shortcut (⌥⇧S) -> the search: "All
 │   │   │   sessions" over every session the router's look read (its two
 │   │   │   newest pages, every folder's, and any it named), filtered by
-│   │   │   what's typed, five rows at most and never shorter than the
+│   │   │   what's typed: every word, in any case, in the title, the folder's
+│   │   │   name, or the session id, rows with every word in the title first;
+│   │   │   a row names its folder before its note when only the folder or id
+│   │   │   matched, or when another row shows the same title (suggestions
+│   │   │   too). Five rows at most and never shorter than the
 │   │   │   suggestions it opened from; the footer reads "Send ⏎",
-│   │   │   "Remember ⇧⏎", and "New capture ⌥⇧S". Esc or a click away goes
+│   │   │   "Remember ⇧⏎", and "New capture ⌥⇧S". Matching nothing, it reads
+│   │   │   "No sessions match" and the footer drops Send and Remember. Esc or a click away goes
 │   │   │   back to the suggestions; ⌥⇧S in the search records a new capture
 │   │   ├── Once the capsule has gone, ⌥⇧S records as usual
 │   │   ├── Esc -> not Hex's here: it goes to the app in front
@@ -434,12 +450,15 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   │   folds it to "Taken back" with "Send to…", and it leaves after the done
 │   │   hold; nothing here takes Esc. ✕ (or Esc in the typed list) dismisses:
 │   │   "Kept", the bundle untouched. Either way it then
-│   │   waits for Send to…, even after the router said the pick went.
+│   │   waits for Send to…, even after the router said the pick went. With no
+│   │   other session to offer, the list still opens with the one it went to
+│   │   ("taken back"), so Search can send it elsewhere; only a rule still
+│   │   resolving its folder reads "Taken back" with nothing to list.
 │   │   News of the send being taken back (it went, queued, or failed) leaves
 │   │   that list alone, and a pick made before the router answers the Undo
 │   │   stands: the Undo's answer and the earlier send's news never take it back
-│   ├── Too late to take back -> the same list, the session marked "has it",
-│   │   folded "Sent to X · too late"; a pick sends a copy there,
+│   ├── Too late to take back -> the same list, the session marked "already
+│   │   sent", folded "Already sent to X"; a pick sends a copy there,
 │   │   and ✕ just closes (it leaves by itself after the brief hold). Closed, it doesn't wait for a pick.
 │   │   An Undo OpenCode refuses (an error) reads as too late
 │   ├── Sends -> CaptureCommand::Send{to} and Undo, naming the
@@ -453,6 +472,14 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   │   │   Esc, so a send is taken back only by clicking Undo
 │   │   ├── A send from the list still undoable -> no keys; Esc goes to the
 │   │   │   app, and the Undo button is the only way back
+│   │   ├── Suggestions, the pointer moved onto them -> also text typed
+│   │   │   without ⌘ or ⌃ (not a leading space), which opens the search
+│   │   │   with it (`CapsuleKeys::Suggest { search }`). Only a move counts:
+│   │   │   suggestions that open or change under a resting pointer, or a
+│   │   │   pointer that left, leave typing with the app in front, so Kit
+│   │   │   typing there never loses a letter. ⌫, ↑↓, ⏎, and Esc stay the
+│   │   │   app's until the search opens
+│   │   │   (`typing_stays_the_apps_until_the_pointer_moves_onto_the_suggestions`)
 │   │   ├── Suggestions -> at the session tap no key at all (the toast's
 │   │   │   ⏎ and ⇥ aside), only a mouse press, which folds them (the click
 │   │   │   still reaches the app) unless the pointer is on the pill or the
@@ -734,7 +761,10 @@ Where it goes                            // capture.route; capture.routing's aut
 │   │   a Shift pick's): a three-second countdown begins at Written. A folder
 │   │   rule shows its repository while its session resolves; it sends once both
 │   │   the countdown and resolution finish. Undo during the countdown posts
-│   │   nothing. Sending -> Sent, or Queued when OpenCode didn't take it. Whatever
+│   │   nothing. The capsule's `Hold` pauses the countdown while the pointer is
+│   │   on it and resumes it with what it had left (at least 1 s; a hold the
+│   │   capsule never ends lapses after 2 min, and the next capture resumes
+│   │   it). Sending -> Sent, or Queued when OpenCode didn't take it. Whatever
 │   │   autoSend, smartRouting, or jevRouting say, a saved rule sends and
 │   │   nothing else sends on its own. smartRouting off decides with the port
 │   │   ladder, after rules and addresses, on the same look
@@ -757,8 +787,10 @@ Where it goes                            // capture.route; capture.routing's aut
 │   ├── Nothing / NoAnswer -> recent sessions only
 │   └── Unreachable -> the look read no sessions (OpenCode slow past the look's
 │       deadline, down, or refusing); a warning in process.log with the error, and
-│       the capsule reads "Couldn't reach OpenCode" with why ("didn't answer in
-│       time"), keeping Paste
+│       the capsule reads "Couldn't reach OpenCode" with why ("OpenCode didn't
+│       answer"), or "OpenCode isn't running" alone, keeping Paste. A reason is
+│       shown only in plain words: one with a path, URL, OS error or code goes
+│       to process.log and the capsule shows none
 │       └── OpenCode refusing Hex's password (HTTP 401/403) -> "OpenCode needs a
 │           password Hex doesn't have", for the look and for a send, and
 │           process.log says where Hex reads it (service.json under this user's
@@ -784,7 +816,8 @@ Where it goes                            // capture.route; capture.routing's aut
 │   serves the ingest port (that process retries); a retried send can't be
 │   undone, so its "Sent to X" has no Undo. A queued or too-late-to-undo send
 │   leaves after the brief hold (4 s) rather than the 25 s done hold; a taken
-│   back capture with nothing to list ('Taken back') does too
+│   back capture with nothing to list ('Taken back', a rule still resolving)
+│   does too
 └── autoSend off -> no look, no route; the capture is only copied
 
 hex capture list|show|send|route         // capture.cli; docs/cli.md
@@ -806,6 +839,34 @@ hex capture status -> recording (bundle, elapsed), bundles still writing, last o
                       (words, audio gaps, or why it has no transcript)
 Hex quits mid-capture -> cancelled, bundle removed; captures still writing stop
 transcribing between chunks and keep their audio (shutdown waits ≤ 2 s)
+
+15 s replay buffer (Labs, macOS 27+)     // capture.replay; labs.annotate_replay
+├── Off by default (`Audience::Everyone`); shown and runnable only when macOS 27's
+│   `SCClipBufferingOutput` and `SCStream`'s clip-buffering selectors exist at
+│   run time (weak Objective-C lookup; older macOS and Linux/Windows neither
+│   link nor offer it). Locked off by `DisableAnnotate` and `DisableLabs`
+├── Off -> no `SCStream`, no worker thread, no display observer, no consent prompt
+├── On (with Annotate on and Scrawl.app not running) -> one worker thread waits
+│   until Screen Recording is already granted (never prompts in the background),
+│   then runs one 15 fps `SCStream` with `SCClipBufferingOutput` on the pointer's
+│   display (≤ 2560 px long edge, cursor hidden, audio off, Hex's `OWN_WINDOWS`
+│   and non-layer-0 overlays excluded unless Show in screen recordings is on)
+│   ├── `replayd` encodes the rolling 15 s H.264 ring out-of-process; macOS keeps
+│   │   the menu-bar screen-recording indicator lit while the stream is active
+│   └── Display plug/unplug (`CGDisplayRegisterReconfigurationCallback`) or a
+│       stopped stream -> reopens on the active display with bounded backoff
+├── `hex capture replay` (`hex annotate replay`) -> exports up to 15 s (`> 15 s`
+│   is rejected by ScreenCaptureKit `-3812`) into `<captures>/<unix ms>.scrawl`
+│   without stopping the buffer, probes and decodes keyframes with `scrawl-helper`,
+│   writes `capture.json` and `scrawl.json` (`missing: "no_audio"`), copies to
+│   the clipboard, and feeds `capture.route`
+└── `capture.replay_hotkey` (unbound by default; recordable in the lab's drawer,
+    Settings › Annotate while the lab is on, or `hex settings set capture.replay_hotkey`)
+    ├── Tap (< 300 ms) -> exports the silent 15 s clip at once, no mic opened
+    └── Hold (≥ 300 ms) -> exports the frozen 15 s clip at the press and records
+        Hex's microphone timeline with "While dictating" until release + tail;
+        narration is shifted onto the bundle clock after the clip (`video_ms..`),
+        transcribed with word timestamps, and anchored onto the final keyframe
 ```
 
 `scrawl.json` is Scrawl's bundle manifest. Its `transcript.words` are
@@ -828,7 +889,9 @@ Sources: [capture_host.rs](../../src/capture_host.rs), the tap in
 [dictation/audio.rs](../../src/dictation/audio.rs),
 `transcribe_with_words` in [parakeet.rs](../../src/parakeet.rs), routing in
 [capture_host/routing.rs](../../src/capture_host/routing.rs), the CLI's reads in
-[capture_host/library.rs](../../src/capture_host/library.rs), the phone finish
+[capture_host/library.rs](../../src/capture_host/library.rs), the 15 s replay
+buffer in [capture_host/replay.rs](../../src/capture_host/replay.rs) and
+[capture_host/replay/sck.rs](../../src/capture_host/replay/sck.rs), the phone finish
 in [phone.rs](../../crates/capture/src/phone.rs), and the `scrawl-capture`
 control commands in [control.rs](../../src/control.rs).
 
@@ -964,7 +1027,7 @@ Checks:
   "Copy values" copies its `DEFAULT`). It reads and writes no Hex data and
   records or sends nothing. The whole flow picks the first suggestion;
   its "Saved rule" toggle plays a rule's send, sent at once, instead.
-  `--snap --scene suggestions|shift|sent-rule|search|picked|rule|recording`
+  `--snap --scene suggestions|shift|sent-rule|search|typed|picked|rule|recording`
   renders it. The tones were checked by waveform and level only, never on
   speakers.
 - Picker, in capture_capsule/picker.rs and tests.rs: geometry, label, and
@@ -981,14 +1044,26 @@ Checks:
   (feature builds only, so no goldens: those run on Linux).
 - Settings: every `capture.*` key in `hex settings`
   (`every_persisted_setting_has_a_cli_key`).
+- Replay, in [capture_host/replay.rs](../../src/capture_host/replay.rs) and
+  [capture_host/replay/sck.rs](../../src/capture_host/replay/sck.rs):
+  `empty_audio_produces_no_wav_and_narrated_audio_shifts_after_video`,
+  `capture_manifest_matches_v1_schema_with_and_without_audio`,
+  `encoded_dimensions_stay_even_and_capped_at_2560`,
+  `replay_shortcut_begins_on_press_finishes_on_release_and_cancels_on_escape`,
+  and `error_completion_block_carries_xpc_signature`.
 
 Observed 2026-10-25 on pro (M2 Max), before the real engine, with the
 stand-in: `HEX_EXPERIMENTS=capture hex dev capture-replay` over three
 vocabulary fixtures (6.5 s) loaded Parakeet unified English on Metal and
-wrote 18 words with plausible times. The real engine has not run end to end:
-the unit tests use a fake engine over Scrawl's real bundle writer, and the
-mini (the test Mac) has no Screen Recording grant for a dev build, so neither
-`hex capture` against a live app nor `capture-replay` has recorded a screen.
-The shortcut, tap input, Escape, switching, routing, the iPhone path, Scrawl
-coexistence, and import are covered by unit tests only; none has run against a
-live Hex.
+wrote 18 words with plausible times. The non-replay `hex capture` engine has
+not run end to end in automated tests (unit tests use a fake engine over
+Scrawl's real bundle writer). Observed 2026-11-04 in a macOS 27.0
+(`26A428`) guest VM on Apple Silicon with Developer ID-signed `Hex Test.app`:
+`labs.annotate_replay` opened a 15 fps `1920×1080` `SCClipBufferingOutput`
+stream, exported 15,000 ms silent and 19,581 ms narrated bundles (13 Parakeet
+words anchored on the final keyframe, cursor hidden, Hex chrome excluded,
+clipboard handoff populated) via `hex capture replay`, an `⌥⇧R` tap, and a
+3.5 s `⌥⇧R` hold, recovered across `CGVirtualDisplay` plug/unplug and
+display sleep/wake, and rejected a 16 s request with
+`SCStreamErrorDomain -3812`. The menu-bar screen-recording indicator stays lit
+for the entire lifetime of the rolling buffer.

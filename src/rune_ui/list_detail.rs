@@ -83,6 +83,82 @@ pub(super) fn group(p: Paint, key: &str, label: &str, first: bool) -> El {
         .pb(6.0)
 }
 
+/// A folded section's chevron, pointing at its label.
+static FOLDED: Icon = Icon {
+    name: "hex-fold-closed",
+    view: 16.0,
+    body: r#"<path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+/// An open section's chevron, pointing down at its content.
+static UNFOLDED: Icon = Icon {
+    name: "hex-fold-open",
+    view: 16.0,
+    body: r#"<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+/// A label that folds what follows it (Labs › Collapsible meeting
+/// sections): a button with a chevron after its text, read as `label` with
+/// its expanded state. The label stays while its content is folded.
+pub(super) fn fold_label(
+    p: Paint,
+    key: &str,
+    label: &str,
+    ink: rune::Color,
+    expanded: bool,
+    toggle: impl Fn(&mut Ui) + 'static,
+) -> El {
+    let c = &p.k.c;
+    row()
+        .key(key)
+        .role("button")
+        .label(label)
+        .expanded(expanded)
+        .focusable(true)
+        .focus_ring(2.0, 0.0, c.border_focus)
+        .gap(2.0)
+        .center_y()
+        .radius(p.k.radius.sm)
+        .hover(c.hover)
+        .press(c.pressed)
+        .on_press(toggle)
+        .child(
+            text(label)
+                .key("label")
+                .font(p.k.ty.small_medium)
+                .color(ink)
+                .a11y_hidden(),
+        )
+        .child(
+            icon(if expanded { &UNFOLDED } else { &FOLDED }, 14.0)
+                .key("chevron")
+                .color(c.icon_faint)
+                .a11y_hidden(),
+        )
+}
+
+/// A [`group`] heading that folds its rows away ([`fold_label`]), on the
+/// same text edge and spacing as [`group`].
+pub(super) fn foldable_group(
+    p: Paint,
+    key: &str,
+    label: &str,
+    first: bool,
+    expanded: bool,
+    toggle: impl Fn(&mut Ui) + 'static,
+) -> El {
+    row()
+        .key(format!("{key}-slot"))
+        .role("none")
+        .px(METRICS.row_px - 4.0)
+        .pt(if first { 0.0 } else { 15.0 })
+        .pb(3.0)
+        .child(
+            fold_label(p, key, label, p.faint(), expanded, toggle)
+                .px(4.0)
+                .py(3.0),
+        )
+}
+
 /// One list row's words: the title over its meta line, and the time (or
 /// another short value) on the right, aligned down the list. `hover` takes
 /// the time's place while the pointer is over the row.
@@ -239,7 +315,36 @@ pub(super) fn meta_text(p: Paint, meta: &str) -> El {
 
 /// The card's scrolling content under its header, clear of the scroll bar.
 pub(super) fn card_scroll(p: Paint, key: &str, content: El) -> El {
-    super::faded_body(p.k, key, content.pr(SCROLL_BAR), LIST_FADE)
+    card_scroll_sticky(p, key, content, false)
+}
+
+/// A [`card_scroll`] that, with `stick_bottom`, follows content added at
+/// its end while scrolled to the bottom.
+pub(super) fn card_scroll_sticky(p: Paint, key: &str, content: El, stick_bottom: bool) -> El {
+    faded_body_sticky(p.k, key, content.pr(SCROLL_BAR), LIST_FADE, stick_bottom)
+}
+
+/// The window's faded scroll body (`super::faded_body`); with
+/// `stick_bottom` it keeps its newest content in view while scrolled to the
+/// bottom (Labs › Follow live transcript).
+pub(super) fn faded_body_sticky(
+    k: &rune_kit::Kit,
+    key: &str,
+    content: El,
+    (top, bottom): (f32, f32),
+    stick_bottom: bool,
+) -> El {
+    // Both shrink below their content in a fixed-height parent (#906).
+    let viewport = col().grow(1.0).shrink().min_h(0.0);
+    let viewport = viewport
+        .clip_fade(0.0, top, 0.0, bottom)
+        .scroll(super::ScrollSpec { stick_bottom })
+        .child(col().key("inset").pt(top).pb(bottom).child(content));
+    let area = format!("{key}-area");
+    rune_kit::scroll_bar(k, &area, key, viewport)
+        .grow(1.0)
+        .shrink()
+        .min_h(0.0)
 }
 
 /// A quiet empty state: an icon, a short title, and at most one line.

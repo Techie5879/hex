@@ -55,6 +55,8 @@ mod profile_sync;
 mod scenes;
 #[cfg(hex_capture)]
 mod scrawl;
+#[cfg(hex_capture)]
+pub(crate) mod screenshot_thumbnail;
 mod settings;
 mod shortcut_mode;
 mod sidebar;
@@ -260,6 +262,8 @@ pub(crate) struct WindowCompositor {
     onboarding: Option<onboarding_kit::gpu_stage::OnboardingGpu>,
     game: Option<onboarding_kit::game_fx::GameFx>,
     sounds: sound_sets::Preview,
+    /// The device whose backend `process.log` names.
+    logged: Option<rune::compose::DeviceKey>,
 }
 
 impl rune::compose::Compositor<Ui> for WindowCompositor {
@@ -269,6 +273,10 @@ impl rune::compose::Compositor<Ui> for WindowCompositor {
     }
 
     fn render(&mut self, f: &mut rune::compose::Frame<'_, Ui>) {
+        if self.logged != Some(f.device_key()) {
+            self.logged = Some(f.device_key());
+            tracing::info!(gpu = %rune::describe_gpu(f.device), "window draws");
+        }
         if f.rt
             .marks
             .iter()
@@ -467,12 +475,18 @@ pub(crate) fn shortcut_rule(
         HotkeySlot::Cancel => ShortcutTarget::Cancel,
         #[cfg(hex_capture)]
         HotkeySlot::Capture => ShortcutTarget::Capture,
+        #[cfg(all(hex_capture, target_os = "macos"))]
+        HotkeySlot::CaptureReplay => ShortcutTarget::CaptureReplay,
+        #[cfg(all(hex_capture, not(target_os = "macos")))]
+        HotkeySlot::CaptureReplay => ShortcutTarget::Capture,
         #[cfg(target_os = "macos")]
         HotkeySlot::SecondDictation => ShortcutTarget::SecondDictation,
-        // Labs › Second dictation shortcut is macOS's; elsewhere a saved one
-        // meets the dictation shortcut's rules.
+        #[cfg(target_os = "macos")]
+        HotkeySlot::Screenshot => ShortcutTarget::Screenshot,
+        // Labs › Second dictation shortcut and Screenshots are macOS's;
+        // elsewhere a saved one meets the dictation shortcut's rules.
         #[cfg(not(target_os = "macos"))]
-        HotkeySlot::SecondDictation => ShortcutTarget::Dictation,
+        HotkeySlot::SecondDictation | HotkeySlot::Screenshot => ShortcutTarget::Dictation,
     };
     host::validate_hotkey(target, binding)
 }
@@ -610,6 +624,8 @@ struct ServiceView {
     transcription: DesktopTranscriptionSnapshot,
     update_status: DesktopUpdateStatus,
     update_notes: Option<crate::desktop::host::UpdateNotes>,
+    /// Why this Hex can't update itself, beside Download update (Windows).
+    update_blocked: Option<&'static str>,
     /// The service is recording or saving a shortcut.
     editing: bool,
 }
@@ -1418,20 +1434,8 @@ fn scroll_body(k: &rune_kit::Kit, key: &str, content: El) -> El {
 
 /// A [`scroll_body`] with its own top and bottom fades, and a scroll bar to
 /// drag while it overflows (#1209).
-fn faded_body(k: &rune_kit::Kit, key: &str, content: El, (top, bottom): (f32, f32)) -> El {
-    // Both shrink below their content in a fixed-height parent (#906).
-    let viewport = col().grow(1.0).shrink().min_h(0.0);
-    let viewport = viewport
-        .clip_fade(0.0, top, 0.0, bottom)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .child(col().key("inset").pt(top).pb(bottom).child(content));
-    let area = format!("{key}-area");
-    rune_kit::scroll_bar(k, &area, key, viewport)
-        .grow(1.0)
-        .shrink()
-        .min_h(0.0)
+fn faded_body(k: &rune_kit::Kit, key: &str, content: El, fades: (f32, f32)) -> El {
+    list_detail::faded_body_sticky(k, key, content, fades, false)
 }
 
 #[cfg(all(test, target_os = "linux"))]

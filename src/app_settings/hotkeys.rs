@@ -710,6 +710,33 @@ impl HotkeyBinding {
         binding
     }
 
+    /// Command-Shift-4, macOS's own area screenshot (Labs › Screenshots):
+    /// the "4" key's ANSI position, as macOS binds it on every layout.
+    pub fn screenshot_default() -> Self {
+        #[cfg(target_os = "macos")]
+        let binding = Self {
+            modifiers: HotkeyModifiers {
+                command: Some(ModifierSide::Either),
+                shift: Some(ModifierSide::Either),
+                ..Default::default()
+            },
+            key: Some(HotkeyKey {
+                code: 21,
+                label: "4".into(),
+            }),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let binding = Self::chord(
+            HotkeyModifiers {
+                control: Some(ModifierSide::Either),
+                shift: Some(ModifierSide::Either),
+                ..Default::default()
+            },
+            "4",
+        );
+        binding
+    }
+
     /// Escape, with no modifier.
     pub fn cancel_default() -> Self {
         #[cfg(target_os = "macos")]
@@ -1073,6 +1100,8 @@ pub struct RuntimeHotkeys {
     pub paste_meeting: Option<RuntimeHotkey>,
     /// The capture shortcut, while captures are on (`cfg(hex_capture)`).
     pub capture: Option<RuntimeHotkey>,
+    /// Labs › Annotate 15 s replay shortcut (macOS 27+), while on and bound.
+    pub capture_replay: Option<RuntimeHotkey>,
     /// Dictate without processing, while it is bound.
     pub raw_dictation: Option<RuntimeHotkey>,
     /// Labs › Second dictation shortcut (macOS), while it is on and bound.
@@ -1084,12 +1113,13 @@ pub struct RuntimeHotkeys {
 
 impl RuntimeHotkeys {
     /// Every shortcut Hex matches, for suppression and chord evidence.
-    pub fn all(self) -> [Option<RuntimeHotkey>; 6] {
+    pub fn all(self) -> [Option<RuntimeHotkey>; 7] {
         [
             Some(self.dictation),
             self.paste_last,
             self.paste_meeting,
             self.capture,
+            self.capture_replay,
             self.raw_dictation,
             self.second_dictation,
         ]
@@ -1104,6 +1134,7 @@ impl Default for RuntimeHotkeys {
             paste_meeting: crate::DEVELOPER_FEATURES_ENABLED
                 .then(|| HotkeyBinding::paste_meeting_default().runtime()),
             capture: None,
+            capture_replay: None,
             raw_dictation: None,
             second_dictation: None,
             cancel: None,
