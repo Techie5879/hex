@@ -295,10 +295,6 @@ impl AxElement {
         self.string(c"AXDescription")
     }
 
-    pub fn value(&self) -> Option<String> {
-        self.string(c"AXValue")
-    }
-
     /// Every child, or a failed poll if the list is incomplete.
     pub fn children(&self, limit: usize) -> Option<Vec<Self>> {
         let children = copy_all_elements(&self.0, c"AXChildren", limit, &self.1);

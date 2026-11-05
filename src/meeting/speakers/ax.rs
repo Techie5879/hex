@@ -16,7 +16,6 @@ pub trait AxNode: Sized + Clone {
     fn dom_id(&self) -> Option<String>;
     fn title(&self) -> Option<String>;
     fn description(&self) -> Option<String>;
-    fn value(&self) -> Option<String>;
     /// Every child, or `None` when the app could not give them all (a failed
     /// request, or more than [`Budget::MAX_CHILDREN`]). Adapters treat that
     /// as an incomplete reading, which never names anyone.
@@ -202,7 +201,6 @@ pub mod fake {
         pub dom_id: Option<String>,
         pub title: Option<String>,
         pub description: Option<String>,
-        pub value: Option<String>,
         pub children: Vec<Node>,
         /// The app fails to list this element's children.
         pub unreadable: bool,
@@ -273,10 +271,6 @@ pub mod fake {
         }
         pub fn description(mut self, description: &str) -> Self {
             self.0.description = Some(description.into());
-            self
-        }
-        pub fn value(mut self, value: &str) -> Self {
-            self.0.value = Some(value.into());
             self
         }
         /// The app can't list this element's children.
@@ -360,9 +354,6 @@ pub mod fake {
         }
         fn description(&self) -> Option<String> {
             self.text(&self.data.description)
-        }
-        fn value(&self) -> Option<String> {
-            self.text(&self.data.value)
         }
         fn children(&self) -> Option<Vec<Self>> {
             if !self.alive.get() {

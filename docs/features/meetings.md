@@ -1510,7 +1510,7 @@ Labs › Meeting speaker names                     // labs.meeting_speaker_names
 ├── speakers.ndjson beside the manifest (owner-only, ≤ 4 MiB, Trash with its meeting)
 │   └── times on the system track's own timeline (capture clock + audio position)
 ├── Transcript lines (in-call, copy-through-now, final, final after a restart)
-│   ├── system audio + one person marked throughout -> that name
+│   ├── system audio + one person marked with sufficient coverage -> that name
 │   ├── anything less -> Them
 │   └── microphone -> You, always
 ├── Off during a recording -> stop reading and storing; lines already named stay named
@@ -1550,19 +1550,29 @@ transient empty speaker name remains uncertain. Conflicting main and compact
 views are uncertain. Two meeting windows, or a compact view of another
 meeting, are no evidence.
 
-Slack (`speakers/slack.rs`): the only `p-huddle_window_content` container,
-in the huddle window or docked in the main window, is the call; Hex looks for
+Slack (`speakers/slack.rs`): the only `p-huddle_window_content` container
+in the pop-out huddle window, expanded or compact, is the call. Hex looks for
 it by role and class only, never entering messages, threads, the composer, or
-search, and reads text only inside participant tiles. A tile
+search, and reads text only inside participant tiles. An `AXCell` tile
 (`p-huddle_peer_tile`, `huddle-grid-gridcell-[self_]…`) holding the exact
-class `p-huddle_peer_tile__overlay--active_speaker` is the speaker, named from
-"View <Name>'s profile" or its name overlay. The user's own tile is silence;
+class `p-huddle_peer_tile__overlay--active_speaker` is named from its English
+"View <Name>'s profile" title or description. Name-overlay buttons contain
+only audio/video state; that text never supplies a name. Non-English profile
+labels remain unsupported. A mic-overlay child, or a name overlay without
+its `--unmuted` modifier, marks a muted tile. The user's own tile is silence;
 an unresolved (`_pending`), muted, or nameless marked tile, or two people, is
-uncertain; two containers are no evidence. The current window list is checked
-again on every poll, including after a huddle has been bound. A manual
-recording names no lines while a competing provider is unresolved. Slack moves
-the mark as a turn, so
-two people talking over each other read as one: that overlap can be misnamed.
+uncertain. Chromium's mirrored `AXColumn` cells are skipped so each grid-row
+tile is read once. Two full containers are no evidence; the current window
+list is checked on every poll. A manual recording names no lines while a
+competing provider is unresolved.
+
+Closing Slack's pop-out leaves the huddle running in its bottom bar, which
+exposes neither a full grid nor reliable speaker names. Hex reports speaker
+names unavailable and leaves those lines as `Them`; open the pop-out again
+to resume naming later lines. It never opens or focuses that window itself.
+This is a layout prerequisite, not verified feature parity with Teams'
+minimized compact view. Slack's mark tracks a dominant turn, so overlapping
+speech can still be misnamed.
 
 Names are hostile input (`speakers/names.rs`): control and Markdown
 characters, `:`, role words, `You`/`Them`, and anonymous `Speaker 2` names are
@@ -1589,7 +1599,7 @@ Pipit and Lipik on macOS); the need for `AXManualAccessibility` and
 Sources: `meeting/speakers.rs`, `meeting/speakers/`, `accessibility.rs`,
 `meeting/transcript.rs` (labelling the rolling and final views), `labs.rs`.
 Checks: `meeting::speakers` (synthetic Teams and Slack trees, including
-docked and detached huddles, self, muted, pending, pinned and selected
+full huddle grids, bottom-bar fallback, self, muted, pending, pinned and selected
 classes, menus, wrong windows, two calls, budgets; timelines with gaps,
 handoffs, lingering marks, window changes, slow readings, clock drift,
 restart, crash tails, hostile files; and names through turns, copies, the
@@ -1603,11 +1613,23 @@ indicator cleared roughly 1–2 s after synthetic speech stopped; the exact
 onset lag against captured audio was not measured. Only one remote tile was
 marked at a time, so this does not establish overlap identification or a
 complete Hex capture/transcribe/insert run. No private captures are repository
-fixtures. Slack 4.53.280 exposed Chromium AX classes in idle UI, but its
-huddle selectors have not been observed locally yet.
-Not verified: native Slack huddle attribution, Teams self-speaking,
+fixtures. A native solo huddle check on Slack 4.53.280 then ran the production
+adapter against all actual Slack windows within its normal budget. Expanded,
+compact, and silently unmuted pop-out views returned `Silent`; complete polls
+took 36–65 ms. It confirmed container and cell IDs, English profile labels,
+the `--unmuted` modifier and mic-overlay mute signal, and mirrored column
+cells. It also exposed the bottom-bar limitation described above. The test
+used a silent virtual input, no invitees, no AI notes, no captions, and no
+user audio; temporary settings were restored and its private solo test
+channel was archived. These observations informed synthetic regressions,
+not copied private AX fixtures. The corrected production adapter was also
+replayed privately against the recorded native trees: silent pop-out views
+remained silent, bottom-bar mode became unavailable, and the start modal
+remained absent. Native strict Clippy and 841 isolated headless checks passed
+on the correction.
+Not verified: Slack's active-speaker class and remote-name attribution with
+a second distinct account, the complete installed-app path, Teams self-speaking,
 non-English or shared-screen layouts, large-call performance, exact audio
-alignment, and the
-`AXEnhancedUserInterface` side effects on Teams. Incorrect mark timing or a
+alignment, and the `AXEnhancedUserInterface` side effects on Teams. Incorrect mark timing or a
 dominant-speaker indicator during overlapping speech can assign the wrong
 name; falling back to `Them` cannot prevent every attribution error.

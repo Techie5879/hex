@@ -35,9 +35,6 @@ impl AxNode for AxElement {
     fn description(&self) -> Option<String> {
         AxElement::description(self)
     }
-    fn value(&self) -> Option<String> {
-        AxElement::value(self)
-    }
     fn children(&self) -> Option<Vec<Self>> {
         AxElement::children(self, Budget::MAX_CHILDREN)
     }
