@@ -42,8 +42,8 @@ strip = true
 # hex/metal-idle-residency), plus per-run Metal command-buffer scheduling
 # for live previews. Drop these patches once a transcribe.cpp release carries them.
 [patch.crates-io]
-transcribe-cpp = { git = "https://github.com/Techie5879/transcribe.cpp", rev = "4d12275f35c4630d5d85158104982835c6326e6b" }
-transcribe-cpp-sys = { git = "https://github.com/Techie5879/transcribe.cpp", rev = "4d12275f35c4630d5d85158104982835c6326e6b" }
+transcribe-cpp = { git = "https://github.com/Techie5879/transcribe.cpp", rev = "25331db7d459d712c751421ae87ef8d9648736f7" }
+transcribe-cpp-sys = { git = "https://github.com/Techie5879/transcribe.cpp", rev = "25331db7d459d712c751421ae87ef8d9648736f7" }
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
