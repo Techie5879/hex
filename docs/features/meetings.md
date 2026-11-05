@@ -707,6 +707,16 @@ Hex quits during Stop & Transcribe's final pass (#1284)
      └── Other failure -> stays Interrupted with the error and its draft
 ```
 
+Observed on macOS 2026-11-05 with Whisper Large v3 Turbo Q8 and Silero:
+two previously captured synthetic speech pairs retained all twelve clauses
+without overlap fragments after the fix. An 85-second real-time run through
+the microphone fixture and Core Audio system playback showed live text,
+published the final transcript 0.587 s after Stop, and retained it after two
+reopens with summaries disabled. First visible words arrived 21.508 s after
+Start, 13.508 s after speech began. One name remained misspelled by the model
+("Maya" as "Myha"). These checks do not establish physical-microphone or Teams
+speech delivery, and segment timestamps remain coarse rather than word-aligned.
+
 Quitting gives its workers 5 s before `_exit`, and the final pass of a long
 meeting can take longer, or load a model once the dictation engine is gone.
 Sources: `record`, `finish_pending` in [meeting.rs](../../src/meeting.rs),
