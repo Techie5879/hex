@@ -767,9 +767,18 @@ speaker playing the tone.
 ### Streaming Finish
 
 Whisper preview scheduling and final-output separation are covered by
-`transcription::engine::preview::tests`. Native timing, model cost, and the
-floating preview on the installed Mac build still require verification.
-
+`transcription::engine::preview::tests`. Native verification on November 5,
+2026 at `886c496e` used Whisper Large v3 Turbo Q8_0 on an M4 Max with
+synthetic microphone audio. In a 41-second capture, the first caption was
+observed at 3.38 seconds, with roughly 1.2-second observation intervals;
+preview decodes took 273–336 ms. The latest words stayed visible without a
+leading ellipsis, the waveform stayed visible, and Stop cleared the caption
+and returned the complete final transcript in 0.901 seconds. Earlier checks
+at `f56ba398` also passed cancel/restart, the Live text switch, and synthetic
+final text processing. No physical microphone, non-English native speech,
+or native Windows/Linux overlay was tested by these checks. RTL, mixed
+stable/tentative text, and both appearances have layout tests and render
+goldens. These short runs do not prove long-duration resource stability.
 
 ```ts
 Model advertises streaming, GPU device             // dictate.streaming

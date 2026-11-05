@@ -1092,8 +1092,10 @@ vocabulary list itself (rewriting and search), and Linux's Terminal paste.
   [rune_hud/hud_placement.rs](../../src/rune_hud/hud_placement.rs).
   The `goldens` test also renders short, long, tentative-only Whisper,
   mixed, and right-to-left text in both appearances. It checks overflow
-  without inserting a leading ellipsis. Native visibility still needs an
-  on-screen check; there is no `--snap` scene for this overlay.
+  without inserting a leading ellipsis. Native English Whisper visibility
+  and lifecycle were checked with synthetic audio on macOS; see the
+  [verification limits](dictation.md#streaming-finish). There is no `--snap`
+  scene for this overlay.
 - Playground: Rune's playground in the window (every OS), `labs.playground`
   (off by default, applied at once). While on, a **Playground** sidebar item,
   ⇧⌘D (View › Playground on macOS), or Ctrl+Shift+D swaps the window for a list of
