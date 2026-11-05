@@ -146,9 +146,11 @@ impl Meeting {
     }
 
     fn participants(&self) -> String {
+        let [microphone, system] = [MeetingSource::Microphone, MeetingSource::System]
+            .map(|source| source.label(self.manifest.mode));
         match self.manifest.app.as_deref() {
-            Some(app) => format!("You, Them ({app})"),
-            None => "You, Them".into(),
+            Some(app) => format!("{microphone}, {system} ({app})"),
+            None => format!("{microphone}, {system}"),
         }
     }
 
@@ -766,8 +768,10 @@ fn load(directory: &Path, id: &str, in_progress: bool) -> Result<Meeting> {
         (source, rolling.entries)
     };
     entries.retain(|entry| !entry.text.trim().is_empty());
-    // Only names a transcript would show leave this module, in text or JSON.
+    // The meeting's stored mode labels every line; only names a transcript
+    // would show leave this module, in text or JSON.
     for entry in &mut entries {
+        entry.mode = manifest.mode;
         entry.speaker = entry.speaker_name().map(str::to_owned);
     }
     entries.sort_by_key(|entry| entry.start_ms);
@@ -1993,7 +1997,9 @@ fn render_transcript(meeting: &Meeting, window: TranscriptWindow, now_ms: u64) -
         format_duration(turns.first().map_or(0, |turn| turn.start_ms)),
         format_duration(shown_end),
         match &window.speaker {
-            Some(SpeakerFilter::Source(source)) => format!(" ({} only)", source.label()),
+            Some(SpeakerFilter::Source(source)) => {
+                format!(" ({} only)", source.label(meeting.manifest.mode))
+            }
             Some(SpeakerFilter::Named(_)) =>
                 format!(" ({} only)", turns.first().map_or("", |turn| turn.label())),
             None => String::new(),

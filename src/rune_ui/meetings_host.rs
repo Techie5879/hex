@@ -217,6 +217,7 @@ fn pane_meeting(meeting: &crate::meeting::query::Meeting, now_ms: u64) -> Meetin
             .map(|notes| notes.summary.clone())
             .filter(|summary| !summary.is_empty()),
         notes_running: crate::meeting::notes_in_progress(&meeting.id),
+        shared_room: manifest.mode == crate::meeting::MeetingMode::SharedRoom,
         has_markdown: manifest
             .export_path
             .as_ref()
@@ -259,6 +260,7 @@ fn turns(entries: &[crate::meeting::TranscriptEntry]) -> Vec<Turn> {
             previous_end = Some(previous_end.map_or(turn.end_ms, |end| end.max(turn.end_ms)));
             Turn {
                 mine: turn.source == crate::meeting::MeetingSource::Microphone,
+                room: turn.mode == crate::meeting::MeetingMode::SharedRoom,
                 speaker: turn.speaker_name().map(str::to_owned),
                 start_ms: turn.start_ms,
                 text: turn.text,
@@ -362,6 +364,7 @@ mod tests {
         // One speaker's two lines join into one turn across the boundary
         // at 06:30; the second line belongs to the chapter after.
         let line = |start_ms: u64, end_ms: u64, text: &str| crate::meeting::TranscriptEntry {
+            mode: Default::default(),
             source: crate::meeting::MeetingSource::Microphone,
             start_ms,
             end_ms,
@@ -397,6 +400,135 @@ mod tests {
         assert!(pane.chapters[1].markdown.contains("That settles the lint."));
         assert!(!pane.chapters[1].markdown.contains("Last thing"));
         assert!(pane.chapters[2].markdown.contains("Last thing"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A shared-room meeting through every reader the pane, the CLI, MCP,
+    /// and Option-Control-V use: source labels, no names, no `You`.
+    #[test]
+    fn a_shared_room_meeting_reads_as_room_mic_and_call_audio_everywhere() {
+        use crate::meeting::{MeetingMode, MeetingSource, TranscriptEntry};
+        let root = std::env::temp_dir().join(format!(
+            "hex-shared-room-readers-{}-{}",
+            std::process::id(),
+            crate::desktop::events::now_ms()
+        ));
+        let id = "1790000000000-77";
+        let directory = root.join(id);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("manifest.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "id": id,
+                "title": "Planning",
+                "status": "complete",
+                "created_at_ms": 1_790_000_000_000_u64,
+                "ended_at_ms": 1_790_000_060_000_u64,
+                "duration_ms": 60_000,
+                "system": {"file": "system.wav", "samples": 0, "dropped_packets": 0},
+                "microphone": {"file": "microphone.wav", "samples": 0, "dropped_packets": 0},
+                "error": null,
+                "app": "Slack",
+                "mode": "shared_room",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let line = |source, start_ms: u64, text: &str, speaker: Option<&str>| TranscriptEntry {
+            source,
+            start_ms,
+            end_ms: start_ms + 2_000,
+            text: text.into(),
+            speaker: speaker.map(str::to_owned),
+            mode: MeetingMode::SharedRoom,
+        };
+        let entries = [
+            line(
+                MeetingSource::Microphone,
+                1_000,
+                "Can someone dim the lights?",
+                None,
+            ),
+            // A name stored for the call account is not who spoke.
+            line(
+                MeetingSource::System,
+                9_000,
+                "The demo is ready.",
+                Some("Ada Lovelace"),
+            ),
+        ];
+        let ndjson = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap() + "\n")
+            .collect::<String>();
+        std::fs::write(directory.join("transcript.ndjson"), ndjson).unwrap();
+        std::fs::write(directory.join("transcript.md"), "# Planning\n").unwrap();
+
+        let library = crate::meeting::query::Library::new(&root);
+        let meeting = library.meeting(id).unwrap();
+        let now_ms = crate::desktop::events::now_ms();
+        let pane = pane_meeting(&meeting, now_ms);
+        assert!(pane.shared_room);
+        let Transcript::Loaded(turns) = &pane.transcript else {
+            panic!("transcript");
+        };
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| (turn.mine, turn.room, turn.speaker.clone()))
+                .collect::<Vec<_>>(),
+            [(true, true, None), (false, true, None)]
+        );
+
+        let list = library
+            .list(
+                &crate::meeting::query::ListQuery {
+                    since: None,
+                    until: None,
+                    query: None,
+                    limit: 20,
+                    include_in_progress: true,
+                },
+                now_ms,
+            )
+            .unwrap();
+        assert!(
+            list.contains("participants: Room mic, Call audio (Slack)"),
+            "{list}"
+        );
+        let markdown = library
+            .markdown(id, crate::meeting::query::OffsetRange::default(), now_ms)
+            .unwrap();
+        assert!(markdown.contains("**Room mic** · 00:01"), "{markdown}");
+        assert!(markdown.contains("**Call audio** · 00:09"), "{markdown}");
+        for hidden in ["**You**", "**Them**", "Ada Lovelace"] {
+            assert!(!markdown.contains(hidden), "{markdown}");
+        }
+        let room_only = library
+            .transcript(
+                &crate::meeting::query::TranscriptQuery {
+                    meeting_id: id.into(),
+                    start: None,
+                    end: None,
+                    speaker: Some("room mic".into()),
+                    max_chars: 20_000,
+                    cursor: None,
+                },
+                now_ms,
+            )
+            .unwrap();
+        assert!(room_only.contains("(Room mic only)"), "{room_only}");
+        assert!(room_only.contains("Room mic: Can someone dim the lights?"));
+        assert!(!room_only.contains("The demo is ready."));
+
+        let mut cursor = crate::meeting::MeetingPasteCursor::default();
+        let pasted = cursor.consume_entries(id, &entries, |_| Ok(())).unwrap();
+        assert_eq!(
+            pasted,
+            "Room mic: Can someone dim the lights?\n\nCall audio: The demo is ready."
+        );
+        assert_eq!(cursor.pending_turn_count(id, &entries), 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -220,11 +220,12 @@ type MeetingShow = {
   chapters?: Chapter[] // only when the meeting has chapters
   chapter?: Chapter // only with --chapter
   entries: { // with a range or chapter, only the entries in it
-    source: "microphone" | "system" // You / Them
+    source: "microphone" | "system" // You / Them, or Room mic / Call audio when mode is "shared_room"
     start_ms: number // relative to the meeting start
     end_ms: number
     text: string
-    speaker?: string // system only: the participant the call app showed speaking (Labs › Meeting speaker names)
+    speaker?: string // system only: the participant the call app showed speaking (Labs › Meeting speaker names); omitted in a shared-room meeting
+    mode?: "shared_room" // the meeting was recorded with Labs › Shared room meetings: microphone = Room mic, system = Call audio
   }[]
 }
 type Chapter = {

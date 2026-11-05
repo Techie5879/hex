@@ -97,6 +97,8 @@ pub struct LabsSettings {
     pub meeting_snapshots: bool,
     /// Name Teams and Slack huddle speakers from the call app (macOS).
     pub meeting_speaker_names: bool,
+    /// New meetings record in shared-room mode: source labels and room speech the call repeats kept once (macOS).
+    pub shared_room_meetings: bool,
     /// The screenshot shortcut takes an area or a window (macOS); its
     /// shortcut and folder are `screenshots.*`.
     pub screenshots: bool,
@@ -162,6 +164,7 @@ impl Default for LabsSettings {
             meeting_platform_icons: false,
             meeting_snapshots: false,
             meeting_speaker_names: false,
+            shared_room_meetings: false,
             screenshots: false,
             follow_live_transcript: false,
             collapsible_meeting_sections: false,

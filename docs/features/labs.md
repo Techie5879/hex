@@ -79,6 +79,12 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        participant the call app marks as speaking, starting with the next recording; You stays You,
 │                                        and lines Hex can't attribute stay Them; see meetings.md#speaker-names
 │                                        // checks: meeting::speakers (synthetic trees and timelines only); not observed on a real call
+├── Shared room meetings no labs.shared_room_meetings (macOS; the saved setting does nothing elsewhere)
+│                                        new recordings label lines Room mic and Call audio instead of You and Them, hide participant
+│                                        names, and keep room speech the call audio repeats word for word once; each meeting keeps the
+│                                        mode it started with; see meetings.md#shared-room-meetings
+│                                        // checks: meeting::transcript::shared_room and readers (invented lines only); not observed
+│                                        // on a real room or call; the mac-labs goldens gain its row
 ├── Meeting platform icons no labs.meeting_platform_icons (every OS with Meetings)
 │                                        each recording in the Meetings list shows its call service's icon (Zoom, Google Meet, Teams, Slack, Webex)
 │                                        before its title, a neutral call icon otherwise (#1290)

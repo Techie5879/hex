@@ -16,6 +16,7 @@ fn line(
     speaker: Option<&str>,
 ) -> TranscriptEntry {
     TranscriptEntry {
+        mode: Default::default(),
         source,
         start_ms,
         end_ms: start_ms + 2_000,

@@ -74,6 +74,10 @@ pub fn clean(raw: &str) -> Option<String> {
 /// A role word alone, or followed only by a number (`Speaker 2`, `Guest 14`).
 fn reserved(name: &str) -> bool {
     let lower = name.to_lowercase();
+    // Shared-room meetings label their sources with these.
+    if matches!(lower.as_str(), "room mic" | "call audio") {
+        return true;
+    }
     let mut words = lower.split(' ');
     let first = words.next().unwrap_or_default();
     RESERVED.contains(&first)
@@ -122,6 +126,8 @@ mod tests {
             "Ada | Them",
             "You",
             "them",
+            "Room mic",
+            "call audio",
             "Speaker 2",
             "Guest 14",
             "Participant",

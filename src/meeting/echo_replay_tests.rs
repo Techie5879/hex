@@ -186,7 +186,7 @@ fn report(
             println!(
                 "  {} {:<4} {}",
                 clock(turn.start_ms),
-                turn.source.label(),
+                turn.label(),
                 turn.text
             );
         }

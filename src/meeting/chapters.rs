@@ -59,7 +59,8 @@ const MAX_TITLE_CHARS: usize = 100;
 
 const INSTRUCTIONS: &str = "You split a meeting in progress into chapters by topic. Each \
 transcript line starts with [mm:ss] and a speaker: You is the person who recorded the meeting, \
-Them is one or more other participants, and any other speaker is a participant's name. Name what \
+Them is one or more other participants. Room mic and Call audio label capture paths, not \
+individual people. Only labels other than these four name a participant. Name what \
 most of the new lines are about in two to \
 five words, judging them on their own, and say what they cover in one short sentence. Then say \
 whether they are still about the current chapter named after them. Small talk, tangents, and follow-up questions on the same subject stay in the \
@@ -67,7 +68,8 @@ current chapter. Use only what the transcript says; never invent names, dates, o
 
 const REFINE_INSTRUCTIONS: &str = "You find where a finished meeting changed topic. Each \
 line starts with an L number, [mm:ss], and a speaker: You is the person who recorded the \
-meeting, Them is one or more other participants, and any other speaker is a participant's name. \
+meeting, Them is one or more other participants. Room mic and Call audio label capture paths, \
+not individual people. Only labels other than these four name a participant. \
 The lines run from the end of the chapter \
 before into the chapter after. List the L number of every line about the chapter after, \
 including the line that introduces it. Use only L numbers shown.";
@@ -374,6 +376,8 @@ pub(super) struct PassWindow {
     /// The first new line's start: where a chapter opened here begins.
     start_ms: u64,
     end_ms: u64,
+    /// What a shared room's labels mean ([`super::label_context`]).
+    context: &'static str,
 }
 
 /// The newest transcript after `covered_ms` that fits in `max_chars`, as
@@ -416,6 +420,7 @@ pub(super) fn pass_window(
         .collect::<Vec<_>>()
         .join("\n");
     Some(PassWindow {
+        context: super::label_context(&fresh),
         text,
         skipped,
         start_ms,
@@ -427,7 +432,7 @@ pub(super) fn pass_window(
 /// current chapter's name, so the model names the new lines before it
 /// compares them.
 pub(super) fn prompt(window: &PassWindow, current: Option<&str>, terms: &[String]) -> String {
-    let mut prompt = vocabulary_line(terms);
+    let mut prompt = format!("{}{}", window.context, vocabulary_line(terms));
     prompt.push_str("New transcript:\n");
     if window.skipped {
         prompt.push_str("[…]\n");
@@ -658,6 +663,7 @@ struct Line {
 struct Section {
     chapter: usize,
     lines: Vec<Line>,
+    context: &'static str,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -721,6 +727,7 @@ fn sections(entries: &[TranscriptEntry], chapters: &[Chapter], max_chars: usize)
             }
             kept.sort_by_key(|line| line.number);
             (!kept.is_empty()).then_some(Section {
+                context: super::label_context(entries),
                 chapter,
                 lines: kept,
             })
@@ -736,7 +743,7 @@ fn refine_prompt(section: &Section, chapters: &[Chapter], terms: &[String]) -> S
             format!("{} ({})", chapter.title, chapter.summary)
         }
     };
-    let mut prompt = vocabulary_line(terms);
+    let mut prompt = format!("{}{}", section.context, vocabulary_line(terms));
     prompt.push_str(&format!(
         "Chapter before: {}\nChapter after: {}\n\nLines:\n",
         describe(&chapters[section.chapter - 1]),

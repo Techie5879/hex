@@ -14,8 +14,7 @@ pub(super) fn table() -> &'static HashMap<&'static str, String> {
     static TABLE: OnceLock<HashMap<&'static str, String>> = OnceLock::new();
     TABLE.get_or_init(|| {
         let simplified = super::column_for_code("zh") as usize;
-        super::TRANSLATIONS
-            .iter()
+        super::meetings::every()
             .map(|(english, translated)| (*english, convert(translated[simplified])))
             .collect()
     })
@@ -226,7 +225,7 @@ mod tests {
     #[test]
     fn every_string_has_a_traditional_translation() {
         let simplified = super::super::column_for_code("zh") as usize;
-        for (english, translated) in super::super::TRANSLATIONS {
+        for (english, translated) in super::super::meetings::every() {
             let traditional = table().get(english).expect("every string converts");
             assert!(!traditional.is_empty(), "{english:?} is empty");
             assert_eq!(

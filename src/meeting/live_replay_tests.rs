@@ -112,7 +112,7 @@ fn compare(reference: &[TranscriptEntry], entries: &[TranscriptEntry]) -> String
         total += count;
         parts.push(format!(
             "{} {:.1}% of {count} through {}s",
-            source.label(),
+            source.label(MeetingMode::Standard),
             wrong as f64 * 100.0 / count.max(1) as f64,
             through / 1_000
         ));
@@ -258,6 +258,7 @@ fn meeting_live_replay() {
         chapters_refined: false,
         retention_applies: false,
         export_sha256: None,
+        mode: MeetingMode::Standard,
     };
     write_manifest(&directory, &manifest).unwrap();
 
@@ -504,7 +505,7 @@ fn meeting_live_replay() {
         let (reference_wrong, _) = word_errors(&reference_words, &pasted_words(source));
         lines.push(format!(
             "Copy new every 60 s + after Stop, {}: {} words pasted, final has {}; vs final {:.1}%, vs reference {:.1}%",
-            source.label(),
+            source.label(MeetingMode::Standard),
             pasted_words(source).len(),
             count,
             wrong as f64 * 100.0 / count.max(1) as f64,
@@ -547,7 +548,11 @@ impl Pipeline {
         receiver: Receiver<AudioPacket>,
         selection: &TranscriptionSelection,
     ) -> Self {
-        let mut rolling = transcript::Rolling::start(directory.to_path_buf(), selection.clone());
+        let mut rolling = transcript::Rolling::start(
+            directory.to_path_buf(),
+            selection.clone(),
+            super::MeetingMode::Standard,
+        );
         let feed = rolling.feed();
         let writer = {
             let directory = directory.to_path_buf();

@@ -1377,6 +1377,17 @@ fn active_and_failed_meetings_show_their_state() {
 }
 
 #[test]
+fn a_stored_shared_room_meeting_uses_source_labels_with_the_global_switch_off() {
+    let rt = runtime("meetings-shared-room", true, PANE_SIZE);
+    assert!(!rt.state.settings.labs.shared_room_meetings);
+    let shown = texts(&rt);
+    assert!(shown.iter().any(|text| text == "Room mic"));
+    assert!(shown.iter().any(|text| text == "Call audio"));
+    assert!(!shown.iter().any(|text| text == "You" || text == "Them"));
+    assert!(rt.find("shared-room").is_some());
+}
+
+#[test]
 fn the_mac_first_run_asks_each_permission_then_practices() {
     let mut rt = runtime("mac-onboarding-permissions", true, PANE_SIZE);
     assert_eq!(rt.state.tour.as_ref().unwrap().flow.step(), Step::Setup);
@@ -1591,6 +1602,7 @@ fn platform_goldens() {
             "meetings-settings",
             "meetings-off",
             "meetings-recording",
+            "meetings-shared-room",
             "mac-settings-permissions-stale",
             "shortcut-mode",
             "shortcut-mode-key",
