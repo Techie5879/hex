@@ -294,8 +294,16 @@ impl TrackTranscript {
         if chunk.overlap > 0 {
             if segmented {
                 let seam = chunk_ms + samples_ms(chunk.overlap) / 2;
-                self.entries.retain(|entry| entry.start_ms < seam);
-                incoming.retain(|entry| entry.start_ms >= seam);
+                self.entries.retain(|entry| {
+                    entry.start_ms < seam
+                        || !incoming.iter().any(|next| {
+                            let old = tokens(&entry.text);
+                            !old.is_empty() && tokens(&next.text).starts_with(&old)
+                        })
+                });
+                // Coarse segment starts may include silence or words from
+                // both sides of this seam. Only text overlap establishes a
+                // duplicate; a start timestamp must not erase a sentence.
             }
             if let (Some(previous), Some(first)) = (self.entries.last(), incoming.first_mut()) {
                 first.text = strip_repeated_prefix(&previous.text, &first.text);
@@ -722,6 +730,20 @@ enum Chunked {
     Unavailable(color_eyre::Report),
 }
 
+/// Keep 200 ms before the first audible frame. This removes long leading
+/// silence which coarse timestamp models otherwise assign to the first words,
+/// without discarding quiet onsets. Restore this offset after inference.
+fn leading_silence_offset(samples: &[f32]) -> usize {
+    let threshold = 10_f32.powf(SILENT_DB / 10.0);
+    samples
+        .chunks(FRAME)
+        .position(|frame| {
+            frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32
+                >= threshold
+        })
+        .map_or(0, |frame| (frame * FRAME).saturating_sub(RATE / 5))
+}
+
 impl ChunkModel {
     pub(super) fn new(selection: TranscriptionSelection) -> Self {
         Self {
@@ -734,6 +756,19 @@ impl ChunkModel {
     /// Fails with the chunk's own transcription error. A chunk without
     /// detected speech returns an empty transcript without the model.
     fn transcribe(&mut self, samples: &[f32]) -> Result<Chunked> {
+        let offset = leading_silence_offset(samples);
+        let mut result = self.transcribe_untrimmed(&samples[offset..])?;
+        if let Chunked::Done(transcript) = &mut result {
+            let offset_ms = samples_ms(offset) as i64;
+            for segment in transcript.segments.iter_mut().chain(&mut transcript.words) {
+                segment.start_ms += offset_ms;
+                segment.end_ms += offset_ms;
+            }
+        }
+        Ok(result)
+    }
+
+    fn transcribe_untrimmed(&mut self, samples: &[f32]) -> Result<Chunked> {
         // Quitting drops the dictation engine; a model loaded now would
         // outlast the drain.
         if crate::desktop::process_exit::quitting() {
@@ -2558,6 +2593,64 @@ mod tests {
             texts,
             [(21_000, "we should ship the beta"), (30_200, "on Friday.")]
         );
+    }
+
+    #[test]
+    fn coarse_segment_crossing_a_seam_keeps_new_sentences_and_negations() {
+        let mut track = TrackTranscript::new(MeetingSource::System, 0);
+        let result = |text: &str, end_ms| Transcript {
+            text: text.into(),
+            segments: vec![TranscriptSegment {
+                start_ms: 0,
+                end_ms,
+                text: text.into(),
+            }],
+            ..Default::default()
+        };
+        track.accept(
+            &Chunk {
+                start: 18 * RATE,
+                overlap: 2 * RATE,
+                tail: 2 * RATE,
+                samples: vec![0.; 12 * RATE],
+            },
+            result(
+                "Keep the original deadline. Assign the review to Morgan.",
+                12000,
+            ),
+        );
+        track.accept(
+            &Chunk {
+                start: 28 * RATE,
+                overlap: 2 * RATE,
+                tail: 0,
+                samples: vec![0.; 12 * RATE],
+            },
+            result(
+                "Assign the review to Morgan. The reference is 42, not 43.",
+                5000,
+            ),
+        );
+        let text = track
+            .entries
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            text,
+            "Keep the original deadline. Assign the review to Morgan. The reference is 42, not 43."
+        );
+    }
+
+    #[test]
+    fn leading_silence_retains_quiet_onsets_and_restorable_offset() {
+        let mut samples = vec![0.; 10 * RATE];
+        samples[8 * RATE..].fill(0.01);
+        assert_eq!(leading_silence_offset(&samples), 8 * RATE - RATE / 5);
+        assert_eq!(leading_silence_offset(&vec![0.; RATE]), 0);
+        samples[..FRAME].fill(0.002);
+        assert_eq!(leading_silence_offset(&samples), 0);
     }
 
     #[test]

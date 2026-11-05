@@ -646,6 +646,10 @@ While recording                                      // meetings.rolling
      ├── No speech detected (Silero, once installed) -> empty transcript, no
      │   inference; coverage still advances
      └── A dictation request or live stream came first -> retried once idle
+  -> Leading level-silent frames are trimmed with 200 ms of context retained;
+     the removed offset is restored to segment and word timestamps
+  -> Segment-only backends preserve text crossing a seam; only confirmed
+     repeated text is removed, never a whole sentence based on its start alone
   -> Timed words joined word by word at a shared word near each overlap's middle
      -> sentences (punctuation or a 600 ms pause)
   -> transcript.rolling.ndjson: per-track coverage line, then entries
