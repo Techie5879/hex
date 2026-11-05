@@ -111,3 +111,30 @@ strobe's selectors are element keys, which the tree exposes as UI Automation
 - The meeting and Annotate capsules and the HUD have no tree test.
 - The onboarding story and practice game are covered only by the
   every-control-has-a-name check, not by a reading-order review.
+
+## Reading other apps on macOS
+
+The foreground-context reader and Smart spacing query other processes through
+`accessibility::external_application`. Hex's own PID is rejected before creating
+an AX application element. Its application name is still available from
+NSWorkspace, but its window title, web page and caret context are omitted.
+This prevents background queries from re-entering Hex's own AccessKit callbacks
+off the main thread, where they race AccessKit's main-thread-only state. Other apps' queries and
+Hex's accessibility support for screen readers are unchanged.
+
+An Apple report from November 5, 2026 identified an AccessKit borrow panic in
+`foreground-context`, followed by an abort across a non-unwinding callback.
+`self_queries_never_create_an_accessibility_application` checks the shared
+creation gate and all four query entry points. Invalid PIDs and unavailable
+external attributes have separate checks. These native tests do not establish
+that every possible third-party accessibility callback is safe.
+
+An isolated macOS harness using the same AccessKit version and unmodified
+query helpers reproduced the reported `focused_web_url` / `AXRole` callback
+panic and abort. It also reproduced crashes with concurrent shared borrows,
+so avoiding only a live mutable borrow would not fix the thread-safety error.
+The guarded helpers passed the same controlled and uncoordinated cases;
+queries to a separate fixture process still returned its metadata. This
+reproduces the failure mechanism, not Hex's complete UI or its real-world
+frequency. The original conflicting operation cannot be recovered from the
+crash report. Evidence was retained privately; no personal reports are in git.
