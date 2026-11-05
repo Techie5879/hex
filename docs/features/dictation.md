@@ -766,6 +766,11 @@ speaker playing the tone.
 
 ### Streaming Finish
 
+Whisper preview scheduling and final-output separation are covered by
+`transcription::engine::preview::tests`. Native timing, model cost, and the
+floating preview on the installed Mac build still require verification.
+
+
 ```ts
 Model advertises streaming, GPU device             // dictate.streaming
   // Metal on macOS, Vulkan on Linux and x64 Windows
@@ -804,6 +809,14 @@ Model advertises streaming, GPU device             // dictate.streaming
   ├── Provisional: never pasted, copied, or kept (the final text replaces it)
   ├── A failed or interrupted stream clears the text while the capture goes on
   └── process.log: `partials` on "finished live stream"; per change at debug (no words)
+  Whisper + Labs Live text -> Rolling preview on the same loaded model
+  ├── After 2 s of audio, decode the latest <= 12 s; wait >= 1 s between decodes
+  ├── One replaceable audio buffer; stale preview work never queues up
+  ├── Words can change with context; all preview words are tentative
+  ├── Turning Live text off stops new preview decodes and hides the line
+  ├── Stop/cancel aborts the preview; no late preview words publish
+  ├── Stop still transcribes the complete recording, then applies normal cleanup
+  └── No second model, cloud request, preview persistence, or early paste
   Picker -> "Streams" tag on catalog models whose artifact streams   // setup.model-card
   Picker -> The saved language's Recommended/Fastest/Most accurate cards first  // setup.model-routing
   ├── el: Cohere; tr, ms, fil, fa, mk, ar, ja, fi, sv, da: Whisper turbo first
