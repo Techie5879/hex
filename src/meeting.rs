@@ -47,6 +47,7 @@ mod entry;
 pub(crate) mod finished_events;
 pub(crate) mod generator;
 pub(crate) mod mcp;
+pub(crate) mod mode;
 mod notes;
 pub mod query;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -198,7 +199,7 @@ pub struct MeetingManifest {
     /// user edited stays.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export_sha256: Option<String>,
-    /// How it was recorded, fixed before capture starts (Labs › Shared room).
+    /// Mode chosen for this recording. Older recordings default to Standard.
     #[serde(default, skip_serializing_if = "MeetingMode::is_standard")]
     pub mode: MeetingMode,
 }
@@ -401,7 +402,7 @@ pub fn record(
         chapters_refined: false,
         retention_applies: true,
         export_sha256: None,
-        mode: MeetingMode::for_new_recording(),
+        mode: MeetingMode::Standard,
     };
     set_title_source(&mut manifest, title_source);
     write_manifest(&meeting_dir, &manifest)?;
@@ -455,6 +456,7 @@ pub fn record(
             cleanup_failed_setup(sender, writer);
             return Err(error);
         }
+        let mut mode_changes = mode::Owner::register(&manifest.id);
         if let Some(updates) = &updates {
             let _ = updates.send(RecordingUpdate::Started {
                 id: manifest.id.clone(),
@@ -489,9 +491,11 @@ pub fn record(
             }
         };
         while !shutdown.load(Ordering::Relaxed) && !writer.is_finished() {
+            mode_changes.poll(&meeting_dir, &mut manifest, &rolling)?;
             take_updates(&mut manifest);
             thread::sleep(Duration::from_millis(100));
         }
+        mode_changes.close();
         if let Some(snapshots) = &snapshots {
             snapshots.request_stop();
         }
@@ -521,8 +525,9 @@ pub fn record(
         // Its last readings are on disk before the final transcript reads them.
         drop(speaker_names);
         if crate::desktop::process_exit::quitting() && has_recorded_audio(&manifest) {
-            // Final transcription would outlast quitting's drain.
             drop(rolling.finish());
+            mode_changes.finish(&meeting_dir, &mut manifest)?;
+            // Final transcription would outlast quitting's drain.
             fs::write(meeting_dir.join(FINAL_PENDING_FILE), b"")?;
             manifest.status = MeetingStatus::Interrupted;
             write_manifest(&meeting_dir, &manifest)?;
@@ -543,6 +548,7 @@ pub fn record(
         )?;
 
         let rolling = rolling.finish();
+        mode_changes.finish(&meeting_dir, &mut manifest)?;
         match transcribe(
             &meeting_dir,
             &mut manifest,

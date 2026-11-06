@@ -225,7 +225,7 @@ type MeetingShow = {
     end_ms: number
     text: string
     speaker?: string // system only: the participant the call app showed speaking (Labs › Meeting speaker names); omitted in a shared-room meeting
-    mode?: "shared_room" // the meeting was recorded with Labs › Shared room meetings: microphone = Room mic, system = Call audio
+    mode?: "shared_room" // Shared room was selected for this meeting while recording: microphone = Room mic, system = Call audio
   }[]
 }
 type Chapter = {

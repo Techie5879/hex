@@ -1,4 +1,4 @@
-//! Labs › Shared room meetings, through the same paths as recordings: echo
+//! Per-meeting shared-room mode, through the same paths as recordings: echo
 //! suppression, the rolling view, and the final pass. Every line here is
 //! invented; none comes from a real meeting.
 
@@ -465,7 +465,7 @@ fn manifest(mode: Option<&str>) -> MeetingManifest {
 }
 
 /// The final pass after a restart, from the rolling tracks and the stored
-/// manifest alone: the Labs switch is never read, and on this OS it is off.
+/// manifest alone: no preference or runtime switch is consulted.
 fn final_pass(manifest: &MeetingManifest) -> (Vec<TranscriptEntry>, u64) {
     let directory = std::env::temp_dir().join(format!(
         "hex-shared-room-final-{}-{}",
@@ -507,9 +507,6 @@ fn final_pass(manifest: &MeetingManifest) -> (Vec<TranscriptEntry>, u64) {
 
 #[test]
 fn the_final_pass_uses_the_mode_stored_with_the_meeting() {
-    if cfg!(not(target_os = "macos")) {
-        assert!(!crate::labs::shared_room_meetings());
-    }
     let (entries, dropped) = final_pass(&manifest(Some("shared_room")));
     assert_eq!(dropped, 1);
     assert_eq!(
@@ -530,4 +527,118 @@ fn the_final_pass_uses_the_mode_stored_with_the_meeting() {
             .all(|entry| entry.mode == MeetingMode::Standard)
     );
     assert!(entries.iter().any(|entry| entry.label() == "Them"));
+}
+
+struct NoInference;
+impl ChunkTranscriber for NoInference {
+    fn transcribe_chunk(&mut self, _: &Chunk) -> Result<Chunked> {
+        panic!("a mode change must reuse the original transcript without inference")
+    }
+}
+
+#[test]
+fn changing_the_live_mode_rebuilds_existing_text_without_resetting_copy_cuts() {
+    let directory = std::env::temp_dir().join(format!(
+        "hex-mode-live-{}-{}",
+        std::process::id(),
+        crate::desktop::events::now_ms()
+    ));
+    fs::create_dir_all(&directory).unwrap();
+    let call = call(10_200, 12_700, "Do not ship the build on Friday afternoon.");
+    let room = room(10_000, 12_500, "Ship the build on Friday afternoon.");
+    let mut worker = RollingWorker::new(&directory, MeetingMode::Standard, NoInference);
+    worker.tracks = [MeetingSource::System, MeetingSource::Microphone].map(|source| {
+        let entries = if source == MeetingSource::System {
+            vec![call.clone()]
+        } else {
+            vec![room.clone()]
+        };
+        Some(RollingTrack {
+            resampler: None,
+            sample_rate: RATE as u32,
+            chunker: Chunker::default(),
+            base: 0,
+            transcript: track(source, 30_000, &entries),
+            fed: RATE * 30,
+            next_position: 0,
+            pending: 0,
+            failed: false,
+        })
+    });
+    worker.cuts = [vec![12_700], vec![12_500]];
+    worker.save_snapshot().unwrap();
+    let read = || -> Vec<TranscriptEntry> {
+        super::super::super::read_ndjson::<RollingLine>(&directory.join(ROLLING_FILE))
+            .unwrap()
+            .into_iter()
+            .collect::<RollingView>()
+            .entries
+    };
+    let original_tracks = worker
+        .tracks
+        .each_ref()
+        .map(|track| track.as_ref().unwrap().transcript.entries.clone());
+    let original_cuts = worker.cuts.clone();
+    let standard = read();
+    assert_eq!(
+        standard.len(),
+        1,
+        "the standard approximate echo rule suppresses the room sentence"
+    );
+    assert_eq!(standard[0].label(), "Them");
+    let mut cursor = crate::meeting::MeetingPasteCursor::default();
+    cursor
+        .consume_entries("synthetic", &standard, |_| Ok(()))
+        .unwrap();
+
+    let (reply, applied) = mpsc::sync_channel(1);
+    worker.change_mode(MeetingMode::SharedRoom, reply);
+    assert_eq!(applied.recv().unwrap(), Ok(()));
+    let shared = read();
+    assert_eq!(
+        shared.len(),
+        2,
+        "shared-room comparison preserves the opposite statement"
+    );
+    assert!(shared.iter().any(|entry| entry.label() == "Room mic"));
+    assert!(shared.iter().any(|entry| entry.label() == "Call audio"));
+    assert_eq!(
+        cursor.pending_turn_count("synthetic", &shared),
+        1,
+        "the already copied call is not pasted again under its new label"
+    );
+    let copied = cursor
+        .consume_entries("synthetic", &shared, |_| Ok(()))
+        .unwrap();
+    assert!(copied.starts_with("Room mic:"));
+    assert!(!copied.contains("Do not"));
+
+    let (reply, applied) = mpsc::sync_channel(1);
+    worker.change_mode(MeetingMode::Standard, reply);
+    assert_eq!(applied.recv().unwrap(), Ok(()));
+    assert_eq!(read(), standard);
+    assert_eq!(cursor.pending_turn_count("synthetic", &read()), 0);
+    assert_eq!(worker.cuts, original_cuts);
+    assert_eq!(
+        worker
+            .tracks
+            .each_ref()
+            .map(|track| track.as_ref().unwrap().transcript.entries.clone()),
+        original_tracks
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn a_live_snapshot_write_failure_keeps_the_previous_worker_mode() {
+    let missing = std::env::temp_dir()
+        .join(format!("hex-missing-mode-{}", std::process::id()))
+        .join("missing");
+    let mut worker = RollingWorker::new(&missing, MeetingMode::Standard, NoInference);
+    worker.microphone_shown_ms = 123;
+    let (reply, applied) = mpsc::sync_channel(1);
+    worker.change_mode(MeetingMode::SharedRoom, reply);
+    assert!(applied.recv().unwrap().is_err());
+    assert_eq!(worker.mode, MeetingMode::Standard);
+    assert_eq!(worker.microphone_shown_ms, 123);
 }

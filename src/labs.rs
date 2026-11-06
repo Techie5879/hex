@@ -115,11 +115,10 @@ pub enum Feature {
     CollapsibleMeetingSections,
     AnnotateReplay,
     MeetingSpeakerNames,
-    SharedRoomMeetings,
 }
 
 impl Feature {
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 56] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -176,7 +175,6 @@ impl Feature {
         Self::CollapsibleMeetingSections,
         Self::AnnotateReplay,
         Self::MeetingSpeakerNames,
-        Self::SharedRoomMeetings,
     ];
 
     /// The features this OS and build have.
@@ -251,7 +249,6 @@ impl Feature {
             | Self::MeetingPlatformIcons
             | Self::MeetingSnapshots
             | Self::MeetingSpeakerNames
-            | Self::SharedRoomMeetings
             | Self::Screenshots
             | Self::FollowLiveTranscript
             | Self::CollapsibleMeetingSections
@@ -294,8 +291,7 @@ impl Feature {
             | Self::StopWhenCallEnds
             | Self::MovableMeetingCapsules
             | Self::MeetingSnapshots
-            | Self::MeetingSpeakerNames
-            | Self::SharedRoomMeetings => cfg!(target_os = "macos"),
+            | Self::MeetingSpeakerNames => cfg!(target_os = "macos"),
             Self::VoiceFilter => cfg!(any(target_os = "macos", target_os = "linux")),
             Self::TerminalPaste | Self::ShareShortcut => cfg!(target_os = "windows"),
             Self::LocalPolish | Self::SaveDictationAudio | Self::ProfileSync => {
@@ -412,7 +408,6 @@ impl Feature {
             Self::MeetingPlatformIcons => "meeting-platform-icons",
             Self::MeetingSnapshots => "meeting-snapshots",
             Self::MeetingSpeakerNames => "meeting-speaker-names",
-            Self::SharedRoomMeetings => "shared-room-meetings",
             Self::Screenshots => "screenshots",
             Self::FollowLiveTranscript => "follow-live-transcript",
             Self::CollapsibleMeetingSections => "collapsible-meeting-sections",
@@ -475,7 +470,6 @@ impl Feature {
             Self::MeetingPlatformIcons => "labs.meeting_platform_icons",
             Self::MeetingSnapshots => "labs.meeting_snapshots",
             Self::MeetingSpeakerNames => "labs.meeting_speaker_names",
-            Self::SharedRoomMeetings => "labs.shared_room_meetings",
             Self::Screenshots => "labs.screenshots",
             Self::FollowLiveTranscript => "labs.follow_live_transcript",
             Self::CollapsibleMeetingSections => "labs.collapsible_meeting_sections",
@@ -621,9 +615,6 @@ impl Feature {
             Self::MeetingSpeakerNames => {
                 "Name the people who speak in Teams calls and Slack huddles, read from the call app while recording, starting with the next recording (macOS)"
             }
-            Self::SharedRoomMeetings => {
-                "For calls where several people share this computer's room: label lines Room mic and Call audio instead of You and Them, and keep room speech the call repeats once, starting with the next recording (macOS)"
-            }
             Self::MeetingPlatformIcons => {
                 "Show a small icon for the app or website each meeting was recorded from, beside its name in Meetings"
             }
@@ -701,7 +692,6 @@ impl Feature {
             Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons,
             Self::MeetingSnapshots => settings.labs.meeting_snapshots,
             Self::MeetingSpeakerNames => settings.labs.meeting_speaker_names,
-            Self::SharedRoomMeetings => settings.labs.shared_room_meetings,
             Self::Screenshots => settings.labs.screenshots,
             Self::FollowLiveTranscript => settings.labs.follow_live_transcript,
             Self::CollapsibleMeetingSections => settings.labs.collapsible_meeting_sections,
@@ -766,7 +756,6 @@ impl Feature {
             &mut labs.meeting_platform_icons,
             &mut labs.meeting_snapshots,
             &mut labs.meeting_speaker_names,
-            &mut labs.shared_room_meetings,
             &mut labs.screenshots,
             &mut labs.follow_live_transcript,
             &mut labs.collapsible_meeting_sections,
@@ -831,7 +820,6 @@ impl Feature {
             Self::MeetingPlatformIcons => settings.labs.meeting_platform_icons = on,
             Self::MeetingSnapshots => settings.labs.meeting_snapshots = on,
             Self::MeetingSpeakerNames => settings.labs.meeting_speaker_names = on,
-            Self::SharedRoomMeetings => settings.labs.shared_room_meetings = on,
             Self::Screenshots => settings.labs.screenshots = on,
             Self::FollowLiveTranscript => settings.labs.follow_live_transcript = on,
             Self::CollapsibleMeetingSections => {
@@ -892,7 +880,6 @@ const PROVIDER_FALLBACK: u64 = 1 << 31;
 const SAVE_DICTATION_AUDIO: u64 = 1 << 32;
 const MEETING_SNAPSHOTS: u64 = 1 << 33;
 const MEETING_SPEAKER_NAMES: u64 = 1 << 36;
-const SHARED_ROOM_MEETINGS: u64 = 1 << 37;
 
 /// Capture is supported only by native macOS Teams. Saved settings travel across OSes.
 pub(crate) fn meeting_snapshots() -> bool {
@@ -903,12 +890,6 @@ pub(crate) fn meeting_snapshots() -> bool {
 /// reader. Checked as a recording starts and before each reading is stored.
 pub(crate) fn meeting_speaker_names() -> bool {
     cfg!(target_os = "macos") && on(MEETING_SPEAKER_NAMES)
-}
-
-/// A meeting starting now records in shared-room mode; read once, as its
-/// manifest is written, and never again for that meeting.
-pub(crate) fn shared_room_meetings() -> bool {
-    cfg!(target_os = "macos") && on(SHARED_ROOM_MEETINGS)
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -1204,11 +1185,6 @@ fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u
             Feature::MeetingSpeakerNames,
             settings.meeting_speaker_names,
             MEETING_SPEAKER_NAMES,
-        ),
-        (
-            Feature::SharedRoomMeetings,
-            settings.shared_room_meetings,
-            SHARED_ROOM_MEETINGS,
         ),
         (Feature::LiveText, settings.live_text, LIVE_TEXT),
         (Feature::LiveChapters, settings.live_chapters, LIVE_CHAPTERS),
@@ -1529,46 +1505,6 @@ mod tests {
             Feature::MeetingSpeakerNames.on_this_os(),
             cfg!(target_os = "macos")
         );
-    }
-
-    #[test]
-    fn shared_room_meetings_are_off_by_default_and_do_not_overlap_other_bits() {
-        let mut labs = LabsSettings::default();
-        assert!(!labs.shared_room_meetings);
-        assert_eq!(encode_where(&labs, |_| true) & SHARED_ROOM_MEETINGS, 0);
-        labs.shared_room_meetings = true;
-        labs.unload_idle_minutes = 1440;
-        let bits = encode_where(&labs, |_| true);
-        assert_eq!(bits & SHARED_ROOM_MEETINGS, SHARED_ROOM_MEETINGS);
-        assert_eq!((bits >> MINUTES_SHIFT) & MINUTES_MASK, 1440);
-        let others = encode_where(
-            &LabsSettings {
-                shared_room_meetings: false,
-                ..all_on()
-            },
-            |_| true,
-        );
-        assert_eq!(others & SHARED_ROOM_MEETINGS, 0);
-        // Saved settings from before the switch existed leave it off.
-        let older: LabsSettings =
-            serde_json::from_str(r#"{"meeting_speaker_names":true}"#).unwrap();
-        assert!(!older.shared_room_meetings);
-        assert_eq!(
-            Feature::for_settings_key("labs.shared_room_meetings"),
-            Some(Feature::SharedRoomMeetings)
-        );
-        assert_eq!(
-            Feature::SharedRoomMeetings.on_this_os(),
-            cfg!(target_os = "macos")
-        );
-    }
-
-    fn all_on() -> LabsSettings {
-        let mut settings = AppSettings::default();
-        for switch in Feature::switches(&mut settings) {
-            *switch = true;
-        }
-        settings.labs
     }
 
     #[test]

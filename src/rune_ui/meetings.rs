@@ -24,6 +24,7 @@ use super::{Menu, Ui};
 use crate::desktop::i18n::{tr, tr_fill, tr_named};
 
 mod folds;
+mod room_mode;
 
 static MORE_ICON: rune::Icon = rune::Icon {
     name: "hex-more",
@@ -53,7 +54,7 @@ impl Status {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Turn {
     pub(super) mine: bool,
-    /// A shared-room meeting's turn (Labs): `Room mic` or `Call audio`.
+    /// A shared-room meeting's turn: `Room mic` or `Call audio`.
     pub(super) room: bool,
     /// The call-audio participant's name (Labs); `Them` without one.
     pub(super) speaker: Option<String>,
@@ -108,7 +109,7 @@ pub(super) struct Meeting {
     /// How long it is kept once finished, as `MeetingRetention::label`;
     /// `None` when it is kept for good.
     pub(super) kept_for: Option<&'static str>,
-    /// Recorded in shared-room mode (Labs).
+    /// The mode saved for this meeting.
     pub(super) shared_room: bool,
 }
 
@@ -182,6 +183,8 @@ pub(super) struct MeetingsPane {
     pub(super) rename: TextEdit,
     pub(super) delete_armed: Option<String>,
     action_error: Option<String>,
+    mode_change: Option<crate::meeting::mode::Change>,
+    mode_error: Option<(String, String)>,
     /// What was last copied, for the button's "Copied".
     copied: Option<(String, String)>,
     pub(super) start_pending: bool,
@@ -421,8 +424,8 @@ impl MeetingsPane {
         }
     }
 
-    /// A stored shared-room meeting still uses its source labels while the
-    /// global switch is off. All content is invented.
+    /// A stored shared-room recording uses its own source labels.
+    /// All content is invented.
     pub(super) fn shared_room_fixture() -> Self {
         let mut pane = Self::fixture();
         let meeting = pane
@@ -1040,6 +1043,7 @@ fn detail(ui: &Ui, p: Paint, meeting: &Meeting, layer: &mut Vec<El>) -> El {
     let errors = [
         pane.action_error
             .as_deref()
+            .or_else(|| room_mode::error(pane, &meeting.id))
             .map(|error| ("action-error", tr("Meeting could not be updated."), error)),
         meeting
             .error
@@ -1098,6 +1102,9 @@ fn detail(ui: &Ui, p: Paint, meeting: &Meeting, layer: &mut Vec<El>) -> El {
     if let Some(snapshots) = super::meeting_snapshots::view(ui, p, meeting) {
         body = body.child(snapshots);
     }
+    if let Some(mode_switch) = room_mode::view(ui, p, meeting) {
+        body = body.child(mode_switch);
+    }
     if !meeting.shared_room
         && let Some(names) = crate::meeting::speakers::active_status(&meeting.id)
     {
@@ -1108,15 +1115,10 @@ fn detail(ui: &Ui, p: Paint, meeting: &Meeting, layer: &mut Vec<El>) -> El {
                 .color(p.faint()),
         );
     }
-    if meeting.shared_room {
-        body = body.child(
-            text(tr("Shared room: Room mic is everyone near this computer and Call audio is the call. Hex doesn't tell the people apart."))
-                .key("shared-room")
-                .font(DESCRIPTION)
-                .color(p.faint())
-                .wrap(),
-        );
+    if let Some(explanation) = room_mode::explanation(p, meeting) {
+        body = body.child(explanation);
     }
+
     if !meeting.chapters.is_empty() {
         body = body.child(chapters(ui, p, meeting, &copied));
     }

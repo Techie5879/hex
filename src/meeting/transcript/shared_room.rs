@@ -1,4 +1,4 @@
-//! Labs › Shared room meetings: the people in the room speak into the
+//! Per-meeting shared-room mode: the people in the room speak into the
 //! microphone directly, and the call (through another computer in the room)
 //! can carry the same speech back as system audio a moment later. The signal
 //! then calls the microphone copy local speech, so echo suppression keeps

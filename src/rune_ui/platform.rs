@@ -553,6 +553,7 @@ impl PlatformState {
 pub(super) enum MeetingRequest {
     Start,
     Stop,
+    SetMode(crate::meeting::mode::Change),
     Rename { id: String, title: String },
     Trash(String),
     Summarize(String),

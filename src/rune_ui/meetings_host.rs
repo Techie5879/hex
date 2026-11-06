@@ -42,6 +42,7 @@ impl LocalMeetings {
             MeetingRequest::Summarize(id) => {
                 crate::meeting::runtime::request(Controller::Summarize(id))
             }
+            MeetingRequest::SetMode(change) => crate::meeting::mode::request(change),
             MeetingRequest::Rename { id, title } => crate::meeting::rename(&id, &title)
                 .map(|_| ())
                 .map_err(failed),

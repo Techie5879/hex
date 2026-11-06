@@ -1377,9 +1377,8 @@ fn active_and_failed_meetings_show_their_state() {
 }
 
 #[test]
-fn a_stored_shared_room_meeting_uses_source_labels_with_the_global_switch_off() {
+fn a_stored_shared_room_meeting_uses_source_labels_without_a_global_switch() {
     let rt = runtime("meetings-shared-room", true, PANE_SIZE);
-    assert!(!rt.state.settings.labs.shared_room_meetings);
     let shown = texts(&rt);
     assert!(shown.iter().any(|text| text == "Room mic"));
     assert!(shown.iter().any(|text| text == "Call audio"));
@@ -2305,4 +2304,84 @@ fn meeting_snapshots_show_only_for_a_session_or_saved_images() {
         rt.find("meeting-snapshots").is_none(),
         "old empty meetings have no snapshot section"
     );
+}
+
+#[test]
+fn shared_room_is_a_recording_action_and_every_new_recording_starts_off() {
+    let mut rt = runtime("meetings-recording", true, PANE_SIZE);
+    assert!(rt.find("meeting-shared-room").is_some());
+    let id = rt.state.meetings.selected.clone().unwrap();
+    assert!(
+        !rt.state
+            .meetings
+            .meetings
+            .iter()
+            .find(|meeting| meeting.id == id)
+            .unwrap()
+            .shared_room
+    );
+    tap(&mut rt, "meeting-shared-room");
+    let changes = asked(&rt);
+    let [PlatformRequest::Meeting(MeetingRequest::SetMode(change))] = changes else {
+        panic!("one mode action expected");
+    };
+    assert_eq!(change.id, id);
+    assert_eq!(change.mode, crate::meeting::MeetingMode::SharedRoom);
+    assert!(texts(&rt).iter().any(|text| text == "Saving meeting mode…"));
+    assert!(
+        !rt.state
+            .meetings
+            .meetings
+            .iter()
+            .find(|meeting| meeting.id == id)
+            .unwrap()
+            .shared_room,
+        "the switch waits for the saved choice"
+    );
+    change.fixture_complete(Err("Synthetic save failure".into()));
+    refresh(&mut rt);
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|text| text == "Synthetic save failure")
+    );
+    assert!(!texts(&rt).iter().any(|text| text == "Saving meeting mode…"));
+    let mut finished = runtime("meetings", true, PANE_SIZE);
+    tap(&mut finished, "meeting-preview-design");
+    assert!(finished.find("meeting-shared-room").is_none());
+}
+
+#[test]
+fn shared_room_can_be_switched_back_for_the_same_active_recording() {
+    let mut rt = runtime("meetings-shared-room", true, PANE_SIZE);
+    let id = rt.state.meetings.selected.clone().unwrap();
+    assert!(
+        rt.state
+            .meetings
+            .meetings
+            .iter()
+            .find(|meeting| meeting.id == id)
+            .unwrap()
+            .shared_room
+    );
+    tap(&mut rt, "meeting-shared-room");
+    let changes = asked(&rt);
+    let [PlatformRequest::Meeting(MeetingRequest::SetMode(change))] = changes else {
+        panic!("one mode action expected");
+    };
+    assert_eq!(change.id, id);
+    assert_eq!(change.mode, crate::meeting::MeetingMode::Standard);
+    change.fixture_complete(Ok(()));
+    // Model the next host scan: the durable manifest now says Standard.
+    rt.update(|ui, _| {
+        ui.meetings
+            .meetings
+            .iter_mut()
+            .find(|meeting| meeting.id == id)
+            .unwrap()
+            .shared_room = false;
+    });
+    refresh(&mut rt);
+    assert!(!texts(&rt).iter().any(|text| text == "Saving meeting mode…"));
+    assert!(rt.find("meeting-shared-room").is_some());
 }

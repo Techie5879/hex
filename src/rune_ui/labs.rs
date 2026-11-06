@@ -524,12 +524,6 @@ fn rows(ui: &Ui) -> Vec<Row> {
             tr("Meeting speaker names"),
             tr("Name who is speaking in Teams calls and Slack huddles, as the call app marks them. Uses Accessibility. Lines Hex can't attribute stay Them. Starts with the next recording."),
         ));
-        rows.push(row(
-            Feature::SharedRoomMeetings,
-            &BOOK,
-            tr("Shared room meetings"),
-            tr("For calls where others in your room speak into this computer's microphone. Lines say Room mic and Call audio instead of You and Them, and room speech the call repeats word for word shows once. Starts with the next recording."),
-        ));
     }
     if caps.meetings {
         rows.push(row(
@@ -607,7 +601,6 @@ fn row_key(feature: Feature) -> &'static str {
         Feature::MeetingPlatformIcons => "lab-meeting-platform-icons",
         Feature::MeetingSnapshots => "lab-meeting-snapshots",
         Feature::MeetingSpeakerNames => "lab-meeting-speaker-names",
-        Feature::SharedRoomMeetings => "lab-shared-room-meetings",
         Feature::GnomeMeetingCapsules => "lab-gnome-meeting-capsules",
         Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
         Feature::NotchIndicator => "lab-notch-indicator",

@@ -1216,7 +1216,8 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
         tx.wake_after(WINDOW_TICK);
     }
     let now = Instant::now();
-    let mut changed = ui.save_drafts(now);
+    let mode_changed = ui.meetings.poll_mode();
+    let mut changed = ui.save_drafts(now) || mode_changed;
     changed |= paste_access::poll(ui);
     changed |= labs::poll_flash(ui, now);
     // The OpenCode catalog is read only while a pane that uses it shows:
