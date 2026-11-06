@@ -15,8 +15,9 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
 
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
-    ("Shared room meetings", "Réunions en salle partagée"),
-    ("For calls where others in your room speak into this computer's microphone. Lines say Room mic and Call audio instead of You and Them, and room speech the call repeats word for word shows once. Starts with the next recording.", "Pour les appels où d’autres personnes de votre salle parlent dans le micro de cet ordinateur. Les lignes indiquent Micro de la salle et Audio de l’appel au lieu de Vous et Eux, et ce qui est dit dans la salle et que l’appel répète mot pour mot n’apparaît qu’une fois. Dès le prochain enregistrement."),
+    ("Shared room", "Salle partagée"),
+    ("Only this recording. Use Room mic and Call audio for people sharing this room.", "Cet enregistrement uniquement. Utilisez Micro de la salle et Audio de l’appel pour les personnes dans cette salle."),
+    ("Saving meeting mode…", "Enregistrement du mode de réunion…"),
     ("Room mic", "Micro de la salle"),
     ("Call audio", "Audio de l’appel"),
     ("Shared room: Room mic is everyone near this computer and Call audio is the call. Hex doesn't tell the people apart.", "Salle partagée : Micro de la salle désigne toutes les personnes près de cet ordinateur et Audio de l’appel l’appel lui-même. Hex ne distingue pas les personnes."),

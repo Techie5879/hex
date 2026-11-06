@@ -9,8 +9,8 @@ use super::speakers;
 
 const TRANSCRIPT_TURN_GAP_MS: u64 = 3_000;
 
-/// How a meeting was recorded, chosen before capture starts and stored in
-/// its manifest, so later setting changes never relabel it. Older manifests
+/// How a meeting is recorded, chosen for the active recording and stored in
+/// its manifest. Every recording starts Standard. Older manifests
 /// and transcript files have none, which reads as `Standard`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -19,7 +19,7 @@ pub enum MeetingMode {
     /// everyone else (`Them`).
     #[default]
     Standard,
-    /// Labs › Shared room meetings: several people share the room and its
+    /// Shared room: several people share the room and its
     /// microphone, and the call may carry the same room again. Lines are
     /// labelled by capture path (`Room mic`, `Call audio`), never as a
     /// person, and room speech the call audio repeats is kept once.
@@ -29,15 +29,6 @@ pub enum MeetingMode {
 impl MeetingMode {
     pub fn is_standard(&self) -> bool {
         *self == Self::Standard
-    }
-
-    /// What Labs › Shared room meetings picks for a recording starting now.
-    pub(super) fn for_new_recording() -> Self {
-        if crate::labs::shared_room_meetings() {
-            Self::SharedRoom
-        } else {
-            Self::Standard
-        }
     }
 }
 

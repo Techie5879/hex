@@ -1532,12 +1532,20 @@ shows each room sentence twice under two wrong names. Hex can't tell the people
 in a room apart; this mode only labels honestly and removes the plain repeats.
 
 ```ts
-Labs › Shared room meetings                       // labs.shared_room_meetings
-├── Off by default; macOS (Meetings' platform); the saved setting does nothing elsewhere
-├── Read once, as a recording's manifest is written, before capture
-│   └── manifest.mode = "shared_room" (absent = standard; older files read as standard)
-├── The mode belongs to the meeting: turning the lab on or off never relabels a
-│   recording in progress, a finished meeting, or a final pass after a restart
+Meetings › active recording › Shared room
+├── Every recording starts off (Standard), including after a shared-room recording
+│   └── The former labs.shared_room_meetings setting is ignored and no longer offered
+├── Only while Recording: switch on or off for this meeting
+│   ├── Pending switch is disabled; errors leave the previous choice and explain the failure
+│   ├── The request carries the exact active meeting ID; stopped or late requests fail
+│   └── Finished, interrupted and transcribing meetings have no editable switch
+├── Recorder owns the durable manifest and queues the live worker's mode change
+│   ├── manifest.mode = "shared_room" (absent = standard; older files remain valid)
+│   ├── Rebuild the existing and future live transcript from original track entries
+│   ├── Save or worker failure restores the old choice; failed restoration stops recording
+│   └── Success is reported after save and live snapshot; no audio is changed
+├── The saved mode belongs only to this meeting, including copies, finalization and recovery
+│   └── Source times and copy/paste cursors stay intact; previously copied text is not repeated
 ├── Each transcript entry carries the meeting's mode (`mode`, written only when shared)
 │   ├── Microphone -> Room mic (everyone near the computer, the recorder included)
 │   ├── System audio -> Call audio (the call, which can carry the room again)
@@ -1576,7 +1584,10 @@ Proof limits. Checks: `meeting::transcript::shared_room` (invented lines through
 polarity context, signed decimals, units, and split qualifications),
 `meeting::entry`, `meeting::tests::a_meeting_keeps_the_mode_it_was_recorded_in`,
 `rune_ui::meetings_host::tests::a_shared_room_meeting_reads_as_room_mic_and_call_audio_everywhere`,
-the notes prompt test, and the Labs bit test, all on Linux. No real room, call,
+the notes prompt test, `meeting::mode::tests` and the active-switch UI tests,
+all on Linux. Mode tests cover legacy global true, on/off persistence, recovery,
+wrong IDs, queued/late requests, save/worker failure and live re-rendering without
+resetting copy cuts. No real room, call,
 or audio was used; the 2 s / 4 s window, the five-word floor, and the filler list
 are estimates for sentence-level timestamps, not measurements. No audio-aligned
 room measurements establish the signal classifier's behavior in this setup.

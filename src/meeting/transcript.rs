@@ -29,7 +29,9 @@ use crate::transcription::models::TranscriptionSelection;
 use crate::transcription::pause_segmenter::PauseSegmenter;
 use crate::transcription::transcript::{Transcript, TranscriptSegment};
 
-use super::echo::{EchoEnvelope, Signal};
+use super::echo::EchoEnvelope;
+#[cfg(any(debug_assertions, test))]
+use super::echo::Signal;
 use super::{
     AudioPacket, MeetingManifest, MeetingMode, MeetingSource, TranscriptEntry, coalesce_transcript,
     format_duration, set_owner_only, sync_directory,
@@ -823,11 +825,16 @@ pub(super) struct Rolling {
     flusher: RollingFlusher,
     incomplete: Arc<[AtomicBool; 2]>,
     worker: JoinHandle<RollingOutcome>,
+    changes: Option<SyncSender<RollingInput>>,
 }
 
 /// What the capture writer sends the rolling worker, in capture order.
 enum RollingInput {
     Audio(AudioPacket),
+    Mode {
+        mode: MeetingMode,
+        reply: SyncSender<std::result::Result<(), String>>,
+    },
     /// Transcribe everything sent before this, for a copy.
     Flush(FlushRequest),
 }
@@ -966,7 +973,8 @@ impl Rolling {
             .spawn(move || run_rolling(&directory, &selection, mode, receiver, &worker_incomplete))
             .expect("meeting transcription thread must start");
         Self {
-            sender: Some(sender),
+            sender: Some(sender.clone()),
+            changes: Some(sender),
             flushes: Some(flushes),
             flusher: RollingFlusher(flusher),
             incomplete,
@@ -987,9 +995,24 @@ impl Rolling {
         self.flusher.clone()
     }
 
+    /// Updates the same worker that owns both tracks and every copy cut.
+    pub(super) fn change_mode(
+        &self,
+        mode: MeetingMode,
+    ) -> Result<Receiver<std::result::Result<(), String>>> {
+        let (reply, updated) = mpsc::sync_channel(1);
+        self.changes
+            .as_ref()
+            .ok_or_else(|| eyre!("The live transcript stopped."))?
+            .try_send(RollingInput::Mode { mode, reply })
+            .map_err(|_| eyre!("The live transcript is busy. Try again."))?;
+        Ok(updated)
+    }
+
     /// Waits for the worker after the capture writer dropped its feed.
     pub(super) fn finish(mut self) -> Option<RollingOutcome> {
         self.sender.take();
+        self.changes.take();
         self.worker.join().ok()
     }
 }
@@ -1098,6 +1121,12 @@ impl<'a, M: ChunkTranscriber> RollingWorker<'a, M> {
     }
 
     fn write_snapshot(&mut self) {
+        if let Err(error) = self.save_snapshot() {
+            tracing::warn!(%error, "could not write rolling meeting transcript");
+        }
+    }
+
+    fn save_snapshot(&mut self) -> Result<()> {
         write_rolling_snapshot(
             self.directory,
             self.mode,
@@ -1105,7 +1134,25 @@ impl<'a, M: ChunkTranscriber> RollingWorker<'a, M> {
             &mut self.microphone_shown_ms,
             &self.envelope,
             self.speakers.refresh(),
-        );
+        )
+    }
+
+    fn change_mode(
+        &mut self,
+        mode: MeetingMode,
+        reply: SyncSender<std::result::Result<(), String>>,
+    ) {
+        let previous = self.mode;
+        let shown_before = self.microphone_shown_ms;
+        self.mode = mode;
+        // Rebuild from the original track entries, never from a previously
+        // deduplicated snapshot. Copy cuts and source timestamps stay intact.
+        let result = self.save_snapshot().map_err(|error| error.to_string());
+        if result.is_err() {
+            self.mode = previous;
+            self.microphone_shown_ms = shown_before;
+        }
+        let _ = reply.send(result);
     }
 
     /// Answers a copy with the transcript through everything received: the
@@ -1233,6 +1280,7 @@ fn run_rolling(
         loop {
             match receiver.try_recv() {
                 Ok(RollingInput::Audio(packet)) => worker.ingest(incomplete, packet),
+                Ok(RollingInput::Mode { mode, reply }) => worker.change_mode(mode, reply),
                 Ok(RollingInput::Flush(request)) => {
                     flush = Some(request);
                     break;
@@ -1263,6 +1311,7 @@ fn run_rolling(
         }
         match receiver.recv_timeout(Duration::from_millis(200)) {
             Ok(RollingInput::Audio(packet)) => worker.ingest(incomplete, packet),
+            Ok(RollingInput::Mode { mode, reply }) => worker.change_mode(mode, reply),
             Ok(RollingInput::Flush(request)) => worker.serve_flush(request),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
@@ -1595,8 +1644,8 @@ fn write_rolling_snapshot(
     microphone_shown_ms: &mut u64,
     envelope: &EchoEnvelope,
     speakers: &super::speakers::Timeline,
-) {
-    let result = (|| -> Result<()> {
+) -> Result<()> {
+    (|| -> Result<()> {
         let [system, microphone] = tracks;
         let transcripts =
             [system, microphone].map(|track| track.as_ref().map(|track| &track.transcript));
@@ -1638,10 +1687,7 @@ fn write_rolling_snapshot(
         file.flush()?;
         fs::rename(&temporary, directory.join(ROLLING_FILE))?;
         Ok(())
-    })();
-    if let Err(error) = result {
-        tracing::warn!(%error, "could not write rolling meeting transcript");
-    }
+    })()
 }
 
 /// What the Meetings pane and every copy read: the final transcript once

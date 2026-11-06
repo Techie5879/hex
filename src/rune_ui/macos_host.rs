@@ -649,6 +649,7 @@ impl MacHost {
             MeetingRequest::Summarize(id) => self
                 .runtime()?
                 .meeting(crate::meeting::MeetingRequest::Summarize(id)),
+            MeetingRequest::SetMode(change) => crate::meeting::mode::request(change),
             MeetingRequest::Rename { id, title } => crate::meeting::rename(&id, &title)
                 .map(|_| ())
                 .map_err(|error| format!("{error:#}")),
