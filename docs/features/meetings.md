@@ -1543,7 +1543,7 @@ Meetings › active recording › Shared room
 │   ├── manifest.mode = "shared_room" (absent = standard; older files remain valid)
 │   ├── Rebuild the existing and future live transcript from original track entries
 │   ├── Save or worker failure restores the old choice; failed restoration stops recording
-│   └── Success is reported after save and live snapshot; no audio is changed
+│   └── Success is reported after save and live snapshot; audio and user renames are preserved
 ├── The saved mode belongs only to this meeting, including copies, finalization and recovery
 │   └── Source times and copy/paste cursors stay intact; previously copied text is not repeated
 ├── Each transcript entry carries the meeting's mode (`mode`, written only when shared)
@@ -1586,7 +1586,7 @@ polarity context, signed decimals, units, and split qualifications),
 `rune_ui::meetings_host::tests::a_shared_room_meeting_reads_as_room_mic_and_call_audio_everywhere`,
 the notes prompt test, `meeting::mode::tests` and the active-switch UI tests,
 all on Linux. Mode tests cover legacy global true, on/off persistence, recovery,
-wrong IDs, queued/late requests, save/worker failure and live re-rendering without
+wrong IDs, queued/late requests, save/worker failure, concurrent user renames and live re-rendering without
 resetting copy cuts. No real room, call,
 or audio was used; the 2 s / 4 s window, the five-word floor, and the filler list
 are estimates for sentence-level timestamps, not measurements. No audio-aligned

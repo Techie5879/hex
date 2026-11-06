@@ -144,6 +144,9 @@ impl Owner {
             change.complete(Err("That meeting is no longer recording.".into()));
             return Ok(());
         }
+        // Renaming uses the existing meeting action host. Preserve a user
+        // title written since the recorder last refreshed its manifest.
+        super::adopt_rename(directory, manifest);
         let previous = manifest.mode;
         let mut saved = manifest.clone();
         saved.mode = change.mode;
@@ -256,6 +259,7 @@ fn rollback(
     change: Change,
     error: String,
 ) -> Result<()> {
+    super::adopt_rename(directory, manifest);
     let mut restored = manifest.clone();
     restored.mode = previous;
     if let Err(rollback) = write_manifest(directory, &restored) {

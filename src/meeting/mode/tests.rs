@@ -136,6 +136,40 @@ fn the_switch_stays_pending_until_the_live_worker_acknowledges() {
 }
 
 #[test]
+fn switching_or_rolling_back_keeps_a_user_rename() {
+    let mut fixture = Fixture::new();
+    let mut renamed = fixture.saved();
+    renamed.title = "Synthetic renamed planning".into();
+    renamed.title_source = Some(super::super::TitleSource::User);
+    write_manifest(&fixture.directory, &renamed).unwrap();
+    fixture.apply(MeetingMode::SharedRoom);
+    assert_eq!(fixture.saved().title, renamed.title);
+
+    let change = fixture.change(MeetingMode::Standard);
+    let (reply, updated) = mpsc::sync_channel(1);
+    fixture
+        .owner
+        .begin(
+            &fixture.directory,
+            &mut fixture.manifest,
+            change.clone(),
+            |_| Ok(updated),
+        )
+        .unwrap();
+    renamed = fixture.saved();
+    renamed.title = "Synthetic latest title".into();
+    write_manifest(&fixture.directory, &renamed).unwrap();
+    reply.send(Err("Synthetic worker failure".into())).unwrap();
+    fixture
+        .owner
+        .finish(&fixture.directory, &mut fixture.manifest)
+        .unwrap();
+    assert!(change.result().unwrap().is_err());
+    assert_eq!(fixture.saved().title, renamed.title);
+    assert_eq!(fixture.saved().mode, MeetingMode::SharedRoom);
+}
+
+#[test]
 fn a_failed_save_does_not_change_memory_or_contact_the_worker() {
     let mut fixture = Fixture::new();
     let change = fixture.change(MeetingMode::SharedRoom);
