@@ -863,6 +863,7 @@ impl Runtime {
                 }
                 .into(),
                 warning: failure,
+                notice: None,
                 shortcuts: DesktopShortcuts::Registered,
                 shortcuts_configurable: false,
             },
