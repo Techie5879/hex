@@ -331,6 +331,7 @@ impl Profiles {
     pub fn process_cancellable(
         &self,
         transcript: &str,
+        language: &str,
         context: &ContextSnapshot,
         cancelled: &AtomicBool,
     ) -> Processed {
@@ -353,12 +354,19 @@ impl Profiles {
             transcript
         };
         // Labs › Remove filler words, likewise ahead of the corrections.
+        // Only English dictations run it: "er" and "um" are ordinary words
+        // in other languages, and "auto" says nothing about the language.
         let unfilled;
-        let transcript = if crate::labs::filler_words() {
-            unfilled = crate::dictation::filler_words::apply(transcript);
-            unfilled.as_str()
-        } else {
-            transcript
+        let transcript = match crate::dictation::filler_words::strip_if(
+            transcript,
+            language,
+            crate::labs::filler_words(),
+        ) {
+            Some(stripped) => {
+                unfilled = stripped;
+                unfilled.as_str()
+            }
+            None => transcript,
         };
         let corrected = profile
             .replacements
@@ -1105,6 +1113,7 @@ mod tests {
 
         let processed = profiles.process_cancellable(
             "Use open code.",
+            "en",
             &context("Zed", None),
             &AtomicBool::new(false),
         );
@@ -1136,6 +1145,7 @@ mod tests {
         let profiles = Profiles::new(Profile::new("default", "Rewrite freely.").ai_enabled(true));
         let processed = profiles.process_cancellable(
             "one two three four five",
+            "en",
             &context("Zed", None),
             &AtomicBool::new(false),
         );

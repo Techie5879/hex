@@ -106,6 +106,8 @@ struct InferenceJob {
     prepare_ms: u128,
     target: TranscriptionTarget,
     context: ContextSnapshot,
+    /// The language the model was asked for at submission.
+    language: String,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
 }
@@ -116,6 +118,7 @@ struct ProcessorJob {
     target: TranscriptionTarget,
     text: String,
     context: ContextSnapshot,
+    language: String,
     timings: JobTimings,
     recording: Option<crate::history::Recording>,
 }
@@ -382,6 +385,7 @@ impl DictationWorker {
             ..JobControl::default()
         });
         let (_, selection) = crate::app_settings::transcription_selection();
+        let language = selection.language.clone();
         let submitted_at = Instant::now();
         let audio_ms = clip.duration_ms();
         let stream = clip.take_stream();
@@ -420,6 +424,7 @@ impl DictationWorker {
             prepare_ms,
             target,
             context,
+            language,
             recording,
         })
         .map(|()| {
@@ -627,7 +632,12 @@ fn process_job_text(
     if profiles.processes(&job.context) {
         processing();
     }
-    profiles.process_cancellable(&job.text, &job.context, &job.control.cancelled)
+    profiles.process_cancellable(
+        &job.text,
+        &job.language,
+        &job.context,
+        &job.control.cancelled,
+    )
 }
 
 /// The longest audio the capture path hands the model at once; longer
@@ -802,6 +812,7 @@ fn run_inference_worker(
                         target,
                         text,
                         context: job.context,
+                        language: job.language,
                         timings,
                         recording: job.recording,
                     })
@@ -1311,6 +1322,7 @@ mod tests {
             target,
             text: "raw instruction".into(),
             context: ContextSnapshot::default(),
+            language: "en".into(),
             timings: JobTimings {
                 total_started: Instant::now(),
                 queue_ms: 0,

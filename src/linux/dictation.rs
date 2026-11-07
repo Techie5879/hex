@@ -30,6 +30,8 @@ const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 struct Job {
     transcript: PendingTranscript,
     audio_ms: u64,
+    /// The language the model was asked for at submission.
+    language: String,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
     /// `hex dictation stop --print`: the text goes here, never pasted.
@@ -221,6 +223,7 @@ impl DictationOutput {
         &self,
         raw_text: String,
         raw: bool,
+        language: &str,
         paster: Option<&mut LinuxPaster>,
         audio_ms: u64,
         inference_ms: u64,
@@ -236,7 +239,7 @@ impl DictationOutput {
         let processed = if raw {
             crate::dictation::processor::Processed::unchanged(raw_text.trim())
         } else {
-            modes.process(&raw_text, &context, &self.transformations)
+            modes.process(&raw_text, language, &context, &self.transformations)
         };
         if processed.text.trim().is_empty() {
             return Err(eyre!("text replacements produced empty output"));
@@ -377,6 +380,7 @@ pub(crate) fn run(
                     return output_settings.deliver(
                         text,
                         job.raw,
+                        &job.language,
                         None,
                         job.audio_ms,
                         inference_ms,
@@ -388,6 +392,7 @@ pub(crate) fn run(
                 output_settings.deliver(
                     text,
                     job.raw,
+                    &job.language,
                     Some(paster),
                     job.audio_ms,
                     inference_ms,
@@ -1126,10 +1131,15 @@ fn submit_capture(
             let audio_ms = clip.duration_ms();
             let stream = clip.take_stream();
             let samples = clip.into_transcription_samples();
+            let language = engine
+                .held_selection()
+                .unwrap_or_else(|| crate::app_settings::transcription_selection().1)
+                .language;
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Job {
                 transcript: engine.finish(stream, samples)?,
                 audio_ms,
+                language,
                 recording,
                 print,
                 raw,
