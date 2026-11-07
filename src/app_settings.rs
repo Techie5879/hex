@@ -26,6 +26,9 @@ mod persistence;
 mod post_processing;
 pub use post_processing::DictationPostProcessing;
 mod screenshots;
+#[cfg(target_os = "linux")]
+pub(crate) use persistence::LaunchLoad;
+pub(crate) use persistence::LaunchNote;
 mod shortcut_repair;
 
 #[cfg(hex_capture)]
