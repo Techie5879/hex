@@ -718,7 +718,7 @@ fn recorder_holds_lock(directory: &Path) -> bool {
             let _ = fs2::FileExt::unlock(&file);
             false
         }
-        Err(error) => super::lock_contended(&error),
+        Err(error) => crate::durable::lock_contended(&error),
     }
 }
 
