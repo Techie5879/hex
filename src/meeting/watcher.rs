@@ -411,6 +411,11 @@ fn handle_command(
             tracing::warn!("ignored a meeting recording request while meetings are off");
         }
         ControllerCommand::Record(candidate) if recording.is_none() => {
+            tracing::info!(
+                source = candidate.source.label(),
+                application = candidate.application.as_deref(),
+                "meeting recording started on request"
+            );
             let start = reminders.start_for(&candidate);
             let origin = Origin::of_record(&candidate);
             start_recording(recording, reminders, start, origin, events, record);
