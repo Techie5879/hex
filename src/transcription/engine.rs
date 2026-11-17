@@ -1297,6 +1297,7 @@ impl Worker {
             return;
         };
         let trailing_silence = stream_trailing_silence(model);
+        let closing_mark = stream_requires_closing_mark(model);
         let ended = model.with_stream(&options, cancel, |stream| {
             let mut capped = PauseCap::new(stream, trailing_silence);
             let ended = drive_stream(
@@ -1335,6 +1336,7 @@ impl Worker {
                     finish_ms = started.elapsed().as_millis(),
                     "finished live stream"
                 );
+                let result = result.and_then(|text| check_closing_mark(text, closing_mark));
                 match result {
                     Ok(text) => job.finish(Ok(Transcribed {
                         text,
