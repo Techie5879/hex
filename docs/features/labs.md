@@ -78,7 +78,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 │                                        names who speaks on the call audio of Teams desktop calls and Slack huddles, read from the
 │                                        participant the call app marks as speaking, starting with the next recording; You stays You,
 │                                        and lines Hex can't attribute stay Them; see meetings.md#speaker-names
-│                                        // checks: meeting::speakers (synthetic trees and timelines only); not observed on a real call
+│                                        // checks: meeting::speakers (synthetic trees and timelines); naming rule replayed on two real Teams calls' stored readings; not observed live, names not checked against who spoke, several-marks, reasons and badge stripping unexercised on a real call
 ├── Meeting platform icons no labs.meeting_platform_icons (every OS with Meetings)
 │                                        each recording in the Meetings list shows its call service's icon (Zoom, Google Meet, Teams, Slack, Webex)
 │                                        before its title, a neutral call icon otherwise (#1290)

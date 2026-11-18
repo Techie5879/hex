@@ -1629,9 +1629,15 @@ Labs › Meeting speaker names                     // labs.meeting_speaker_names
 │   ├── anything left unread (budget, depth 64, a failed child or window list,
 │   │   over 512 children, a tile deeper than 16, a failed attribute request)
 │   │   -> no evidence, never a partial reading
-│   └── verified call -> the one remote participant marked speaking, silence, or uncertain
+│   └── verified call -> the one remote participant marked speaking, the several
+│       marked at once, silence, or uncertain with its reason
 ├── speakers.ndjson beside the manifest (owner-only, ≤ 4 MiB, Trash with its meeting)
-│   └── times on the system track's own timeline (capture clock + audio position)
+│   ├── times on the system track's own timeline (capture clock + audio position)
+│   └── uncertain readings keep why: loose_mark, label, muted, pending, conflicting,
+│       slow, no_call, call_unknown, permission (diagnosis only; naming ignores it)
+├── process.log at the end of each recording -> "meeting speaker readings" with a
+│   count per kind (speaking, several, silent, each reason), no names, including
+│   readings before a call was found
 ├── Transcript lines (in-call, copy-through-now, final, final after a restart)
 │   ├── system audio + one person marked with sufficient coverage -> that name
 │   ├── anything less -> Them
@@ -1648,9 +1654,19 @@ browsers; Teams then builds its full web tree until it quits. It never reads
 Hex's own process.
 
 What names a line (`speakers/timeline.rs`): readings at most 1.5 s apart, the
-same call window or huddle region throughout, no uncertain reading, and one
-name marked for at least 60 % of the line after allowing 500 ms for the mark
-to follow the voice and trimming up to 400 ms at each end. A line shorter than
+same call window or huddle region throughout, and the person marked alone
+longest marked alone for at least half the line and at least 60 % of its
+readable time, after allowing 500 ms for the mark to follow the voice and
+trimming up to 400 ms at each end. Uncertain readings, and readings marking
+several people that include that person, say nothing either way and aren't
+readable time; anyone else marked, alone or several without them, counts
+against them. A reading marking several people never names anyone by itself:
+an open microphone lights its tile beside whoever is talking. Uncertain
+readings, and anyone else marked, vetoed the whole line until 2026-11-18; in
+two real Teams calls with four or five remote participants, readings flickered
+to uncertain while one person talked, and only 18 of 169 and 63 of 176
+call-audio lines were named. The same stored readings name 65 and 93 under
+this rule; whether those names are right was not checked against the audio. A line shorter than
 a mark lingers (1.5 s) is named only if its mark began during it or outlasts
 it, so a mark left over from the previous speaker can't name a hidden one.
 Readings never vouch for more than one poll past themselves, a reading that
@@ -1688,12 +1704,17 @@ the compact view, "Meeting compact view | …") is the call; its gallery tile
 (`AXMenuItem`) holding the `vdi-frame-occlusion` frame is the speaker, named
 from the tile label read from its end ("<Name>, muted, Context menu is
 available"), or the compact view's "<Name> is speaking". The user's own tile
-("Myself video, …", "(You)") is silence; a muted marked tile, two marks, a
-mark outside a tile, a label with an unknown part, or a non-English label is
-uncertain. Pinning is a recognized tile state; it never counts as a speaking
+("Myself video, …", "(You)") is silence; two marks are several people; a
+muted marked tile, a mark outside a tile, a label with an unknown part, or a
+non-English label is uncertain. Teams' badges after a name (`External`,
+`Unfamiliar`, `Unverified`, `(Guest)`, `(Organizer)`, in any letter case) are
+not part of it, after any spacing or invisible marks: "Ana Ruiz External
+Unfamiliar" is Ana Ruiz. Names already stored keep their badges. Pinning is a recognized tile state; it never counts as a speaking
 signal on its own. Compact view's exact "Nobody is speaking" is silence; its
-transient empty speaker name remains uncertain. Conflicting main and compact
-views are uncertain. Two meeting windows, or a compact view of another
+transient empty speaker name remains uncertain. Main and compact views
+narrow each other down (the gallery marking Ana and Ben while the compact
+view names Ana is Ana); views marking nobody in common are uncertain
+(conflicting). Two meeting windows, or a compact view of another
 meeting, are no evidence.
 
 Slack (`speakers/slack.rs`): the only `p-huddle_window_content` container
@@ -1706,8 +1727,8 @@ class `p-huddle_peer_tile__overlay--active_speaker` is named from its English
 only audio/video state; that text never supplies a name. Non-English profile
 labels remain unsupported. A mic-overlay child, or a name overlay without
 its `--unmuted` modifier, marks a muted tile. The user's own tile is silence;
-an unresolved (`_pending`), muted, or nameless marked tile, or two people, is
-uncertain. Chromium's mirrored `AXColumn` cells are skipped so each grid-row
+two people marked are several; an unresolved (`_pending`), muted, or nameless
+marked tile is uncertain. Chromium's mirrored `AXColumn` cells are skipped so each grid-row
 tile is read once. Two full containers are no evidence; the current window
 list is checked on every poll. A manual recording names no lines while a
 competing provider is unresolved.

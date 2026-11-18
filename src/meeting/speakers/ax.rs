@@ -4,6 +4,8 @@
 
 use std::time::{Duration, Instant};
 
+pub use super::timeline::Doubt;
+
 /// One element. Each method is one bounded request to the other app; the
 /// adapters ask for text only inside a call they have already verified.
 pub trait AxNode: Sized + Clone {
@@ -121,11 +123,13 @@ impl Budget {
 pub enum Reading {
     /// Exactly one remote participant, by a valid name, marked as speaking.
     Speaking(String),
+    /// Several remote participants, all by valid names, marked at once
+    /// (sorted, no repeats). Whoever speaks a line is one of them.
+    Several(Vec<String>),
     /// The call shows participants and none other than the user is marked.
     Silent,
-    /// The call is there but its marks can't be trusted: two people marked,
-    /// a marked participant without a readable name, a muted one marked.
-    Uncertain,
+    /// The call is there but its marks can't be trusted, and why.
+    Uncertain(Doubt),
 }
 
 /// The call an adapter found, `region` being what identifies it from one

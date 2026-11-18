@@ -60,8 +60,8 @@ pub struct TranscriptEntry {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
-    /// The participant the call app showed speaking throughout a system-audio
-    /// entry (Labs › Meeting speaker names); absent means `Them`.
+    /// The participant the call app showed speaking for most of a
+    /// system-audio entry (Labs › Meeting speaker names); absent means `Them`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speaker: Option<String>,
     /// The meeting's mode, copied from its manifest when the entry is joined.
