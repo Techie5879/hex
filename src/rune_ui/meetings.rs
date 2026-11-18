@@ -1290,6 +1290,8 @@ mod tests {
     fn an_imported_meeting_labels_its_one_track_speaker() {
         let turn = |mine| Turn {
             mine,
+            room: false,
+            speaker: None,
             start_ms: 1_000,
             text: "Hi.".into(),
             pause_before_ms: None,

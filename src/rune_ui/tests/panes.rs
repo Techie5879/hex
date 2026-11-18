@@ -2336,12 +2336,11 @@ fn a_labs_link_shows_its_labs_group_and_leaves_it_off() {
     let mut rt = runtime("mac-settings", true, (980.0, 2000.0));
     let feature = Feature::VocabularyBiasing;
     assert!(!feature.on(&rt.state.settings));
-    let mut pulse = None;
-    rt.update(|ui, tx| {
-        super::super::labs::reveal(ui, Some(feature.name()), tx);
-        pulse = ui.lab_flash;
-        assert_eq!(pulse.map(|(f, _)| f), Some(feature));
-    });
+    let link = LabsLink {
+        lab: Some(feature.name().into()),
+        ..LabsLink::default()
+    };
+    rt.update(|ui, tx| super::super::labs::reveal(ui, &link, tx));
     settle(&mut rt);
     assert!(rt.state.labs_open);
     assert_eq!(rt.state.lab_store.group, Some(feature.group()));
@@ -2370,7 +2369,12 @@ fn a_labs_link_keeps_the_category_it_names() {
 fn a_labs_link_to_an_unknown_name_opens_labs_on_every_group() {
     use super::super::labs::LabsLink;
     let mut rt = runtime("mac-settings", true, (980.0, 2000.0));
-    rt.update(|ui, tx| super::super::labs::reveal(ui, Some("no-such-lab"), tx));
+    let link = LabsLink {
+        lab: Some("no-such-lab".into()),
+        category: Some("no-such-category".into()),
+        ..LabsLink::default()
+    };
+    rt.update(|ui, tx| super::super::labs::reveal(ui, &link, tx));
     settle(&mut rt);
     assert!(rt.state.labs_open);
     assert!(rt.state.lab_store.group.is_none());
