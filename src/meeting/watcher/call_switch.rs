@@ -48,9 +48,9 @@ pub(super) fn disarm_call_stop_unless_watching(
 
 /// Whether a recording watches its browser's page for another call (Stop
 /// when the call ends) instead of dropping the page while it records:
-/// only one Hex started on its own, for a call whose page named its code, in
-/// a browser, and that has not been told to stop yet. Every other recording
-/// keeps the browser watch reset.
+/// only one Hex started on its own or from an accepted offer, for a call
+/// whose page named its code, in a browser, and that has not been told to
+/// stop yet. Every other recording keeps the browser watch reset.
 pub(super) fn watching_call_switch(recording: Option<&ActiveRecording>, lab_on: bool) -> bool {
     recording.is_some_and(|active| {
         !active.stop.load(Ordering::Relaxed)

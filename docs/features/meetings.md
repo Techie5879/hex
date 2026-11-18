@@ -2286,7 +2286,8 @@ Labs › Meeting snapshots                         // meetings.snapshots
 │   └── Bound Teams window changes -> record a gap; start a new recording to bind it again
 ├── On during recording -> wait until the next recording
 ├── Pause / resume in the meeting detail -> control new snapshots, including during permission/errors
-├── Recording capsule -> the same live snapshot status, refreshed by its background ticker
+├── Recording capsule -> only statuses that need the person (Screen Recording permission,
+│   storage limit, failed, Teams window changed), refreshed by its background ticker
 ├── Off -> stop new snapshot writes; keep saved images browsable
 └── Meeting detail -> status, thumbnails, timestamps, Show image, Delete image
     ├── A saved gap note marks pauses, interruptions, and capture limits

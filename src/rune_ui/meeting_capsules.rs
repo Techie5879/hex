@@ -1446,6 +1446,42 @@ fn pill_body(p: Paint, dot: El, title: &str, subtitle: &str) -> El {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_snapshot_states_that_need_the_person_show_on_the_recording_pill() {
+        use meeting::snapshots::Status;
+        let shown = |snapshots| super::Recording {
+            id: "snapshot-fixture".into(),
+            title: "Teams test".into(),
+            started: std::time::Instant::now(),
+            automatic: false,
+            warning: None,
+            snapshots: Some(snapshots),
+        };
+        for status in [
+            Status::PermissionRequired,
+            Status::LimitReached,
+            Status::Failed,
+            Status::WindowChanged,
+        ] {
+            assert!(
+                super::panel::recording_notice(&shown(status)).is_some(),
+                "{status:?}"
+            );
+        }
+        for status in [
+            Status::Off,
+            Status::Waiting,
+            Status::Capturing,
+            Status::Paused,
+            Status::Complete,
+        ] {
+            assert!(
+                super::panel::recording_notice(&shown(status)).is_none(),
+                "{status:?}"
+            );
+        }
+    }
+
     use std::sync::mpsc::{self, Receiver};
 
     use rune::text::TextSystem;

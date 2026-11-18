@@ -48,7 +48,10 @@ pub(super) fn recording_notice(shown: &Recording) -> Option<Notice> {
             .filter(|status| {
                 matches!(
                     status,
-                    Status::PermissionRequired | Status::LimitReached | Status::Failed
+                    Status::PermissionRequired
+                        | Status::LimitReached
+                        | Status::Failed
+                        | Status::WindowChanged
                 )
             })
             .map(Notice::Snapshot)

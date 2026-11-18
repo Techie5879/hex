@@ -116,7 +116,7 @@ jobs:
       channel: ${{ needs.plan.outputs.release-channel }}
 
   # ---- Full test suites: check and stable only; repository code, no secrets ---
-  # Pull requests only compile and dev pushes run no checks (CI is minimal),
+  # This fork starts compile checks and releases only by explicit dispatch,
   # so the candidate's full suites run here. A stable run publishes nothing
   # until all three pass.
 
