@@ -3719,6 +3719,3 @@ The fork also applies it to accepted call offers. Its old
 Shared room remains a switch on the active meeting. Its manifest key is
 `mode`, and every new recording starts in Standard mode. The retired global
 `labs.shared_room_meetings` value stays ignored.
-
-The [merge record](../upstream-sync-20261118.md) lists dependency pins,
-resolution decisions, validation, and the Linux golden placeholders.
