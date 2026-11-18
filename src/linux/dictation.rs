@@ -1,7 +1,7 @@
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -9,14 +9,15 @@ use color_eyre::Result;
 use color_eyre::eyre::eyre;
 
 use crate::app_settings::AppSettings;
+use crate::audio::linger::MicrophoneLinger;
 use crate::audio::{CaptureInstant, RecoveringAudioInput, RecoveringAudioInputEvent};
 use crate::control::{PrintReply, PrintedTranscript};
 use crate::desktop::events::{
     DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms,
 };
 use crate::desktop::host::DesktopShortcuts;
-use crate::dictation::service::{DictationControl, Effect, MICROPHONE_LOST, ServiceDictations};
-use crate::dictation::{DictationCapture, Finish, ReleaseWait};
+use crate::dictation::service::{DictationQueue, Effect, MICROPHONE_LOST, ServiceDictations};
+use crate::dictation::{DictationCapture, Finish, POST_RELEASE_TAIL, ReleaseWait};
 use crate::feedback::{self, Tone};
 use crate::linux::input::{
     CommandQueue, HotkeyEvent, HotkeyOptions, HotkeyStatus, LinuxHotkey, LinuxHotkeyMonitor,
@@ -28,8 +29,21 @@ use crate::transcription::local_transcriber::LocalTranscriber;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 
+mod gap;
+mod output;
+mod shortcuts;
+mod silence;
+mod typing;
+
+use gap::{ChunkStep, StreamClock, chunk_step};
+pub(crate) use output::DictationOutput;
+use shortcuts::{reregister, shortcuts};
+use silence::reopen_silent_stream;
+use typing::CaptureTyping;
+
 struct Job {
     transcript: PendingTranscript,
+    context: crate::linux::context::PendingContext,
     audio_ms: u64,
     /// The language the model was asked for at submission.
     language: String,
@@ -37,14 +51,27 @@ struct Job {
     recording: Option<crate::history::Recording>,
     /// `hex dictation stop --print`: the text goes here, never pasted.
     print: Option<PrintReply>,
-    /// Dictate without processing: paste the transcript as heard.
-    raw: bool,
+    /// The shortcut that started this capture: dictation, Dictate without
+    /// processing, or Labs › Terminal paste.
+    flavour: crate::dictation::DictationFlavour,
+    /// Labs › Live typing: the capture's input-method session, so its final
+    /// text is committed instead of pasted. Dropping an unfinished job
+    /// cancels it.
+    typing: Option<crate::linux::live_typing::Session>,
+    /// A physical dictation shortcut, not a control or API request.
+    by_shortcut: bool,
+    /// Labs › Stop phrase: the words its capture ended with, read when the
+    /// phrase was heard and removed from the transcript before processing.
+    stop_phrase: Option<String>,
 }
 
 enum OutputJob {
-    Dictation(Job),
+    Dictation(Box<Job>),
     /// Pastes the newest completed dictation again.
     PasteLast,
+    /// Runs the focused field's text through its Output steps and replaces
+    /// it (Labs › Transform typed text).
+    TypedText,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -53,50 +80,30 @@ enum OutputKind {
     /// A dictation printed by `hex dictation stop --print`.
     Printed,
     PasteLast,
+    TypedText,
+}
+
+/// One finished output job. An empty result is either a voice prompt that
+/// asked nothing or a capture that was only the stop phrase, and the two read
+/// differently in Activity.
+struct OutputResult {
+    kind: OutputKind,
+    result: Result<String, String>,
+    /// Labs › Stop phrase took every word the capture heard.
+    stop_phrase_only: bool,
 }
 
 /// A release whose capture is still collecting its post-release tail.
 struct Finishing {
     release: ReleaseWait,
+    context: crate::linux::context::PendingContext,
     print: Option<PrintReply>,
-    raw: bool,
+    flavour: crate::dictation::DictationFlavour,
+    /// A shortcut, not a `hex dictation` command, started the capture.
+    by_shortcut: bool,
     released: Instant,
-}
-
-/// Where the microphone stream's clock stands between chunks: the newest
-/// chunk's end plus the time since it arrived. PipeWire and ALSA can deliver
-/// large chunks (#1309), so the newest audio may trail a press by most of
-/// one; shortcut presses and releases are placed here instead.
-#[derive(Default)]
-struct StreamClock {
-    newest: Option<(CaptureInstant, Instant)>,
-}
-
-impl StreamClock {
-    /// A stalled stream's lag is not counted past this.
-    const MAX_LAG: Duration = Duration::from_secs(2);
-
-    fn chunk(&mut self, captured_through: CaptureInstant, received: Instant) {
-        self.newest = Some((captured_through, received));
-    }
-
-    /// A replaced or reopened stream keeps its own clock: nothing of the old
-    /// one carries over.
-    fn reset(&mut self) {
-        self.newest = None;
-    }
-
-    /// The end of the newest chunk.
-    fn through(&self) -> CaptureInstant {
-        self.newest
-            .map_or(CaptureInstant::ZERO, |(through, _)| through)
-    }
-
-    /// The stream time at `now`; `None` before this stream's first chunk.
-    fn at(&self, now: Instant) -> Option<CaptureInstant> {
-        let (through, received) = self.newest?;
-        Some(through + now.saturating_duration_since(received).min(Self::MAX_LAG))
-    }
+    /// Labs › Stop phrase: the words that ended this capture, when they did.
+    stop_phrase: Option<String>,
 }
 
 struct OutputWorker {
@@ -113,35 +120,6 @@ impl Drop for OutputWorker {
     }
 }
 
-/// The local API's `/dictations` controls. The host keeps one queue for
-/// whichever listener runs; while none does, a control goes unanswered and
-/// the API answers `service-capture-unavailable`.
-#[derive(Clone)]
-pub(crate) struct DictationQueue(Arc<Mutex<mpsc::Receiver<DictationControl>>>);
-
-impl From<mpsc::Receiver<DictationControl>> for DictationQueue {
-    fn from(receiver: mpsc::Receiver<DictationControl>) -> Self {
-        Self(Arc::new(Mutex::new(receiver)))
-    }
-}
-
-/// A queue nothing sends to: a listener without the local API.
-impl Default for DictationQueue {
-    fn default() -> Self {
-        mpsc::sync_channel(0).1.into()
-    }
-}
-
-impl DictationQueue {
-    fn drain(&self) -> Vec<DictationControl> {
-        self.0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .try_iter()
-            .collect()
-    }
-}
-
 /// What the host hands a running listener. Settings apply in place while no
 /// dictation records, so changing one never stops listening.
 pub(crate) enum ListenerUpdate {
@@ -155,32 +133,6 @@ pub(crate) enum ListenerUpdate {
     SuspendShortcuts(bool),
 }
 
-/// The shortcuts a listener registers for `settings`.
-fn shortcuts(settings: &AppSettings) -> (LinuxHotkey, HotkeyOptions) {
-    let options = HotkeyOptions {
-        double_tap: settings.double_tap_lock,
-        // Double-tap-only needs the double-tap window and a non-modifier key.
-        double_tap_only: settings.double_tap_lock
-            && settings.double_tap_only
-            && settings.dictation_hotkey.key.is_some(),
-        toggle: settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle,
-        // Labs › Tap or hold, off by default; it acts only in Toggle mode.
-        tap_or_hold: settings.shortcut_mode == crate::dictation::ShortcutMode::Toggle
-            && crate::labs::Feature::TapOrHold.on(settings),
-        paste_last: settings.paste_last_hotkey.as_ref().map(LinuxHotkey::from),
-        raw_dictation: settings
-            .raw_dictation_hotkey
-            .as_ref()
-            .map(LinuxHotkey::from),
-        capture: settings
-            .capture
-            .enabled
-            .then(|| LinuxHotkey::from(&settings.capture.hotkey)),
-        cancel: settings.active_cancel_hotkey().map(LinuxHotkey::from),
-    };
-    (LinuxHotkey::from(&settings.dictation_hotkey), options)
-}
-
 /// Opens `--device`, else the microphone `settings` select, else the system
 /// default, or keeps it released until a dictation starts.
 fn microphone_input(settings: &AppSettings, device: Option<&str>) -> RecoveringAudioInput {
@@ -189,86 +141,6 @@ fn microphone_input(settings: &AppSettings, device: Option<&str>) -> RecoveringA
         RecoveringAudioInput::closed(device, 0, microphone)
     } else {
         RecoveringAudioInput::open(device, 0, microphone)
-    }
-}
-
-/// What happens to a transcript before and after it is pasted: the modes
-/// that process it and the history that keeps it. The host shares it
-/// with the listener so saved settings apply without a restart.
-#[derive(Clone)]
-pub(crate) struct DictationOutput {
-    pub(crate) history: Option<crate::history::History>,
-    pub(crate) modes: Arc<RwLock<crate::dictation::modes::ModeRuntime>>,
-    pub(crate) transformations: Arc<crate::personal_commands::TransformationClient>,
-}
-
-impl DictationOutput {
-    pub(crate) fn from_settings(
-        settings: &crate::app_settings::AppSettings,
-        history: Option<crate::history::History>,
-    ) -> Self {
-        Self {
-            history,
-            modes: Arc::new(RwLock::new(
-                crate::dictation::modes::ModeRuntime::from_settings(settings),
-            )),
-            transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
-        }
-    }
-
-    /// Processes (unless `raw`) and pastes one transcript, or only
-    /// processes it when there is no paster (a printing stop), then records
-    /// it.
-    #[allow(clippy::too_many_arguments)]
-    fn deliver(
-        &self,
-        raw_text: String,
-        raw: bool,
-        language: &str,
-        paster: Option<&mut LinuxPaster>,
-        audio_ms: u64,
-        inference_ms: u64,
-        started: Instant,
-        recording: Option<crate::history::Recording>,
-    ) -> Result<String> {
-        let modes = self
-            .modes
-            .read()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let context = crate::linux::context::capture(!raw && modes.reads_page());
-        let processed = if raw {
-            crate::dictation::processor::Processed::unchanged(raw_text.trim())
-        } else {
-            modes.process(&raw_text, language, &context, &self.transformations)
-        };
-        if processed.text.trim().is_empty() {
-            return Err(eyre!("text replacements produced empty output"));
-        }
-        let printed = paster.is_none();
-        if let Some(paster) = paster {
-            paster.paste(&processed.text)?;
-        }
-        if let Some(history) = &self.history {
-            let mut draft = crate::dictation::modes::history_draft(
-                raw_text,
-                &processed,
-                context.application,
-                audio_ms,
-                inference_ms,
-                started.elapsed().as_millis() as u64,
-                recording,
-            );
-            if printed {
-                draft.kind = crate::history::HistoryKind::Printed;
-            } else if raw {
-                draft.kind = crate::history::HistoryKind::Raw;
-            }
-            if let Err(error) = history.record(draft) {
-                tracing::warn!(%error, "could not retain Linux dictation history");
-            }
-        }
-        Ok(processed.text)
     }
 }
 
@@ -303,7 +175,7 @@ fn readiness_message(
 
 /// Runs hotkey dictation until `shutdown`. A prepared transcriber skips the
 /// model load; otherwise the supplied transcription selection is loaded here,
-/// or parked until the first dictation with Labs › Unload model when idle.
+/// or parked until the first dictation with Labs › Free memory when idle.
 /// `updates` change settings, the model, and shortcut registration in place.
 /// `dictations` records a local API client's dictation beside the shortcut:
 /// one capture at a time, and neither ends the other.
@@ -321,7 +193,7 @@ pub(crate) fn run(
     updates: mpsc::Receiver<ListenerUpdate>,
 ) -> Result<()> {
     let mut settings = settings.clone();
-    // Labs › Unload model when idle: a launch with no model Settings prepared
+    // Labs › Free memory when idle: a launch with no model Settings prepared
     // for this listener starts parked, as after an idle unload, until the
     // first dictation. A prepared model starts loaded; the idle timer unloads
     // it.
@@ -353,13 +225,16 @@ pub(crate) fn run(
     // microphone opens only while a dictation records.
     let mut input = microphone_input(&settings, device);
     let mut release_while_idle = settings.release_microphone_while_idle;
-    let (binding, options) = shortcuts(&settings);
-    let hotkey_label = binding.label();
-    let mut toggle = options.toggle;
-    let start_shortcuts = |(binding, options): (LinuxHotkey, HotkeyOptions)| {
+    // Labs › Keep mic open after dictating: a finished capture's
+    // microphone stays open for its window before release.
+    let mut linger = MicrophoneLinger::default();
+    let mut running = shortcuts(&settings);
+    let hotkey_label = running.0.label();
+    let mut toggle = running.1.toggle;
+    let monitor = |(binding, options): (LinuxHotkey, HotkeyOptions)| {
         LinuxHotkeyMonitor::start(binding, options, hotkey_status.clone(), commands.clone())
     };
-    let mut hotkey = Some(start_shortcuts((binding, options))?);
+    let mut hotkey = Some(monitor(running.clone())?);
     let mut shortcuts_suspended = false;
     let mut indicator = LinuxIndicator::new(settings.indicator_position);
     let mut suppressor =
@@ -378,8 +253,8 @@ pub(crate) fn run(
                 break;
             }
             let (mut job, kind) = match job {
-                OutputJob::Dictation(job) if job.print.is_some() => (job, OutputKind::Printed),
-                OutputJob::Dictation(job) => (job, OutputKind::Dictation),
+                OutputJob::Dictation(job) if job.print.is_some() => (*job, OutputKind::Printed),
+                OutputJob::Dictation(job) => (*job, OutputKind::Dictation),
                 OutputJob::PasteLast => {
                     let result = last_dictation
                         .clone()
@@ -388,17 +263,51 @@ pub(crate) fn run(
                             paster
                                 .as_mut()
                                 .map_err(|error| eyre!("{error:#}"))?
-                                .paste(&text)
+                                .paste(&text, false)
                         })
                         .map(|()| String::new())
                         .map_err(|error| format!("{error:#}"));
-                    if result_sender.send((OutputKind::PasteLast, result)).is_err() {
+                    if result_sender
+                        .send(OutputResult {
+                            kind: OutputKind::PasteLast,
+                            result,
+                            stop_phrase_only: false,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                OutputJob::TypedText => {
+                    let result = paster
+                        .as_mut()
+                        .map_err(|error| eyre!("{error:#}"))
+                        .and_then(|paster| {
+                            crate::linux::typed_text::run_job(
+                                paster,
+                                &output_settings.modes,
+                                &output_settings.transformations,
+                                &worker_stop,
+                            )
+                        })
+                        .map(|()| String::new())
+                        .map_err(|error| format!("{error:#}"));
+                    if result_sender
+                        .send(OutputResult {
+                            kind: OutputKind::TypedText,
+                            result,
+                            stop_phrase_only: false,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                     continue;
                 }
             };
             let started = Instant::now();
+            let mut stop_phrase_only = false;
             let result = (|| -> Result<String> {
                 let transcribed = job.transcript.wait().map_err(|error| eyre!(error))?;
                 let inference_ms = started.elapsed().as_millis() as u64;
@@ -409,39 +318,65 @@ pub(crate) fn run(
                     "transcribed Linux dictation"
                 );
                 let text = transcribed.text;
+                // Labs › Stop phrase: the words that finished this capture
+                // never reach the text or its processing.
+                let text =
+                    crate::dictation::stop_phrase::strip_finished(text, job.stop_phrase.as_deref());
                 if text.is_empty() {
                     if let Some(print) = job.print.take() {
                         print.send(PrintedTranscript::NoSpeech);
+                    }
+                    if job.stop_phrase.is_some() {
+                        // A capture that was only the phrase: nothing to
+                        // paste, no History, and nothing failed.
+                        stop_phrase_only = true;
+                        return Ok(String::new());
                     }
                     return Err(eyre!("transcription was empty"));
                 }
                 if kind == OutputKind::Printed {
                     return output_settings.deliver(
                         text,
-                        job.raw,
+                        job.flavour,
                         &job.language,
                         None,
+                        &mut last_dictation,
                         job.audio_ms,
                         inference_ms,
                         started,
                         job.recording.take(),
+                        job.typing.take(),
+                        job.context.finish(),
+                        job.by_shortcut,
                     );
                 }
                 let paster = paster.as_mut().map_err(|error| eyre!("{error:#}"))?;
+                let mut paste = |text: &str, terminal: bool, send: bool| {
+                    paster.paste(text, terminal)?;
+                    if send {
+                        paster.press_return()?;
+                    }
+                    Ok(())
+                };
                 output_settings.deliver(
                     text,
-                    job.raw,
+                    job.flavour,
                     &job.language,
-                    Some(paster),
+                    Some(&mut paste),
+                    &mut last_dictation,
                     job.audio_ms,
                     inference_ms,
                     started,
                     job.recording.take(),
+                    job.typing.take(),
+                    job.context.finish(),
+                    job.by_shortcut,
                 )
             })()
             .map_err(|error| format!("{error:#}"));
             if let Some(print) = job.print.take() {
                 print.send(match &result {
+                    Ok(text) if text.trim().is_empty() => PrintedTranscript::NoSpeech,
                     Ok(text) => PrintedTranscript::Text(text.clone()),
                     Err(error) => PrintedTranscript::Failed(error.clone()),
                 });
@@ -451,12 +386,14 @@ pub(crate) fn run(
                 elapsed_ms = started.elapsed().as_millis(),
                 "completed Linux dictation job"
             );
-            if let Ok(text) = &result
-                && kind == OutputKind::Dictation
+            if result_sender
+                .send(OutputResult {
+                    kind,
+                    result,
+                    stop_phrase_only,
+                })
+                .is_err()
             {
-                last_dictation = Some(text.clone());
-            }
-            if result_sender.send((kind, result)).is_err() {
                 break;
             }
         }
@@ -469,8 +406,6 @@ pub(crate) fn run(
     let mut capture_host =
         crate::capture_host::CaptureHost::start(Some(engine.clone()), &environment);
     let capture_controls = crate::capture_host::listen_for_controls();
-    // The microphone stays open for a capture even while released when idle.
-    let mut capture_holds_microphone = false;
     // The draw shortcut started a recording: drawing turns on once its
     // engine takes input.
     let mut draw_pending = false;
@@ -495,6 +430,12 @@ pub(crate) fn run(
     } else {
         released_label(&settings)
     };
+    // Labs › Live typing: one owner, started at the first hotkey capture on
+    // Wayland, and one session per capture.
+    let wayland = crate::linux::session::LinuxSession::detect().is_wayland();
+    let mut live_typing: Option<Arc<crate::linux::live_typing::LiveTyping>> = None;
+    let mut active_typing: Option<CaptureTyping> = None;
+    let mut next_capture_id = 0_u64;
     // Updates wait for a moment without a recording.
     let mut next_settings: Option<AppSettings> = None;
     let mut model =
@@ -504,9 +445,20 @@ pub(crate) fn run(
     // stream's first chunk; recording starts at that chunk.
     let mut start_pending = false;
     let mut clock = StreamClock::default();
+    // The end of the last chunk on this stream's timeline; reset whenever
+    // the stream is closed, replaced, or reopened.
+    let mut last_captured_through: Option<CaptureInstant> = None;
+    // A discontinuity ended the capture a release was finishing: its audio
+    // belongs to the old capture, so replace that once it is submitted. The
+    // rate is the one in effect when the gap arrived.
+    let mut restart_capture: Option<u32> = None;
     let mut finishing: Option<Finishing> = None;
-    // The recording skips processing (Dictate without processing).
-    let mut recording_raw = false;
+    // The flavour of the shortcut that started the recording (Dictate
+    // without processing, or Labs › Terminal paste).
+    let mut recording_flavour = crate::dictation::DictationFlavour::Normal;
+    let mut recording_by_shortcut = false;
+    // Labs › Stop phrase: this capture's detector, fresh for every capture.
+    let mut stop_phrase = crate::dictation::stop_phrase::Detector::new();
     let mut pending = 0_usize;
     // A local API client's dictation, and its transcripts as they finish.
     let mut service = ServiceDictations::default();
@@ -524,6 +476,29 @@ pub(crate) fn run(
             commands.connected(),
         )
     );
+
+    // Labs › Keep mic open after dictating: the one release check the pass and
+    // its event sites share, so a press handled in the same pass still sees a
+    // closed microphone at once when the lab is off.
+    macro_rules! release_microphone {
+        () => {
+            if release_while_idle
+                && input.is_active()
+                && linger.may_close(
+                    Instant::now(),
+                    capture.is_recording()
+                        || start_pending
+                        || finishing.is_some()
+                        || service.is_active()
+                        || timeline.wants_audio(),
+                )
+            {
+                input.close();
+                last_captured_through = None;
+                audio_ready = false;
+            }
+        };
+    }
 
     while !shutdown.load(Ordering::Relaxed) {
         // No microphone could be opened (none connected, or the default
@@ -570,6 +545,7 @@ pub(crate) fn run(
                 {
                     drop(input);
                     clock.reset();
+                    last_captured_through = None;
                     input = microphone_input(&next, device);
                     release_while_idle = next.release_microphone_while_idle;
                     audio_ready = input.is_open();
@@ -584,10 +560,9 @@ pub(crate) fn run(
                 settings = next;
             }
             if register {
-                // The old registration goes first: X11 grabs the same keys again.
                 drop(hotkey.take());
                 if !shortcuts_suspended {
-                    hotkey = Some(start_shortcuts(shortcuts(&settings))?);
+                    hotkey = Some(reregister(&settings, &mut running, monitor, &events)?);
                 }
             }
             // A GPU without room for two copies: the engine swaps in place.
@@ -656,25 +631,10 @@ pub(crate) fn run(
                 tracing::warn!(message, "a capture command did nothing");
             }
         }
-        // A capture copies this microphone: a released one opens for it,
-        // and closes again once nothing records.
-        if release_while_idle {
-            let wants = timeline.wants_audio();
-            if wants && !input.is_active() {
-                input.request_open();
-            }
-            if wants {
-                capture_holds_microphone = true;
-            } else if capture_holds_microphone
-                && !capture.is_recording()
-                && !start_pending
-                && finishing.is_none()
-                && !service.is_active()
-            {
-                capture_holds_microphone = false;
-                input.close();
-                audio_ready = false;
-            }
+        // A capture copies this microphone: a released one opens for it, and
+        // the one release check below closes it once nothing records.
+        if release_while_idle && timeline.wants_audio() && !input.is_active() {
+            input.request_open();
         }
         if let Some(hotkey) = &hotkey
             && let Ok(error) = hotkey.errors.try_recv()
@@ -693,11 +653,14 @@ pub(crate) fn run(
             );
             let Finishing {
                 release,
+                context,
                 print,
-                raw,
+                flavour,
+                by_shortcut,
+                stop_phrase,
                 ..
             } = finishing.take().expect("a release is finishing");
-            submit_capture(
+            let silent = submit_capture(
                 &mut capture,
                 release.ended_at(),
                 tail,
@@ -706,13 +669,35 @@ pub(crate) fn run(
                 &mut events,
                 &mut pending,
                 print,
-                raw,
+                flavour,
+                by_shortcut,
+                &mut active_typing,
+                context,
+                stop_phrase,
             )?;
-            suppressor.restore();
-            if release_while_idle && !timeline.wants_audio() {
-                input.close();
+            if silent
+                && reopen_silent_stream(
+                    &mut input,
+                    release_while_idle,
+                    &mut linger,
+                    crate::audio::linger::window(),
+                )
+            {
+                // Recovery blocks audio until a reopened stream arrives, so
+                // a press must wait for it rather than start a dead capture.
+                // A lingering microphone closed instead, and opens fresh.
+                timeline.restart();
+                clock.reset();
+                last_captured_through = None;
                 audio_ready = false;
             }
+            if let Some(sample_rate) = restart_capture.take() {
+                capture = DictationCapture::new(sample_rate);
+            }
+            suppressor.restore();
+            // The capture's end releases the microphone here, as before, when
+            // the lab is off.
+            release_microphone!();
             emit_state(
                 &mut events,
                 active_state(capture.is_recording(), pending),
@@ -732,7 +717,7 @@ pub(crate) fn run(
                     .is_some_and(|host| host.recording_since(&timeline).is_some());
             match service.control(control, busy, now) {
                 Effect::None => {}
-                Effect::Start if audio_ready && clock.at(now).is_some() => {
+                Effect::Start if audio_ready && input.is_open() && clock.at(now).is_some() => {
                     start_service_capture(
                         &mut capture,
                         &mut service,
@@ -742,8 +727,10 @@ pub(crate) fn run(
                     );
                     service_ended |= !service.is_active();
                 }
-                // Recording starts at the microphone's first chunk.
+                // Recording starts at the first chunk. A failed stream keeps
+                // its backoff, but the client's start asks for it now.
                 Effect::Start => {
+                    input.retry_now();
                     if release_while_idle && !input.is_active() {
                         input.request_open();
                     }
@@ -777,10 +764,8 @@ pub(crate) fn run(
         if service_ended && !service.is_active() {
             capture.cancel();
             suppressor.restore();
-            if release_while_idle && !timeline.wants_audio() {
-                input.close();
-                audio_ready = false;
-            }
+            // A client's dictation ended here before too.
+            release_microphone!();
         }
         for (id, result) in service_finished.try_iter() {
             service.complete(id, result);
@@ -790,10 +775,13 @@ pub(crate) fn run(
                 .as_ref()
                 .and_then(|hotkey| hotkey.events.try_recv().ok())
         {
-            // A printing stop finishes as a stop does; its reply follows.
-            let (action, mut print) = match action {
-                HotkeyEvent::FinishPrinting(reply) => (HotkeyEvent::Finish, Some(reply)),
-                action => (action, None),
+            // A printing stop finishes as a stop does, and Labs › Stop
+            // phrase's finish as a release does; each carries what its job
+            // needs.
+            let (action, mut print, finish_phrase) = match action {
+                HotkeyEvent::FinishPrinting(reply) => (HotkeyEvent::Finish, Some(reply), None),
+                HotkeyEvent::FinishPhrase(phrase) => (HotkeyEvent::Finish, None, Some(phrase)),
+                action => (action, None, None),
             };
             match action {
                 // A client's dictation records: the shortcut and `hex
@@ -812,8 +800,22 @@ pub(crate) fn run(
                     if capture_host
                         .as_mut()
                         .is_some_and(|host| host.recording_since(&timeline).is_some()) => {}
-                HotkeyEvent::Start { raw } if !capture.is_recording() && !start_pending => {
-                    recording_raw = raw;
+                HotkeyEvent::Start { flavour, command }
+                    if !capture.is_recording() && !start_pending =>
+                {
+                    // A failed stream keeps its backoff; the press asks now.
+                    if input.is_recovering() {
+                        input.retry_now();
+                    }
+                    recording_flavour = flavour;
+                    recording_by_shortcut = !command;
+                    // Labs › Stop phrase: a new capture listens for the phrase
+                    // from its own words.
+                    stop_phrase = crate::dictation::stop_phrase::Detector::new();
+                    // A short tap or chord must never create an input method;
+                    // Live typing starts at the hold threshold (or the Toggle
+                    // press), before the stream opens so it can demand text.
+                    cancel_typing(&mut active_typing);
                     let pressed_at = clock.at(Instant::now()).filter(|_| audio_ready);
                     if let Some(pressed_at) = pressed_at {
                         let pre_roll =
@@ -821,6 +823,14 @@ pub(crate) fn run(
                         start_capture(&mut capture, pressed_at, pre_roll, || {
                             feedback::play_provisional_start();
                         });
+                        begin_live_typing(
+                            &capture,
+                            toggle,
+                            wayland,
+                            &mut live_typing,
+                            &mut next_capture_id,
+                            &mut active_typing,
+                        );
                         stream_when_due(&mut capture, &engine, toggle);
                     } else if audio_ready || release_while_idle {
                         start_pending = true;
@@ -838,14 +848,12 @@ pub(crate) fn run(
                     // Released before the opening microphone produced audio:
                     // nothing was captured.
                     start_pending = false;
+                    cancel_typing(&mut active_typing);
                     if let Some(print) = print.take() {
                         print.send(PrintedTranscript::NoSpeech);
                     }
                     suppressor.restore();
-                    if release_while_idle && !timeline.wants_audio() {
-                        input.close();
-                        audio_ready = false;
-                    }
+                    release_microphone!();
                     events.dictation(
                         if action == HotkeyEvent::Cancel {
                             DictationPhase::Cancelled
@@ -858,8 +866,26 @@ pub(crate) fn run(
                 }
                 HotkeyEvent::Finish if capture.is_recording() => {
                     let released_at = clock.at(Instant::now()).unwrap_or(CaptureInstant::ZERO);
+                    // The clip keeps its tail and drops anything captured
+                    // after it, so the live stream must hear no further; the
+                    // engine refuses a stream fed well past the clip.
+                    capture.limit_stream_to(released_at, POST_RELEASE_TAIL);
                     finishing = Some(Finishing {
-                        raw: recording_raw,
+                        flavour: recording_flavour,
+                        by_shortcut: recording_by_shortcut,
+                        context: if capture.would_transcribe(released_at) {
+                            crate::linux::context::begin_capture(
+                                !recording_flavour.raw()
+                                    && (crate::dictation::modes::uses_page(
+                                        &settings.dictation_processing,
+                                    ) || settings.labs.voice_prompt),
+                            )
+                        } else {
+                            Default::default()
+                        },
+                        // Labs › Stop phrase: the phrase's own finish carries
+                        // its words, which the job removes.
+                        stop_phrase: finish_phrase,
                         ..begin_finishing(&capture, released_at, print.take(), || {
                             suppressor.restore_then(feedback::deferred_stop())
                         })
@@ -885,15 +911,26 @@ pub(crate) fn run(
                         }
                     }
                 }
+                HotkeyEvent::TypedText
+                    if !capture.is_recording()
+                        && !start_pending
+                        && finishing.is_none()
+                        && !service.is_active() =>
+                {
+                    match jobs.try_send(OutputJob::TypedText) {
+                        Ok(()) | Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => {
+                            return Err(eyre!("dictation worker is unavailable"));
+                        }
+                    }
+                }
                 HotkeyEvent::Cancel if capture.is_recording() => {
                     capture.cancel();
+                    cancel_typing(&mut active_typing);
                     feedback::retract_start();
                     feedback::play(Tone::Cancel);
                     suppressor.restore();
-                    if release_while_idle && !timeline.wants_audio() {
-                        input.close();
-                        audio_ready = false;
-                    }
+                    release_microphone!();
                     events.dictation(DictationPhase::Cancelled, "")?;
                     emit_state(
                         &mut events,
@@ -904,7 +941,12 @@ pub(crate) fn run(
                 _ => {}
             }
         }
-        while let Ok((kind, result)) = results.try_recv() {
+        while let Ok(done) = results.try_recv() {
+            let OutputResult {
+                kind,
+                result,
+                stop_phrase_only,
+            } = done;
             let phase = if kind == OutputKind::Printed {
                 DictationPhase::Printed
             } else {
@@ -917,10 +959,30 @@ pub(crate) fn run(
                 }
                 continue;
             }
+            // Typed text never touches History, Paste Last, or pending work.
+            if kind == OutputKind::TypedText {
+                if let Err(error) = result {
+                    fail(&events, error)?;
+                }
+                continue;
+            }
             pending = pending.saturating_sub(1);
-            indicator.finished(result.is_ok());
             match result {
+                // A capture that heard only Labs › Stop phrase's words ends
+                // as any silent one: a plain discard, with no done tone.
+                Ok(text) if text.is_empty() && stop_phrase_only => {
+                    indicator.discarded();
+                    events.dictation(DictationPhase::Discarded, "")?;
+                }
+                // A voice prompt that asked nothing ends as a discard: no
+                // done tone and no empty pasted transcript. The HUD closes
+                // the submitted job as cancelled in `update` below.
+                Ok(text) if text.is_empty() => {
+                    indicator.discarded();
+                    events.discarded_voice_prompt()?;
+                }
                 Ok(text) => {
+                    indicator.finished(None);
                     feedback::play(Tone::DictationDone);
                     events.emit(&VoiceEvent::Transcript {
                         timestamp_ms: now_ms(),
@@ -930,7 +992,10 @@ pub(crate) fn run(
                     })?;
                     events.dictation(phase, text)?;
                 }
-                Err(error) => fail(&events, error)?,
+                Err(error) => {
+                    indicator.finished(Some(&error));
+                    fail(&events, error)?;
+                }
             }
             emit_state(
                 &mut events,
@@ -939,6 +1004,18 @@ pub(crate) fn run(
             )?;
         }
 
+        // The released microphone closes once nothing records, no client
+        // dictates, no release tail runs, no capture copies it, and Labs ›
+        // Keep mic open after dictating's window has passed. This also
+        // releases one a stream interruption left open, which the old
+        // latch-based sites never did.
+        release_microphone!();
+
+        dictations.answer_status(service.snapshot(
+            capture.is_recording() || start_pending || finishing.is_some(),
+            pending,
+            input.is_recovering(),
+        ));
         indicator.update(capture.is_recording() || start_pending, pending);
         match input.recv_timeout(
             UPDATE_INTERVAL,
@@ -952,9 +1029,71 @@ pub(crate) fn run(
                 samples,
                 captured_through,
             } => {
+                let sample_rate = input.sample_rate();
+                let step = chunk_step(
+                    last_captured_through,
+                    samples.len(),
+                    captured_through,
+                    sample_rate,
+                );
+                if let ChunkStep::Discontinuity(gap) = step {
+                    // A gap past the stall watchdog cannot be bridged: end
+                    // any live capture and start the audio after it fresh.
+                    let cancelled =
+                        service.is_active() || (capture.is_recording() && finishing.is_none());
+                    tracing::warn!(
+                        gap_ms = gap.as_millis() as u64,
+                        recording = capture.is_recording(),
+                        cancelled,
+                        "microphone audio skipped; {}",
+                        if cancelled {
+                            "discarded the capture"
+                        } else {
+                            "restarted the capture timeline"
+                        }
+                    );
+                    clock.reset();
+                    // A release still in its tail finishes with the audio it
+                    // has, from the old capture.
+                    if let Some(finish) = &mut finishing {
+                        finish.release.stop_waiting();
+                    }
+                    if service.is_active() {
+                        capture.cancel();
+                        suppressor.restore();
+                        service.lost(MICROPHONE_LOST);
+                    } else if capture.is_recording() && finishing.is_none() {
+                        capture.cancel();
+                        cancel_typing(&mut active_typing);
+                        feedback::retract_start();
+                        suppressor.restore();
+                        events.dictation(DictationPhase::Cancelled, "")?;
+                    }
+                    if cancelled {
+                        events.dictation(
+                            DictationPhase::Failed(
+                                "microphone audio skipped; the capture was discarded".into(),
+                            ),
+                            "",
+                        )?;
+                        emit_state(
+                            &mut events,
+                            active_state(capture.is_recording(), pending),
+                            &device_label,
+                        )?;
+                    }
+                    last_captured_through = Some(captured_through);
+                    if finishing.is_some() {
+                        // The release submits the old capture next loop;
+                        // replace it before any later audio arrives.
+                        restart_capture = Some(sample_rate);
+                        continue; // This chunk belongs to neither capture.
+                    }
+                    capture = DictationCapture::new(sample_rate);
+                }
                 clock.chunk(captured_through, Instant::now());
                 if !audio_ready {
-                    capture = DictationCapture::new(input.sample_rate());
+                    capture = DictationCapture::new(sample_rate);
                     audio_ready = true;
                     device_label = input.device_name().to_string();
                 }
@@ -972,28 +1111,75 @@ pub(crate) fn run(
                         &mut service,
                         &suppressor,
                         captured_through,
-                        input.sample_rate(),
+                        sample_rate,
                     );
                 }
-                crate::audio::input_level::record(&samples);
-                timeline.feed(&samples, input.sample_rate(), captured_through);
-                capture.ingest(&samples, captured_through);
+                let mut padded = Vec::new();
+                if let ChunkStep::Pad(frames) = step {
+                    // A hiccup (often a Bluetooth stream starting) is filled
+                    // with silence so the capture keeps going.
+                    padded.resize(frames, 0.0);
+                    padded.extend_from_slice(&samples);
+                    tracing::warn!(
+                        gap_ms = (frames as f64 * 1_000.0 / f64::from(sample_rate)) as u64,
+                        recording = capture.is_recording(),
+                        "microphone audio skipped; filled the gap with silence"
+                    );
+                }
+                let captured: &[f32] = if padded.is_empty() { &samples } else { &padded };
+                crate::audio::input_level::record(captured);
+                // The sink turns timestamp gaps into its own Gap markers, so
+                // it gets the real chunk rather than the padded one.
+                timeline.feed(&samples, sample_rate, captured_through);
+                capture.ingest(captured, captured_through);
+                last_captured_through = Some(captured_through);
                 if capture.is_recording() {
-                    indicator.meter(&samples);
-                    service.audio(&samples, Instant::now());
+                    indicator.meter(captured);
+                    service.audio(captured, Instant::now());
                 }
                 if capture.become_intentional(captured_through) && finishing.is_none() {
                     // Ordinary shortcut chords and short taps never mute,
                     // lower, or pause audio.
                     suppressor.suppress();
                 }
+                // A release in its tail never starts an input method: a
+                // short tap must stay inert even while its last audio lands.
+                // A client's dictation returns its text and types nothing.
+                if finishing.is_none() && !service.is_active() {
+                    begin_live_typing(
+                        &capture,
+                        toggle,
+                        wayland,
+                        &mut live_typing,
+                        &mut next_capture_id,
+                        &mut active_typing,
+                    );
+                }
                 stream_when_due(&mut capture, &engine, toggle);
-                capture.report_live_text();
+                if let Some(partial) = capture.report_live_text() {
+                    if let Some(typing) = &active_typing {
+                        typing.session.preedit(&partial.stable, &partial.tentative);
+                    }
+                    // A client's dictation is the only capture while it records.
+                    service.partial(&partial);
+                    // Labs › Stop phrase: a phrase the model committed, or
+                    // words read twice in a row, end a hands-free capture as
+                    // its shortcut's press would; the state machine refuses
+                    // anything else.
+                    if !service.is_active() && capture.is_recording() && crate::labs::stop_phrase()
+                    {
+                        let phrase = crate::labs::stop_phrase_text();
+                        if stop_phrase.observe(&partial.stable, &partial.tentative, &phrase) {
+                            commands.finish_hands_free(phrase);
+                        }
+                    }
+                }
             }
             RecoveringAudioInputEvent::Timeout => {}
             RecoveringAudioInputEvent::Interrupted => {
                 timeline.restart();
                 clock.reset();
+                last_captured_through = None;
                 // A release still in its tail finishes with the audio it has.
                 if let Some(finish) = &mut finishing {
                     finish.release.stop_waiting();
@@ -1005,6 +1191,7 @@ pub(crate) fn run(
                     service.lost(MICROPHONE_LOST);
                 } else if capture.is_recording() && finishing.is_none() {
                     capture.cancel();
+                    cancel_typing(&mut active_typing);
                     feedback::retract_start();
                     suppressor.restore();
                     events.dictation(DictationPhase::Cancelled, "")?;
@@ -1022,6 +1209,7 @@ pub(crate) fn run(
             RecoveringAudioInputEvent::Reopened => {
                 timeline.restart();
                 clock.reset();
+                last_captured_through = None;
                 audio_ready = false;
                 device_label = input.device_name().to_string();
                 // A press waiting on the released microphone is already
@@ -1039,6 +1227,7 @@ pub(crate) fn run(
                 // An on-demand open failed (device busy or unplugged): report
                 // it and stay released rather than stopping the listener.
                 start_pending = false;
+                cancel_typing(&mut active_typing);
                 service.lost(MICROPHONE_LOST);
                 suppressor.restore();
                 fail(&events, format!("could not open microphone: {error}"))?;
@@ -1051,6 +1240,7 @@ pub(crate) fn run(
         capture.cancel();
         events.dictation(DictationPhase::Cancelled, "")?;
     }
+    cancel_typing(&mut active_typing);
     if let Some(mut host) = capture_host.take() {
         host.shutdown(&timeline);
     }
@@ -1138,9 +1328,12 @@ fn begin_finishing(
     }
     Finishing {
         release,
+        context: Default::default(),
         print,
-        raw: false,
+        flavour: crate::dictation::DictationFlavour::Normal,
+        by_shortcut: false,
         released: Instant::now(),
+        stop_phrase: None,
     }
 }
 
@@ -1154,8 +1347,15 @@ fn submit_capture(
     events: &mut EventLog,
     pending: &mut usize,
     print: Option<PrintReply>,
-    raw: bool,
-) -> Result<()> {
+    flavour: crate::dictation::DictationFlavour,
+    by_shortcut: bool,
+    typing: &mut Option<CaptureTyping>,
+    context: crate::linux::context::PendingContext,
+    stop_phrase: Option<String>,
+) -> Result<bool> {
+    // A discarded capture drops this guard without starting or ending a
+    // session; a transcribed one moves it into the job.
+    let typing = typing.take();
     let no_speech = |print: Option<PrintReply>| {
         if let Some(print) = print {
             print.send(PrintedTranscript::NoSpeech);
@@ -1169,8 +1369,10 @@ fn submit_capture(
             events.dictation(DictationPhase::Discarded, "")?
         }
         Finish::Transcribe(clip) if clip.is_near_silent() => {
+            let silent = clip.is_digital_silence();
             no_speech(print);
-            events.dictation(DictationPhase::Discarded, "")?
+            events.dictation(DictationPhase::Discarded, "")?;
+            return Ok(silent);
         }
         Finish::Transcribe(mut clip) => {
             let audio_ms = clip.duration_ms();
@@ -1181,27 +1383,60 @@ fn submit_capture(
                 .unwrap_or_else(|| crate::app_settings::transcription_selection().1)
                 .language;
             let recording = crate::history::Recording::keep(&samples);
-            let job = OutputJob::Dictation(Job {
+            let job = OutputJob::Dictation(Box::new(Job {
                 transcript: engine.finish(stream, samples)?,
+                context,
                 audio_ms,
                 language,
                 recording,
                 print,
-                raw,
-            });
+                flavour,
+                typing: typing.map(|CaptureTyping { session, .. }| session),
+                by_shortcut,
+                stop_phrase,
+            }));
             match jobs.try_send(job) {
                 Ok(()) => {
                     *pending += 1;
                     events.dictation(DictationPhase::Transcribing, "")?;
                 }
-                Err(TrySendError::Full(_)) => fail(events, "dictation queue is full")?,
+                Err(TrySendError::Full(_)) => {
+                    // The dropped job's session guard cancels its preedit.
+                    fail(events, "dictation queue is full")?;
+                }
                 Err(TrySendError::Disconnected(_)) => {
                     return Err(eyre!("dictation worker is unavailable"));
                 }
             }
         }
     }
-    Ok(())
+    Ok(false)
+}
+
+/// Starts Live typing at the hold threshold (or the Toggle press), before
+/// the stream opens so the engine sees the demand; see
+/// [`typing::begin`]. Short taps and chords create no input method.
+fn begin_live_typing(
+    capture: &DictationCapture,
+    toggle: bool,
+    wayland: bool,
+    live_typing: &mut Option<Arc<crate::linux::live_typing::LiveTyping>>,
+    next_capture_id: &mut u64,
+    typing: &mut Option<CaptureTyping>,
+) {
+    typing::begin(
+        capture,
+        toggle,
+        wayland,
+        live_typing,
+        next_capture_id,
+        typing,
+    );
+}
+
+/// Ends a capture's Live typing session without committing anything.
+fn cancel_typing(typing: &mut Option<CaptureTyping>) {
+    typing::cancel(typing);
 }
 
 fn active_state(recording: bool, pending: usize) -> VoiceState {
@@ -1337,6 +1572,74 @@ mod tests {
     }
 
     #[test]
+    fn a_short_microphone_gap_is_padded_into_a_finished_clip() {
+        let mut capture = DictationCapture::new(16_000);
+        let start = capture_time();
+        start_capture(&mut capture, start, PRE_ROLL, || {});
+        let first_through = start + Duration::from_secs(1);
+        capture.ingest(&[0.1; 16_000], first_through);
+        // This chunk starts 100 ms after the last one ended.
+        let second_from = first_through + Duration::from_millis(100);
+        let second_through = second_from + Duration::from_secs(1);
+        let ChunkStep::Pad(padding) =
+            chunk_step(Some(first_through), 16_000, second_through, 16_000)
+        else {
+            panic!("a 100 ms gap is padded");
+        };
+        assert_eq!(padding, 1_600);
+        let mut padded = vec![0.0; padding];
+        padded.extend_from_slice(&[0.2; 16_000]);
+        capture.ingest(&padded, second_through);
+
+        // Releasing 500 ms into the second chunk keeps 200 ms of tail: the
+        // clip runs to 1.8 s because the gap is on the timeline. Without the
+        // padding, truncation would drop 100 ms of real speech before it.
+        let released = second_from + Duration::from_millis(500);
+        let Finish::Transcribe(clip) = capture.finish_with_tail(released, POST_RELEASE_TAIL) else {
+            panic!("the release transcribes");
+        };
+        let samples = clip.into_transcription_samples();
+        assert_eq!(samples.len(), 1_800 * 16);
+        assert!(samples[16_000..17_600].iter().all(|sample| *sample == 0.0));
+        assert_eq!(samples[17_600], 0.2);
+        assert_eq!(samples[28_799], 0.2);
+    }
+
+    #[test]
+    fn submit_capture_reports_when_a_clip_is_digital_silence() {
+        let (engine, _commands) = TranscriptionEngine::for_test();
+        let (mut events, path) = event_log();
+        let (jobs, queued) = mpsc::sync_channel(2);
+        let mut capture = DictationCapture::new(16_000);
+        let start = capture_time();
+        start_capture(&mut capture, start, PRE_ROLL, || {});
+        let released = start + Duration::from_secs(1);
+        capture.ingest(&[0.0; 16_000], released);
+        let mut pending = 0;
+        let silent = submit_capture(
+            &mut capture,
+            released,
+            POST_RELEASE_TAIL,
+            &engine,
+            &jobs,
+            &mut events,
+            &mut pending,
+            None,
+            crate::dictation::DictationFlavour::Normal,
+            false,
+            &mut None,
+            Default::default(),
+            None,
+        )
+        .unwrap();
+        assert!(silent);
+        assert_eq!(pending, 0);
+        assert!(queued.try_recv().is_err());
+        drop(events);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn a_reopened_stream_carries_no_old_clock() {
         let mut clock = StreamClock::default();
         let received = Instant::now();
@@ -1365,10 +1668,11 @@ mod tests {
             let (reply, answer) = mpsc::sync_channel(1);
             assert_eq!(
                 owner.control(
-                    DictationControl::Start {
+                    crate::dictation::service::DictationControl::Start {
                         source: "test".into(),
                         owner_token: "hex_a".into(),
                         levels,
+                        partials: None,
                         reply,
                     },
                     false,
@@ -1473,7 +1777,11 @@ mod tests {
             &mut events,
             &mut pending,
             None,
+            crate::dictation::DictationFlavour::Normal,
             false,
+            &mut None,
+            Default::default(),
+            None,
         )
         .unwrap();
         assert_eq!(pending, 1);
@@ -1541,7 +1849,11 @@ mod tests {
             &mut events,
             &mut pending,
             finishing.print,
+            crate::dictation::DictationFlavour::Normal,
             false,
+            &mut None,
+            Default::default(),
+            None,
         )
         .unwrap();
 
@@ -1575,7 +1887,11 @@ mod tests {
             &mut events,
             &mut pending,
             None,
+            crate::dictation::DictationFlavour::Normal,
             false,
+            &mut None,
+            Default::default(),
+            None,
         )
         .unwrap();
         assert!(queued.try_recv().is_ok());
@@ -1588,12 +1904,104 @@ mod tests {
     }
 
     #[test]
+    fn typed_text_is_registered_only_while_its_lab_is_on() {
+        use crate::app_settings::{HotkeyBinding, HotkeyKey, HotkeyModifiers};
+        let binding = HotkeyBinding {
+            modifiers: HotkeyModifiers::default(),
+            key: Some(HotkeyKey::named("f8")),
+        };
+        let mut settings = AppSettings {
+            typed_text_hotkey: Some(binding.clone()),
+            ..AppSettings::default()
+        };
+        let (_, options) = shortcuts(&settings);
+        assert!(
+            options.typed_text.is_none(),
+            "the lab off registers nothing"
+        );
+
+        settings.labs.typed_text = true;
+        assert_eq!(
+            shortcuts(&settings).1.typed_text,
+            Some(LinuxHotkey::from(&binding))
+        );
+
+        settings.typed_text_hotkey = None;
+        assert!(shortcuts(&settings).1.typed_text.is_none());
+    }
+
+    #[test]
+    fn second_dictation_is_registered_only_while_its_lab_is_on() {
+        use crate::app_settings::{HotkeyBinding, HotkeyKey, HotkeyModifiers};
+        let binding = HotkeyBinding {
+            modifiers: HotkeyModifiers::default(),
+            key: Some(HotkeyKey::named("f7")),
+        };
+        let mut settings = AppSettings {
+            second_dictation_hotkey: Some(binding.clone()),
+            ..AppSettings::default()
+        };
+        let (_, options) = shortcuts(&settings);
+        assert!(
+            options.second_dictation.is_none(),
+            "the lab off registers nothing"
+        );
+
+        settings.labs.second_dictation_shortcut = true;
+        assert_eq!(
+            shortcuts(&settings).1.second_dictation,
+            Some(LinuxHotkey::from(&binding))
+        );
+
+        // A shortcut without a key never runs on Linux.
+        settings.second_dictation_hotkey = Some(HotkeyBinding {
+            modifiers: HotkeyModifiers {
+                control: Some(crate::app_settings::ModifierSide::Either),
+                ..HotkeyModifiers::default()
+            },
+            key: None,
+        });
+        assert!(shortcuts(&settings).1.second_dictation.is_none());
+
+        settings.second_dictation_hotkey = None;
+        assert!(shortcuts(&settings).1.second_dictation.is_none());
+    }
+
+    #[test]
     fn cancelled_capture_keeps_pending_output_visible() {
         assert_eq!(active_state(true, 2), VoiceState::Dictating);
         assert_eq!(active_state(false, 2), VoiceState::Transcribing);
         assert_eq!(active_state(false, 1), VoiceState::Transcribing);
         assert_eq!(active_state(false, 0), VoiceState::Listening);
         assert_eq!(active_state(true, 0), VoiceState::Dictating);
+    }
+
+    #[test]
+    fn a_failed_paste_keeps_the_dictation_for_paste_last() {
+        let text = "the dictation whose paste failed";
+        let output = DictationOutput::from_settings(&AppSettings::default(), None);
+        let mut last_dictation = Some("an older dictation".to_string());
+        let mut paste = |_: &str, _: bool, _: bool| -> Result<()> {
+            Err(eyre!("clipboard changed while Hex was preserving it"))
+        };
+
+        let result = output.deliver(
+            text.to_string(),
+            crate::dictation::DictationFlavour::Normal,
+            "en",
+            Some(&mut paste),
+            &mut last_dictation,
+            2_000,
+            0,
+            Instant::now(),
+            None,
+            None,
+            Default::default(),
+            true,
+        );
+
+        assert!(result.is_err(), "the failed paste is still reported");
+        assert_eq!(last_dictation.as_deref(), Some(text));
     }
 
     #[test]

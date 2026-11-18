@@ -26,9 +26,8 @@ name: Release
 # a ruleset lets only Dax change .github/ (docs/releasing.md).
 #
 # There is one environment, release, like OpenCode's: no approval, deployment
-# policy dev and production. The service authorizes the publish jobs by their
-# OIDC token: anomalyco/hex, this file, environment release, the dev channel
-# from dev and stable from production (anomalyco/release registry/hex.json).
+# policy dev and production. Stable publishes only from production.
+# The service authorizes publish jobs by their OIDC token and environment.
 # Hex never uses the service's dev stage.
 #
 # Channels (.github/release/plan.sh):
@@ -54,7 +53,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: check (build, sign, and verify; publish nothing), dev (the dev channel; run from dev), or stable (public)
+        description: Run check or dev from dev; run stable from production.
         type: choice
         options: [check, dev, stable]
         default: check
@@ -76,6 +75,7 @@ env:
 
 jobs:
   plan:
+    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/production'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -194,7 +194,7 @@ jobs:
   # signs it with the Developer ID.
   build-macos:
     needs: plan
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 120
     env:
       HEX_VERSION: ${{ needs.plan.outputs.release-version }}
@@ -481,7 +481,7 @@ jobs:
   verify-macos:
     needs: [plan, sign-macos]
     if: ${{ !cancelled() && needs.sign-macos.result == 'success' && needs.sign-macos.outputs.signed == 'true' }}
-    runs-on: macos-26
+    runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 30
     env:
       HEX_VERSION: ${{ needs.plan.outputs.release-version }}
@@ -741,7 +741,7 @@ jobs:
     name: Homebrew cask
     needs: [plan, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.channel == 'stable' }}
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     env:
       RELEASE: ${{ needs.plan.outputs.service }}
       HEX_VERSION: ${{ needs.plan.outputs.release-version }}

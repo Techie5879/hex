@@ -47,19 +47,12 @@ impl Drop for Pending {
     }
 }
 
-/// Rules are matched using only the captured identity and the locally read URL.
-/// Folder resolution is separate: no session ID is invented for a repository.
-/// A page that names its session (read by the look) comes first: a site rule
-/// covering the whole host can't take it elsewhere.
+/// Rules are matched using only the captured identity and the locally read URL and terminal
+/// folder. Folder resolution is separate: no session ID is invented for a repository.
+/// The publisher's session is evidence for a suggestion, never a saved rule.
 fn rule_live(router: &Router, loaded: &ScrawlBundle, live: &look::Live) -> look::Live {
     let config = router.config();
-    let mut clues: Vec<smart::Clue> = live
-        .clues
-        .iter()
-        .filter(|clue| clue.source == smart::Source::Signed)
-        .take(1)
-        .cloned()
-        .collect();
+    let mut clues = Vec::new();
     if let Some((key, target)) = live
         .url
         .as_deref()
@@ -80,6 +73,12 @@ fn rule_live(router: &Router, loaded: &ScrawlBundle, live: &look::Live) -> look:
             pointer,
             format!("routing.sites sends {key}"),
         ));
+    } else if let Some(clue) = live
+        .terminal
+        .as_deref()
+        .and_then(|folder| look::terminal_rule_clue(folder, &config.terminal_rules()))
+    {
+        clues.push(clue);
     } else if let Some(clue) = loaded
         .target
         .bundle_id
@@ -116,8 +115,12 @@ impl Worker {
         let live = look.local.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let ruled = rule_live(&look.router, &loaded, &live);
         let app = loaded.target.app.clone();
-        let rule = policy::rule_key(live.url.as_deref(), loaded.target.bundle_id.as_deref());
-        let site = rule.as_ref().map(|(_, key)| key.clone());
+        let rule = policy::rule_key(
+            live.url.as_deref(),
+            live.terminal.as_deref(),
+            loaded.target.bundle_id.as_deref(),
+        );
+        let site = rule.as_ref().map(site_of);
         let early = look.router.run(|| {
             let evidence = smart::Evidence {
                 clues: ruled.clues.clone(),
@@ -125,6 +128,7 @@ impl Worker {
                 address: None,
                 now_ms: loaded.created_at_ms,
                 url: live.url.clone(),
+                terminal: live.terminal.clone(),
                 sessions_error: None,
             };
             smart::decide(&evidence, smart::Policy::Weigh)
@@ -190,7 +194,12 @@ impl Worker {
                     return;
                 }
                 look.router.run(|| {
-                    let rules = rule_live(&look.router, &loaded, &live);
+                    let mut rules = rule_live(&look.router, &loaded, &live);
+                    // A partial final read cannot unmatch a rule already
+                    // established locally for this same capture.
+                    if rules.clues.is_empty() {
+                        rules.clues = ruled.clues;
+                    }
                     let ruled = !rules.clues.is_empty();
                     // A saved rule is explicit. Background suggestions cannot override it,
                     // including a newly recognized spoken name.
@@ -201,6 +210,7 @@ impl Worker {
                             address: None,
                             now_ms: loaded.created_at_ms,
                             url: live.url.clone(),
+                            terminal: live.terminal.clone(),
                             sessions_error: live.error.clone(),
                         }
                     } else {
@@ -308,9 +318,12 @@ impl Worker {
             let Some(current) = &mut self.current else {
                 return;
             };
-            let site = policy::rule_key(update.live.url.as_deref(), None)
-                .or_else(|| current.rule.clone())
-                .map(|(_, key)| key);
+            let live_rule = policy::rule_key(
+                update.live.url.as_deref(),
+                update.live.terminal.as_deref(),
+                None,
+            );
+            let site = live_rule.as_ref().or(current.rule.as_ref()).map(site_of);
             let answered = answer_for(
                 judged(
                     update.judgement.decision.clone(),
@@ -323,9 +336,16 @@ impl Worker {
             );
             current.candidates = update.live.candidates;
             current.url = update.live.url;
-            if let Some(rule) = policy::rule_key(current.url.as_deref(), None) {
+            if let Some(rule) = live_rule {
                 current.rule = Some(rule);
             }
+            // The capsule starts a rule's Undo ring when it first shows the
+            // rule, so a send whose rule was still being looked up holds from
+            // now: the ring and the send share one deadline.
+            let shown = matches!(
+                current.route.answer,
+                RouteAnswer::Rule { .. } | RouteAnswer::ResolvingRule { .. }
+            );
             // A rule already sent may gain its recent list, but never another send.
             let send = current
                 .route
@@ -366,9 +386,13 @@ impl Worker {
             if let Some(dest) = send {
                 if let Some(current) = &mut self.current {
                     current.destination = Some(dest);
-                    current
-                        .due
-                        .get_or_insert_with(|| Instant::now() + SEND_HOLD);
+                    if shown {
+                        current
+                            .due
+                            .get_or_insert_with(|| Instant::now() + SEND_HOLD);
+                    } else {
+                        current.due = Some(Instant::now() + SEND_HOLD);
+                    }
                 }
                 self.send_due();
             } else if let Some(current) = &mut self.current

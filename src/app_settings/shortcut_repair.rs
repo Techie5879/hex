@@ -1,9 +1,13 @@
 //! Shortcut keys a Labs feature allows, and the repair that puts a saved
 //! shortcut on one back while the feature is off: mouse buttons (Labs ›
-//! Mouse shortcuts, macOS) and Menu, Pause, or Scroll Lock (Labs › Special
-//! keys alone, Linux).
+//! Mouse shortcuts, macOS), Menu, Pause, or Scroll Lock (Labs › Special
+//! keys alone, Linux), the ISO section key (Labs › § key alone, Linux
+//! and macOS), the microphone key (Labs › Microphone key alone, macOS),
+//! shortcuts without a key (Labs › Double-tap Option, Command, or
+//! Globe, macOS), and the persisted double-tap mode those need.
 
-use super::{AppSettings, HotkeyBinding, HotkeyKey};
+use super::hotkeys::{ISO_SECTION_KEY_CODE, MICROPHONE_KEY_CODE};
+use super::{AppSettings, HotkeyBinding, HotkeyKey, MAX_EXTRA_DICTATION_SHORTCUTS};
 
 impl HotkeyKey {
     /// Menu, Pause, or Scroll Lock: keys that type nothing, which Labs ›
@@ -18,16 +22,27 @@ impl HotkeyKey {
             || matches!(name.trim().to_ascii_lowercase().as_str(), "menu" | "pause")
     }
 
-    /// The § key, left of 1 on ISO keyboards, which Labs › Section key
-    /// alone lets a Linux shortcut use on its own (issue 1050).
+    /// The § key, left of 1 on ISO keyboards, which Labs › § key
+    /// alone lets a shortcut use on its own (issue 1050). macOS knows it by
+    /// virtual key code too, because a dead-key layout labels it `^`, `´`,
+    /// or `` ` `` rather than §.
     pub fn is_section(&self) -> bool {
-        !self.is_mouse() && Self::section_name(&self.label)
+        !self.is_mouse()
+            && (Self::section_name(&self.label)
+                || (cfg!(target_os = "macos") && self.code == ISO_SECTION_KEY_CODE))
     }
 
     /// Whether `name` names the § key: `§` or `section`.
     pub fn section_name(name: &str) -> bool {
         let name = name.trim();
         name == "§" || name.eq_ignore_ascii_case("section")
+    }
+
+    /// The microphone (dictation) key in a laptop keyboard's top row, which
+    /// Labs › Microphone key alone lets a macOS shortcut use on its own. It
+    /// has no character, so the code is the only name it has.
+    pub fn is_microphone(&self) -> bool {
+        cfg!(target_os = "macos") && !self.is_mouse() && self.code == MICROPHONE_KEY_CODE
     }
 
     /// Insert, Home, End, Page Up, or Page Down: keys that type nothing,
@@ -61,6 +76,12 @@ impl HotkeyBinding {
     pub fn is_lone_section_key(&self) -> bool {
         self.modifiers.is_empty() && self.key.as_ref().is_some_and(HotkeyKey::is_section)
     }
+
+    /// A binding whose key is the microphone key (`HotkeyKey::is_microphone`),
+    /// with or without modifiers.
+    pub fn uses_microphone_key(&self) -> bool {
+        self.key.as_ref().is_some_and(HotkeyKey::is_microphone)
+    }
 }
 
 /// `scrolllock`, `scroll_lock`, or `Scroll Lock`.
@@ -80,23 +101,83 @@ impl AppSettings {
             && crate::labs::Feature::StandaloneSpecialKeys.shipped()
     }
 
-    /// Whether Labs › Section key alone is on: a Linux shortcut may be the
-    /// § key with no modifier.
+    /// Whether Labs › § key alone is on: on Linux and macOS a shortcut
+    /// may be the ISO section key, left of 1, with no modifier.
     pub fn section_key_allowed(&self) -> bool {
-        cfg!(target_os = "linux")
+        cfg!(any(target_os = "linux", target_os = "macos"))
             && self.labs.section_key_alone
             && crate::labs::Feature::SectionKeyAlone.shipped()
     }
 
-    /// With Labs › Section key alone off, a Linux shortcut on § alone goes
-    /// back to its default (an optional one is unbound), so the listener
-    /// never registers one. § with a modifier is unaffected.
+    /// Whether Labs › Microphone key alone is on: on macOS a shortcut may be
+    /// the microphone (dictation) key in a laptop keyboard's top row with no
+    /// modifier.
+    pub fn microphone_key_allowed(&self) -> bool {
+        cfg!(target_os = "macos")
+            && self.labs.microphone_key
+            && crate::labs::Feature::MicrophoneKeyAlone.shipped()
+    }
+
+    /// Whether Labs › Double-tap Option, Command, or Globe is on: Double-tap
+    /// shortcut mode accepts a dictation shortcut without a key (macOS).
+    pub fn double_tap_modifiers_allowed(&self) -> bool {
+        cfg!(target_os = "macos")
+            && self.labs.double_tap_modifiers
+            && crate::labs::Feature::DoubleTapModifiers.shipped()
+    }
+
+    /// Clears a double-tap-only choice a shortcut can't support: the lock
+    /// is off, or a lone modifier is not allowed by its Labs switch. With
+    /// the lab off, a modifier-only binding falls back exactly as a fresh
+    /// load does (`shortcut_mode` stays Hold, `double_tap_lock` stays on).
+    /// Each Labs › More dictation shortcuts row folds the same way.
+    pub(crate) fn normalize_double_tap_settings(&mut self) {
+        let modifiers_allowed = self.double_tap_modifiers_allowed();
+        if !self.double_tap_lock || (self.dictation_hotkey.key.is_none() && !modifiers_allowed) {
+            self.double_tap_only = false;
+        }
+        for row in &mut self.extra_dictation_hotkeys {
+            row.mode = row
+                .mode
+                .for_binding(row.binding.as_ref(), modifiers_allowed);
+        }
+    }
+
+    /// With Labs › § key alone off, a Linux or macOS shortcut on the
+    /// ISO section key alone goes back to its default (an optional one is
+    /// unbound), so the listener never registers one. The section key with a
+    /// modifier is unaffected.
     pub(crate) fn repair_section_key(&mut self) {
-        if self.section_key_allowed() || !cfg!(target_os = "linux") {
+        if self.section_key_allowed() || !cfg!(any(target_os = "linux", target_os = "macos")) {
             return;
         }
         if self.reset_shortcuts(HotkeyBinding::is_lone_section_key) {
-            tracing::info!("reset § shortcuts without a modifier: Labs › Section key alone is off");
+            tracing::info!(
+                "reset section-key shortcuts without a modifier: Labs › § key alone is off"
+            );
+        }
+    }
+
+    /// With Labs › Microphone key alone off, a macOS shortcut on the
+    /// microphone key, with or without a modifier, goes back to its default
+    /// (an optional one is unbound), so the listener never registers one.
+    /// The cancel and screenshot shortcuts are not in `reset_shortcuts`, so
+    /// they are reset here too.
+    pub(crate) fn repair_microphone_key(&mut self) {
+        if self.microphone_key_allowed() || !cfg!(target_os = "macos") {
+            return;
+        }
+        let mut reset = self.reset_shortcuts(HotkeyBinding::uses_microphone_key);
+        if self.cancel_hotkey.uses_microphone_key() {
+            self.cancel_hotkey = HotkeyBinding::cancel_default();
+            reset = true;
+        }
+        if self.screenshots.hotkey.uses_microphone_key() {
+            self.screenshots.hotkey = HotkeyBinding::screenshot_default();
+            reset = true;
+        }
+        if reset {
+            tracing::info!("reset microphone-key shortcuts: Labs › Microphone key alone is off");
         }
     }
 
@@ -140,6 +221,41 @@ impl AppSettings {
         }
     }
 
+    /// Labs › More dictation shortcuts keeps at most
+    /// [`MAX_EXTRA_DICTATION_SHORTCUTS`] rows, and each row's mode folds to
+    /// one its binding can trigger (double-tap only needs a key, or Labs ›
+    /// Double-tap Option, Command, or Globe). The rows stay saved while the Lab is
+    /// off.
+    pub(crate) fn repair_extra_dictation_shortcuts(&mut self) {
+        self.extra_dictation_hotkeys
+            .truncate(MAX_EXTRA_DICTATION_SHORTCUTS);
+        let modifiers_allowed = self.double_tap_modifiers_allowed();
+        for row in &mut self.extra_dictation_hotkeys {
+            row.mode = row
+                .mode
+                .for_binding(row.binding.as_ref(), modifiers_allowed);
+        }
+    }
+
+    /// Clears a saved Dictate without processing or Paste last dictation
+    /// shortcut that shares the dictation shortcut's chord. Neither is
+    /// filtered at runtime the way the Lab shortcuts' `active_*` accessors
+    /// are ([`AppSettings::hotkey_in_use`]), so a shared chord would start
+    /// both captures.
+    pub(crate) fn clear_shortcuts_sharing_dictation(&mut self) {
+        let dictation = self.dictation_hotkey.clone();
+        clear_shared_shortcut(
+            &dictation,
+            &mut self.raw_dictation_hotkey,
+            "Dictate without processing",
+        );
+        clear_shared_shortcut(
+            &dictation,
+            &mut self.paste_last_hotkey,
+            "Paste last dictation",
+        );
+    }
+
     /// Puts back every shortcut `matches`: dictation, Paste last dictation,
     /// and Annotate to their defaults, the optional ones unbound. Returns
     /// whether any changed.
@@ -157,8 +273,22 @@ impl AppSettings {
             self.raw_dictation_hotkey = None;
             reset = true;
         }
+        if self.typed_text_hotkey.as_ref().is_some_and(&matches) {
+            self.typed_text_hotkey = None;
+            reset = true;
+        }
         if self.second_dictation_hotkey.as_ref().is_some_and(&matches) {
             self.second_dictation_hotkey = None;
+            reset = true;
+        }
+        for row in &mut self.extra_dictation_hotkeys {
+            if row.binding.as_ref().is_some_and(&matches) {
+                row.binding = None;
+                reset = true;
+            }
+        }
+        if self.terminal_paste_hotkey.as_ref().is_some_and(&matches) {
+            self.terminal_paste_hotkey = None;
             reset = true;
         }
         #[cfg(hex_capture)]
@@ -171,19 +301,96 @@ impl AppSettings {
             self.capture.replay_hotkey = None;
             reset = true;
         }
+        if self
+            .screenshots
+            .record_hotkey
+            .as_ref()
+            .is_some_and(&matches)
+        {
+            self.screenshots.record_hotkey = None;
+            reset = true;
+        }
         reset
     }
+}
+
+/// Clears `binding` when it shares `dictation`'s chord, naming it in the log.
+fn clear_shared_shortcut(
+    dictation: &HotkeyBinding,
+    binding: &mut Option<HotkeyBinding>,
+    name: &str,
+) {
+    if !binding
+        .as_ref()
+        .is_some_and(|saved| saved.overlaps(dictation))
+    {
+        return;
+    }
+    tracing::warn!("cleared a shortcut that shares the dictation shortcut: {name}");
+    *binding = None;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_settings::HotkeyModifiers;
 
     fn menu() -> HotkeyBinding {
         HotkeyBinding {
             modifiers: Default::default(),
             key: Some(HotkeyKey::named("menu")),
         }
+    }
+
+    #[test]
+    fn double_tap_only_on_a_lone_modifier_needs_the_lab() {
+        let binding = |key: Option<HotkeyKey>| HotkeyBinding {
+            modifiers: HotkeyModifiers::option(),
+            key,
+        };
+        let mut settings = AppSettings {
+            dictation_hotkey: binding(None),
+            double_tap_only: true,
+            ..Default::default()
+        };
+        settings.normalize_double_tap_settings();
+        assert!(!settings.double_tap_only);
+        settings.labs.double_tap_modifiers = true;
+        settings.double_tap_only = true;
+        settings.normalize_double_tap_settings();
+        // Modifier-only dictation exists on macOS.
+        assert_eq!(
+            settings.double_tap_only,
+            settings.double_tap_modifiers_allowed()
+        );
+        // A keyed binding keeps the choice with the lab off.
+        settings.labs.double_tap_modifiers = false;
+        settings.dictation_hotkey = binding(Some(HotkeyKey::named("space")));
+        settings.double_tap_only = true;
+        settings.normalize_double_tap_settings();
+        assert!(settings.double_tap_only);
+    }
+
+    #[test]
+    fn turning_the_double_tap_modifiers_lab_off_falls_back_as_a_fresh_load() {
+        let mut settings = AppSettings {
+            dictation_hotkey: HotkeyBinding {
+                modifiers: HotkeyModifiers::option(),
+                key: None,
+            },
+            double_tap_only: true,
+            ..Default::default()
+        };
+        settings.labs.double_tap_modifiers = true;
+        settings.normalize_double_tap_settings();
+        crate::labs::Feature::DoubleTapModifiers.set(&mut settings, false);
+        assert!(!settings.double_tap_only);
+        assert!(settings.double_tap_lock, "the lock stays on");
+        assert_eq!(
+            settings.shortcut_mode,
+            crate::dictation::ShortcutMode::Hold,
+            "the mode returns to Hold or double-tap"
+        );
     }
 
     #[test]
@@ -225,8 +432,8 @@ mod tests {
     }
 
     /// Issue 1050: off, a saved § shortcut without a modifier goes back to
-    /// its default on Linux; § with a modifier, and § with the toggle on,
-    /// stay.
+    /// its default on Linux and macOS; § with a modifier, and § with the
+    /// toggle on, stay.
     #[test]
     fn a_lone_section_key_goes_back_to_its_default_while_its_labs_toggle_is_off() {
         let section = HotkeyBinding {
@@ -253,12 +460,105 @@ mod tests {
         assert_eq!(on.dictation_hotkey, section);
         settings.repair_section_key();
         assert_eq!(settings.raw_dictation_hotkey, Some(with_control));
-        if cfg!(target_os = "linux") {
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
             assert!(on.section_key_allowed());
             assert_eq!(settings.dictation_hotkey, HotkeyBinding::default());
         } else {
             assert!(!on.section_key_allowed());
             assert_eq!(settings.dictation_hotkey, section);
+        }
+    }
+
+    /// macOS labels the ISO section key by what it types: a dead-key layout
+    /// gives `^` for key code 10, and the section-key rules must still see
+    /// it. Elsewhere only the label names the section key.
+    #[test]
+    fn a_dead_key_label_is_the_section_key_only_on_macos() {
+        let dead_key = HotkeyBinding {
+            modifiers: Default::default(),
+            key: Some(HotkeyKey {
+                code: ISO_SECTION_KEY_CODE,
+                label: "^".into(),
+            }),
+        };
+        assert_eq!(dead_key.is_lone_section_key(), cfg!(target_os = "macos"));
+        let mut settings = AppSettings {
+            dictation_hotkey: dead_key.clone(),
+            ..Default::default()
+        };
+        settings.repair_section_key();
+        if cfg!(target_os = "macos") {
+            assert_eq!(settings.dictation_hotkey, HotkeyBinding::default());
+        } else {
+            assert_eq!(settings.dictation_hotkey, dead_key);
+        }
+        settings.labs.section_key_alone = true;
+        settings.dictation_hotkey = dead_key.clone();
+        settings.repair_section_key();
+        assert_eq!(settings.dictation_hotkey, dead_key);
+    }
+
+    /// Issue 181: off, a saved microphone-key shortcut goes back to its
+    /// default on macOS, with or without a modifier; with the toggle on,
+    /// either stays.
+    #[test]
+    fn a_microphone_key_shortcut_goes_back_to_its_default_while_its_labs_toggle_is_off() {
+        let microphone = HotkeyBinding {
+            modifiers: Default::default(),
+            key: Some(HotkeyKey {
+                code: MICROPHONE_KEY_CODE,
+                label: "Mic".into(),
+            }),
+        };
+        assert_eq!(microphone.uses_microphone_key(), cfg!(target_os = "macos"));
+        assert!(
+            !HotkeyKey::named("f5").is_microphone(),
+            "F5 is not the microphone key"
+        );
+        let with_control = HotkeyBinding {
+            modifiers: super::super::HotkeyModifiers::control_option(),
+            key: Some(HotkeyKey {
+                code: MICROPHONE_KEY_CODE,
+                label: "Mic".into(),
+            }),
+        };
+        assert_eq!(
+            with_control.uses_microphone_key(),
+            cfg!(target_os = "macos")
+        );
+        let mut settings = AppSettings {
+            dictation_hotkey: microphone.clone(),
+            raw_dictation_hotkey: Some(with_control.clone()),
+            cancel_hotkey: microphone.clone(),
+            screenshots: crate::app_settings::ScreenshotSettings {
+                hotkey: with_control.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut on = settings.clone();
+        on.labs.microphone_key = true;
+        on.repair_microphone_key();
+        assert_eq!(on.dictation_hotkey, microphone);
+        assert_eq!(on.raw_dictation_hotkey, Some(with_control.clone()));
+        assert_eq!(on.cancel_hotkey, microphone);
+        assert_eq!(on.screenshots.hotkey, with_control.clone());
+        settings.repair_microphone_key();
+        if cfg!(target_os = "macos") {
+            assert!(on.microphone_key_allowed());
+            assert_eq!(settings.dictation_hotkey, HotkeyBinding::default());
+            assert_eq!(settings.raw_dictation_hotkey, None);
+            assert_eq!(settings.cancel_hotkey, HotkeyBinding::cancel_default());
+            assert_eq!(
+                settings.screenshots.hotkey,
+                HotkeyBinding::screenshot_default()
+            );
+        } else {
+            assert!(!on.microphone_key_allowed());
+            assert_eq!(settings.dictation_hotkey, microphone);
+            assert_eq!(settings.cancel_hotkey, microphone);
+            assert_eq!(settings.screenshots.hotkey, with_control);
+            assert_eq!(settings.raw_dictation_hotkey, Some(with_control));
         }
     }
 }

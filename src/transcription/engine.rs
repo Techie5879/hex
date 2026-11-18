@@ -9,6 +9,8 @@
 
 use std::collections::VecDeque;
 mod preview;
+mod timing;
+pub(crate) use timing::{timestamp_level, transcribe_clip, transcribe_clip_timed};
 mod streaming;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -40,7 +42,10 @@ pub(crate) type Background = Box<dyn FnOnce(Option<&mut Model>) + Send>;
 /// Past this the stream is aborted and the clip is transcribed offline.
 const STREAM_FINISH_DEADLINE: Duration = Duration::from_millis(1_500);
 /// Audio fed past the clip's trimmed end (a release handled late) that the
-/// stream may still keep. Beyond it, the offline clip is authoritative.
+/// stream may still keep. The audio owner caps live feeding at the release
+/// plus the base tail (`DictationCapture::limit_stream_to`), but audio that
+/// arrived before the finish began can still sit past the clip's end. Beyond
+/// this, the offline clip is authoritative.
 const MAX_OVERFED_SAMPLES: usize = 16_000 / 4;
 /// How long a job may run once the engine starts it, before the clip's own
 /// share. It covers activating and prewarming the largest model inside the
@@ -54,7 +59,7 @@ const JOB_SECONDS_PER_AUDIO_SECOND: u32 = 8;
 /// How often a waiter whose job has not started checks whether the job ahead
 /// of it timed out, leaving the engine wedged.
 const QUEUE_POLL: Duration = Duration::from_millis(250);
-/// How often an idle engine looks again at Labs › Unload model when idle.
+/// How often an idle engine looks again at Labs › Free memory when idle.
 const IDLE_RECHECK: Duration = Duration::from_secs(30);
 /// How long dropping the engine waits for its thread. A native run that cannot
 /// be aborted is left to finish on its own.
@@ -91,6 +96,10 @@ pub(crate) enum Command {
         /// text is on (Labs).
         partials: Option<Partials>,
         preview: Option<Arc<Mutex<preview::Input>>>,
+        /// Clip samples of Hex's own sounds at the capture's head (the
+        /// pre-roll and the start tone): speech it heard there is never a
+        /// lost opening.
+        head_ignored: usize,
     },
     Feed {
         stream: u64,
@@ -554,7 +563,7 @@ impl TranscriptionEngine {
 
     /// Starts with no model loaded, remembering `selection` to reload on the
     /// first command that needs it, as [`Worker::park`] leaves the engine.
-    /// Labs › Unload model when idle uses this so a launch stays unloaded
+    /// Labs › Free memory when idle uses this so a launch stays unloaded
     /// until the first dictation. Whether it can stream is seeded from the
     /// model's definition, not measured on this device: the first capture
     /// either streams after the reload or falls back to its whole clip.
@@ -607,7 +616,11 @@ impl TranscriptionEngine {
             stalled,
             requests,
             streams,
-            live_text: || crate::labs::live_text() || crate::dictation::live_text::demanded(),
+            live_text: || {
+                crate::labs::live_text()
+                    || crate::labs::stop_phrase()
+                    || crate::dictation::live_text::demanded()
+            },
             held,
             dictating,
             next_stream: AtomicU64::new(0),
@@ -658,8 +671,16 @@ impl TranscriptionEngine {
         self
     }
 
-    /// Opens native streaming, or a bounded Whisper preview with Live text on.
+    /// Opens a live stream when the loaded model can stream on this device.
+    #[cfg(test)]
     pub fn begin(&self) -> Option<LiveStream> {
+        self.begin_ignoring_head(0)
+    }
+
+    /// Opens a live stream whose opening-coverage check ignores `head_ignored`
+    /// clip samples: Hex's own sounds at the capture's head, never a lost
+    /// opening.
+    pub fn begin_ignoring_head(&self, head_ignored: usize) -> Option<LiveStream> {
         let live_text = (self.live_text)();
         let preview = if !self.streams.load(Ordering::Acquire) {
             let held = self.held.lock().unwrap_or_else(|e| e.into_inner());
@@ -670,6 +691,7 @@ impl TranscriptionEngine {
         } else {
             None
         };
+
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed) + 1;
         let cancel = CancelToken::new();
         let partials = live_text.then(Partials::default);
@@ -680,6 +702,7 @@ impl TranscriptionEngine {
                 cancel: cancel.clone(),
                 partials: partials.clone(),
                 preview: preview.clone(),
+                head_ignored,
             })
             .ok()?;
         Some(LiveStream {
@@ -903,6 +926,33 @@ impl TranscriptionEngine {
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
+
+    /// Why a live stream cannot open for a capture, when it can't: the
+    /// model's own definition doesn't stream, or it streams in principle but
+    /// not on the device it loaded on (a CPU, or a GPU whose stream probe
+    /// failed). `None` when a stream can open.
+    pub(crate) fn stream_refusal(&self) -> Option<&'static str> {
+        if self.streams.load(Ordering::Acquire) {
+            return None;
+        }
+        match self.held_selection() {
+            Some(selection) => {
+                use crate::transcription::models::{TranscriptionModelId, definition};
+                // An imported model's catalog entry says it can't stream, but
+                // its GGUF is only checked when it loads; blame the device.
+                if !matches!(selection.model, TranscriptionModelId::Custom(_))
+                    && !definition(selection.model).streams
+                {
+                    Some("the selected speech model doesn't stream")
+                } else {
+                    Some(
+                        "the speech model isn't streaming on this device (a CPU, or a GPU that could not start streaming)",
+                    )
+                }
+            }
+            None => Some("no streaming speech model is loaded"),
+        }
+    }
 }
 
 /// Whether a dictation or a meeting records, so an idle model stays loaded:
@@ -961,15 +1011,6 @@ pub(crate) fn held<'a>(
     model.matches_selection(selection).then_some(model)
 }
 
-/// Transcribes a complete 16 kHz clip with a held model, padded as a
-/// dictation's clip is.
-pub(crate) fn transcribe_clip(model: &mut HeldModel, samples: Vec<f32>) -> Result<String> {
-    #[cfg(target_os = "macos")]
-    return model.transcribe(samples);
-    #[cfg(not(target_os = "macos"))]
-    model.transcribe_clip(samples)
-}
-
 /// A whole clip as a non-macOS dictation run transcribes it: long pauses cut
 /// first, then the minimum duration and the model's trailing silence, so a
 /// trailing pause cannot trim Unified English's closing context (#1629).
@@ -1005,7 +1046,7 @@ impl Drop for TranscriptionEngine {
 }
 
 struct Worker {
-    /// `None` while unloaded for idleness (Labs › Unload model when idle) or
+    /// `None` while unloaded for idleness (Labs › Free memory when idle) or
     /// after its reload failed.
     model: Option<Model>,
     /// What an unloaded model reloads, before the next command that needs it.
@@ -1052,6 +1093,7 @@ impl Worker {
                     cancel,
                     partials,
                     preview,
+                    head_ignored,
                 } => {
                     self.dictating.store(true, Ordering::Release);
                     crate::dictation::vocabulary::for_dictation(|| {
@@ -1091,7 +1133,14 @@ impl Worker {
                                 next.push_back(command);
                             }
                         } else {
-                            self.stream(stream, &cancel, partials.as_ref(), &commands, &mut next);
+                            self.stream(
+                                stream,
+                                &cancel,
+                                partials.as_ref(),
+                                head_ignored,
+                                &commands,
+                                &mut next,
+                            );
                         }
                     });
                     self.dictating.store(false, Ordering::Release);
@@ -1160,7 +1209,7 @@ impl Worker {
         }
     }
 
-    /// The next command. With Labs › Unload model when idle on, it unloads
+    /// The next command. With Labs › Free memory when idle on, it unloads
     /// the model once nothing has used it for the chosen time and nothing
     /// records (a dictation or a meeting); between commands no request runs.
     fn wait(&mut self, commands: &Receiver<Command>) -> Option<Command> {
@@ -1224,7 +1273,10 @@ impl Worker {
                     self.reload_error = None;
                 }
                 Err(error) => {
-                    tracing::warn!(%error, "could not reload the speech model");
+                    tracing::warn!(
+                        error = format!("{error:#}"),
+                        "could not reload the speech model"
+                    );
                     self.reload_error = Some(error.to_string());
                 }
             }
@@ -1280,13 +1332,41 @@ impl Worker {
         id: u64,
         cancel: &CancelToken,
         partials: Option<&Partials>,
+        head_ignored: usize,
         commands: &Receiver<Command>,
         next: &mut VecDeque<Command>,
     ) {
-        let Some(options) = self
+        let options = self
             .model()
-            .and_then(|model| model.stream_options().cloned())
-        else {
+            .and_then(|model| model.stream_options().cloned());
+        let Some(options) = options else {
+            let loaded = self.model.is_some();
+            let model_streams = self
+                .model
+                .as_ref()
+                .and_then(|model| model.gguf_selection())
+                // An imported model's catalog entry says it can't stream, but
+                // its GGUF is only checked when it loads.
+                .filter(|selection| {
+                    !matches!(
+                        selection.model,
+                        crate::transcription::models::TranscriptionModelId::Custom(_)
+                    )
+                })
+                .map(|selection| crate::transcription::models::definition(selection.model).streams);
+            match loaded {
+                true => tracing::info!(
+                    stream = id,
+                    live_text = partials.is_some(),
+                    model_streams,
+                    "a live stream was requested but this model can't stream on its device; transcribing the whole clip"
+                ),
+                false => tracing::info!(
+                    stream = id,
+                    live_text = partials.is_some(),
+                    "a live stream was requested but no speech model is loaded; transcribing the whole clip"
+                ),
+            }
             return;
         };
         self.running.enter(cancel);
@@ -1299,7 +1379,7 @@ impl Worker {
         let trailing_silence = stream_trailing_silence(model);
         let closing_mark = stream_requires_closing_mark(model);
         let ended = model.with_stream(&options, cancel, |stream| {
-            let mut capped = PauseCap::new(stream, trailing_silence);
+            let mut capped = PauseCap::new(stream, trailing_silence).ignoring_head(head_ignored);
             let ended = drive_stream(
                 id,
                 &mut capped,
@@ -1656,12 +1736,23 @@ mod tests {
         text_start_ms: Option<u64>,
         text_end_ms: u64,
     ) -> Result<String, String> {
+        finish_with_text_bounds_ignoring_head(clip, 0, text_start_ms, text_end_ms)
+    }
+
+    /// As above, with `head_ignored` clip samples of Hex's own sounds at the
+    /// capture's head, as the audio owner passes for a real capture.
+    fn finish_with_text_bounds_ignoring_head(
+        clip: &[f32],
+        head_ignored: usize,
+        text_start_ms: Option<u64>,
+        text_end_ms: u64,
+    ) -> Result<String, String> {
         let mut fake = FakeStream {
             text_start_ms,
             text_end_ms: Some(text_end_ms),
             ..FakeStream::default()
         };
-        let mut capped = PauseCap::new(&mut fake, 0);
+        let mut capped = PauseCap::new(&mut fake, 0).ignoring_head(head_ignored);
         for chunk in clip.chunks(1_600) {
             capped.feed(chunk).unwrap();
         }
@@ -1749,6 +1840,51 @@ mod tests {
         assert_eq!(
             finish_with_text_bounds(&clip, Some(500), 4_200),
             Ok(format!("streamed {}", clip.len()))
+        );
+    }
+
+    #[test]
+    fn hexs_own_sounds_at_the_captures_head_are_not_a_lost_opening() {
+        // The pre-roll (0-0.45 s), the 272 ms Classic start tone (0.45-0.72 s),
+        // and the tap's click (0.72-0.82 s) are Hex's own sounds; the first
+        // word comes 0.8 s later. The stream lost nothing, so the clip is kept.
+        let mut clip = vec![0.0; 7_200]; // 450 ms of pre-roll
+        clip.extend(tone(4_352)); // the 272 ms start tone
+        clip.extend(tone(1_600)); // the tap's click, 100 ms
+        clip.extend(vec![0.0; 12_448]); // room up to 1.6 s
+        clip.extend(tone(16_000)); // the dictation itself, 1.6-2.6 s
+        clip.extend(vec![0.0; 3_200]);
+        let head = 14_400; // 900 ms: the pre-roll, the tone, and its margin
+        assert_eq!(
+            finish_with_text_bounds_ignoring_head(&clip, head, Some(1_600), 2_600),
+            Ok(format!("streamed {}", clip.len()))
+        );
+        // Without the exclusion the same sounds are 400 ms of "speech" before
+        // the text, which is what a real model sees when they are all the head
+        // holds.
+        assert!(
+            finish_with_text_bounds(&clip, Some(1_600), 2_600)
+                .is_err_and(|reason| reason.contains("precedes")),
+            "the head exclusion is what keeps this stream"
+        );
+    }
+
+    #[test]
+    fn a_lost_opening_after_a_long_pause_still_falls_back_to_the_whole_clip() {
+        // The review's case: 1.6 s of speech the stream lost, then a 1 s
+        // pause, then the text at 3.5 s. The pause is longer than the check's
+        // 400 ms slack, so nothing but counting the speech itself can catch it.
+        let mut clip = vec![0.0; 14_400]; // 900 ms: pre-roll and start tone
+        clip.extend(tone(25_600)); // 1.6 s of lost speech, 0.9-2.5 s
+        clip.extend(vec![0.0; 16_000]); // a 1 s pause
+        clip.extend(tone(16_000)); // the text's own speech, 3.5-4.5 s
+        clip.extend(vec![0.0; 3_200]);
+        let result = finish_with_text_bounds_ignoring_head(&clip, 14_400, Some(3_500), 4_500);
+        assert!(
+            result.as_ref().is_err_and(
+                |reason| reason.contains("precedes") && reason.contains("from 900 to 2500 ms")
+            ),
+            "{result:?}"
         );
     }
 
@@ -2607,5 +2743,51 @@ mod tests {
             commands.try_iter().collect::<Vec<_>>().as_slice(),
             [Command::Finish { stream: None, .. }]
         ));
+    }
+
+    /// A capture that wanted live text is told which side refuses: the
+    /// model's own definition, or the device it loaded on.
+    #[test]
+    fn a_stream_refusal_names_the_model_or_the_device() {
+        let (engine, _commands) = TranscriptionEngine::for_test();
+        assert_eq!(engine.stream_refusal(), None, "it can stream");
+        engine.streams.store(false, Ordering::Release);
+        assert_eq!(
+            engine.stream_refusal(),
+            Some("no streaming speech model is loaded")
+        );
+        *engine.held.lock().unwrap() = Some(crate::transcription::models::TranscriptionSelection {
+            model: crate::transcription::models::TranscriptionModelId::ParakeetUnifiedEnglish,
+            language: "en".into(),
+        });
+        assert_eq!(
+            engine.stream_refusal(),
+            Some(
+                "the speech model isn't streaming on this device (a CPU, or a GPU that could not start streaming)"
+            )
+        );
+        *engine.held.lock().unwrap() = Some(crate::transcription::models::TranscriptionSelection {
+            model: crate::transcription::models::TranscriptionModelId::ParakeetV3,
+            language: "en".into(),
+        });
+        assert_eq!(
+            engine.stream_refusal(),
+            Some("the selected speech model doesn't stream")
+        );
+        // An imported model's catalog entry says it can't stream, but its
+        // GGUF is only checked when it loads: blame the device instead.
+        *engine.held.lock().unwrap() = Some(crate::transcription::models::TranscriptionSelection {
+            model: crate::transcription::models::TranscriptionModelId::Custom(
+                crate::transcription::models::CustomModelId::parse("custom-0123456789abcdef")
+                    .unwrap(),
+            ),
+            language: "en".into(),
+        });
+        assert_eq!(
+            engine.stream_refusal(),
+            Some(
+                "the speech model isn't streaming on this device (a CPU, or a GPU that could not start streaming)"
+            )
+        );
     }
 }

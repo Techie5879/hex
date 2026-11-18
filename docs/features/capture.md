@@ -8,13 +8,15 @@ display with ScreenCaptureKit, on Linux the screen-cast portal and
 PipeWire (`capture.linux`), on Windows Windows.Graphics.Capture
 (`capture.windows`), (or a cabled iPhone through `scrawl-helper`'s
 mirror) and narration from Hex's microphone, takes ink and clicks (Shift on
-macOS and Windows, or the Annotate key held or the pen), transcribes the narration with word timestamps on
-Hex's loaded model, writes a Scrawl bundle into Scrawl's captures folder,
-copies it to the clipboard, and sends it to an OpenCode session with Scrawl's
-router (`crates/router`), run in Hex's process. Settings › Annotate (under
-Labs in the sidebar) holds its settings. Scrawl's capsule (switch
-chips, the on-screen picker, route chips) and its ink and laser overlay are
-Rune overlays.
+macOS and Windows, or the Annotate key held or the pen), transcribes the
+narration with word timestamps on Hex's loaded model (a model that gives
+none, GigaAM v3 say, has its text spread over the recording as estimated
+times), writes a Scrawl bundle into Scrawl's captures folder, copies it to
+the clipboard, and sends it to an OpenCode session with Scrawl's router
+(`crates/router`), run in Hex's process. Settings › Annotate (under Labs in
+the sidebar) holds its settings. Scrawl's capsule (switch chips, the
+on-screen picker, route chips) and its ink and laser overlay are Rune
+overlays.
 
 ```ts
 Turn it on                               // capture.gate
@@ -163,17 +165,33 @@ On Linux                                 // capture.linux
 │   open for the capture
 ├── Words -> one foreground job on the listener's engine (its loaded model)
 ├── Copy -> the summary text through Hex's Linux clipboard (wl-copy or the
-│   X11 clipboard), as the Mac copies it
+│   X11 clipboard), as the Mac copies it; Labs › Copy a capture as one file puts
+│   `<stem>.scrawl.slim.zip` there instead, as a `text/uri-list` file
 ├── Paste -> as the Mac: the contact sheet (image/png), then the summary,
 │   each with Hex's own Ctrl+V (linux/paste). An app that takes no image (a
 │   terminal) gets only the summary, which names the contact sheet; the Mac
 │   pastes a terminal the sheet's path instead
-├── Finished capsule -> "Copied" with Paste (accent), Inspect, and Send to…;
+├── Finished capsule -> "Annotation" with Paste and, if there are destinations, Send to…;
 │   unlike the Mac, a guess doesn't open its suggestions by itself
 │   (Flow::suggesting_on_route(false)): Send to… is a click away
 ├── Shortcuts -> F9 (tap to start and stop, hold to draw) through the
 │   GlobalShortcuts portal ("Annotate") or X11 grabs. There is no separate
 │   draw shortcut and no send-to list shortcut on any OS
+├── GNOME Wayland -> no layer-shell, so Rune can't show the capsule or ink
+│   until Labs › Annotate on GNOME (`labs.gnome_annotate`, off by default)
+│   opens them on XWayland (`OverlayOptions::xwayland_input`): override-redirect
+│   windows that take the pointer in their input shape and never keyboard
+│   focus, only while this user's Xwayland already runs (never started by Hex;
+│   the meeting capsules' decision in linux/meeting_capsules.rs). The ink is
+│   made with pointer regions and `KeyPolicy::None`, since Rune refuses an
+│   OnDemand overlay on XWayland, and keeps regions with no hit area while not
+│   drawing because a click-through XWayland window can't take the pointer
+│   later. Esc can't stop drawing there: the capsule's pen button does, or
+│   letting go of a held Annotate key (a tap of it stops the recording). The
+│   in-app picker shows on Linux only in the edge states that return to
+│   Selecting (Window starts the portal's picker, Area isn't offered), and
+│   takes the same opt-in whenever it does. Check: labs
+│   gnome_annotate_is_its_own_bit_*; not run on a GNOME session
 ├── While it records, dictation starts nothing (the portal
 │   or grab already took their keys, so nothing reaches the app)
 ├── Pane -> no Screen Recording row, no transcriber choice, no "Show in screen
@@ -207,8 +225,12 @@ On Windows                               // capture.windows
 ├── While dictating -> General's setting through windows/audio_control, one
 │   suppressor per capture, restored when it ends
 ├── Copy and paste -> the engine's own clipboard and Ctrl+V (handoff): the
-│   contact sheet, then the summary
+│   contact sheet, then the summary; with Labs › Copy a capture as one file, the
+│   copy is the light zip as CF_HDROP instead
 ├── Pane -> no Screen Recording row, no transcriber choice
+├── Overlays -> Rune waits for a swap-chain slot before each frame (Rune
+│   #985), so the picker, capsule, and ink's frames in flight stay bounded
+│   through a long annotation (#1833; not measured on Windows)
 └── Gaps: no `hex annotate` (Windows has no control transport yet), no
     iPhone, keys pressed in the app are not logged. Checked only by
     cross-compiling (`cargo xwin clippy`, x86_64 and aarch64); never run on
@@ -226,8 +248,10 @@ Settings › Annotate                      // capture.pane
 ├── Screen Recording -> read once a second and again when the pane opens or
 │   the window becomes key, never with a prompt (capture_host::screen_access):
 │   the preflight, which keeps its first answer for the life of the process,
-│   then, while it says no, a fresh `scrawl-helper permissions` at most every
-│   2 s on its own thread and a one-frame probe once that says granted
+│   then, while it says no, a fresh `scrawl-helper permissions` on its own
+│   thread: at most every 60 s while nothing shows it, and every 2 s while
+│   its row or the capsule's permission helper is on screen, plus a one-frame
+│   probe once that says granted
 │   ├── granted -> Allowed, no button
 │   ├── granted in System Settings but unusable until Hex relaunches ->
 │   │   "Turns on when Hex restarts" and Restart Hex, never Allow over a switch
@@ -268,7 +292,10 @@ First launch with Annotate on            // capture.import
 ├── Esc while a capture records -> nothing: it reaches the app being recorded,
 │   and Hex's tap lets it through; a dictation under it goes on too (#786)
 ├── The binding is swallowed, never chord evidence for dictation
-└── Hold the dictation shortcut mid-capture -> dictation pastes as usual
+├── Hold the dictation shortcut mid-capture -> dictation pastes as usual
+└── Another app holds Secure Event Input -> ⌥⇧S still starts and stops (a
+    Carbon hotkey while it lasts; Esc doesn't arrive). See dictation.md's
+    Shortcuts Under Secure Input
 
 While a capture records                  // capture.quiet
 ├── Start -> a recording-environment session with General's While dictating
@@ -337,7 +364,8 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 ├── Follows `capture_host::watch()`: Recording from the instant `recording` is
 │   Some (the bundle's t0; timer, meter, ✓ finish, ✕ cancel) -> Processing ->
 │   done (the lead alone, no word), Failed, or Cancelled, then leaves on its
-│   own; a written capture whose transcript has no words reads "no speech"
+│   own; a written capture whose transcript has no words at all (none timed,
+│   none in its text) reads "no speech"
 ├── Tones (`capture_capsule::tone`, at the dictation volume; zero is
 │   silent), from the chosen sound set: start and stop are the set's start
 │   and stop, a send going its done (Annotate's own sent sound when the set
@@ -354,7 +382,7 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   to see your screen · Allow ✕" (Microphone, Accessibility alike)
 │   ├── Allow -> macOS's microphone prompt, else System Settings with the
 │   │   floating guide beside it (permission_guide), never at launch
-│   ├── Followed once a second (feed::watch_grant, screen_access) ->
+│   ├── Followed once a second (feed::watch_grant, screen_access_watched) ->
 │   │   "… is on · Restart Hex" when macOS needs one, then "… is on ·
 │   │   Capture ⌥⇧S"; Capture or the shortcut records the pointer's display
 │   ├── ✕ closes it; unanswered it folds after 2 min; the shortcut brings it
@@ -414,24 +442,56 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   │   runs out, and a rule's send waits (`CaptureCommand::Hold`). Leaving
 │   │   goes on with the time it had left, at least 1 s. A pick already went,
 │   │   so only its Undo waits (`Flow::hold_countdown`)
-├── A finished capture with nowhere sent yet reads "Copied" from the start
+│   ├── A capture of Ghostty -> the focused pane's folder and title
+│   │   (Ghostty's AppleScript), and what runs in front in it, read from the
+│   │   process tree under Ghostty (libproc: the shell's tty and foreground
+│   │   group, that process's name, arguments and folder; no new permission).
+│   │   Several panes are told apart by title and folder; still unclear, the
+│   │   process is left out (`look::terminal`)
+│   │   ├── OpenCode's TUI in front -> the session it shows is the top
+│   │   │   suggestion, "open in this terminal": the session titled as the
+│   │   │   terminal's `OC | <title>` (a cut title matches the long one,
+│   │   │   one in the pane's folder first), else the `-s ses_…` it was
+│   │   │   started with. A suggestion like any other, never sent by itself
+│   │   ├── OpenCode's home screen (`OpenCode`) or a plain shell -> the
+│   │   │   folder and the title's words are clues, as before
+│   │   ├── ⇧ (a folder that isn't home or `/`) -> the rule is
+│   │   │   `routing.terminals` keyed on the folder's project root ("hex
+│   │   │   terminal" in the header and the footer's app badge), naming the
+│   │   │   session picked; it covers that folder and everything under it (the
+│   │   │   longest key wins) and sends like a site rule. Ghostty itself stays
+│   │   │   a general app, so no rule ever sends all of Ghostty
+│   │   └── Checks -> `look::tests` (TUI session first, command-line
+│   │       fallback, home screen, home folder, terminal rule),
+│   │       `look::terminal::tests`, `policy` and `config` rule keys, and
+│   │       `capture_host::routing` `an_always_rule_from_a_terminal_keys_on_its_folder`.
+│   │       The process walk was measured once against a real Ghostty; no
+│   │       end-to-end capture of a TUI was run
+├── A finished capture reads "Annotation". While routing is pending it reads
+│   "Looking for sessions…" instead. Copy failure has its own warning
 │   ├── Anything else with somewhere to go (a guess, nothing fitting, no
-│   │   answer) -> macOS: "Copied", then Search with the capture shortcut's
-│   │   keycaps (as Settings draws them) and ✕, the suggestions open under
+│   │   answer) -> macOS: "Annotation", Paste, a magnifier and ✕. The
+│   │   magnifier is named Search with the current binding. Suggestions open under
 │   │   it; nothing sends until Kit picks. Linux: closed,
-│   │   with Paste, Inspect, and Send to…, which opens them on a click
+│   │   with Paste and Send to…, which opens them on a click
 │   │   ├── "Send to" over up to five rows, suggested then the newest
-│   │   │   sessions, with no numbers and no footer; "⇧ remembers" on the
-│   │   │   header's right when a pick can save a rule. The first
-│   │   │   carries its reason in the accent. A reason is a real one in plain
-│   │   │   words ("you were just in it", "same page", "mentioned", "recent")
-│   │   │   or nothing; never "guess"
-│   │   ├── Shift down (a guess or rule with a site or app) -> "⇧ remembers"
-│   │   │   lights, and the highlighted row reads "always"; in the search the
-│   │   │   footer reads "Always send [site] to [row]", the site and the row's
-│   │   │   name each in a rounded-rect badge with its kind's icon (a globe for
-│   │   │   a site, a window for an app, a bubble for the session). Shift+click
-│   │   │   (or ⇧⏎ in the search)
+│   │   │   sessions, with no numbers and no footer; "⇧-click to always send
+│   │   │   [site] here" appears on hover when a pick can save a rule.
+│   │   │   The first carries its reason in the accent. A reason is a real one
+│   │   │   in plain words ("you were just in it", "same page", "mentioned",
+│   │   │   "recent") or nothing; never "guess". No row moves once shown: a
+│   │   │   later answer gives a row its new reason in place and adds new
+│   │   │   sessions last (`routes::keep_rows`, as the router does)
+│   │   ├── Shift down (a guess or rule with a site, terminal folder or app) -> the row under
+│   │   │   the pointer reads "always" in the accent and the header reads
+│   │   │   "Always send [site] to [row]" (with the pointer off the rows,
+│   │   │   "Always send [site] to…" and no row is marked). In the search the
+│   │   │   target is the row under the pointer, else the highlighted one: the
+│   │   │   highlight follows the pointer as in a menu and the arrows go on
+│   │   │   from it. The footer reads "Always send [site] to [row]", the site
+│   │   │   and the row's name each in a rounded-rect badge with its kind's
+│   │   │   icon (a globe for a site, a window for an app, a bubble for the
+│   │   │   session). Shift+click (or ⇧⏎ in the search)
 │   │   │   sends and saves the rule: "Sent to X · always", and its Undo
 │   │   │   takes back the send and the rule (what the key held before, or
 │   │   │   nothing, comes back). The rule names that session (`ses_…`),
@@ -510,34 +570,42 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   │       is open, and still delivers them) closes the list and gives the
 │   │       keys back; hiding drops the grab
 │   ├── `offer` (a rule offer) -> not drawn; Scrawl's capsule doesn't draw it
-│   ├── The top line is calm: the label, its note, one action, and ✕. Undo
-│   │   while a send can be taken back, else Paste and Inspect as two quiet
-│   │   icons (tooltips "Paste the capture", "Open the capture") for a written
-│   │   capture, with the click-only Send to… chip beside them while there is
-│   │   somewhere to send it; over the suggestions, Search alone (the
-│   │   capture is already copied), right beside ✕. Paste and Inspect have no key on either OS.
+│   ├── The ready capsule shows a labeled Paste button, both folded and above
+│   │   the suggestions. A rule waiting to send shows Undo instead. Sending,
+│   │   sent and queued results do not offer Paste. The search field replaces
+│   │   the buttons while typing. Neither Paste nor Inspect binds a key.
 │   │   The list hangs
 │   │   under the capsule, which is never narrower than LIST_W; the capsule
 │   │   widens with it. The capsule is a rounded rect with the list's 14 pt
 │   │   corners (`SHELL_RADIUS`), not a pill, and its chips and icon buttons
-│   │   round concentrically inside it. Two looks while Kit picks (tuning `top_line`):
+│   │   round concentrically inside it. The line and its list are one layout:
+│   │   the list's header and its names start 16 pt in from the wall, and
+│   │   the reasons end 16 pt in from the other, under ✕. The preview is not
+│   │   on that margin: it nests in the capsule's left corners, 10 pt from the
+│   │   left, top and bottom walls, so its 4 pt corners turn about the same
+│   │   centres as the shell's 14 pt ones
+│   │   (`the_preview_nests_in_the_capsules_left_corners`). Paste, Search,
+│   │   Inspect and ✕ are one row of 28 pt
+│   │   boxes 6 pt apart and 6 pt in from the walls; Paste's is filled, and
+│   │   its 32 pt chip is still what takes the click
+│   │   (`the_ready_line_and_its_list_share_their_edges`). Two looks while Kit picks (tuning `top_line`):
 │   │   TopLine::Quiet (default) says the label in quiet MEDIUM ink;
-│   │   TopLine::Icons says it in STRONG. A capture that only copied has no
-│   │   label, the lead alone
+│   │   TopLine::Icons uses stronger ink. Both retain the annotation label
 │   ├── The lead is the capture's first frame (`frames/frame-01.png`, else the
 │   │   contact sheet), cropped to a small rounded card once the bundle is
 │   │   written and decoded off the UI thread; until then, or without one, a
 │   │   check. A warning keeps its glyph
 │   │   ├── Paste -> CaptureCommand::Paste: the contact sheet, then the summary,
-│   │   │   into the app in front; a send still in its Undo window is taken back
-│   │   └── Inspect -> CaptureCommand::Inspect: opens the contact sheet (Hex
+│   │   │   into the focused field, from the bundle shown, not the newest output.
+│   │   │   No Return, send, Undo or rule change
+│   │   └── Click the finished preview, when Inspect is available, or the
+│   │       Inspect button on other outcomes -> opens the contact sheet (Hex
 │   │       has no review window, and opening the bundle could launch
 │   │       Scrawl.app)
 │   ├── Undo is a click only, with no shortcut: Escape meant for another app
 │   │   was taking sends back
-│   ├── Shortcuts read as quiet text after what they do, never a keycap per
-│   │   key, except Search's capture shortcut, drawn as Settings' keycaps: a
-│   │   hint's keys sit in one small rounded rect, on a quiet fill. The
+│   ├── Search's tooltip and accessible name include the configured capture
+│   │   shortcut; no keycaps appear in the ordinary completed header. The
 │   │   search's footer reads "Send ⏎", "Remember ⇧⏎", "New capture ⌥⇧S"; the
 │   │   cursor's and the notch's cards end in "Search ⌥⇧S" under their guesses.
 │   │   The footer sits apart from the rows in one of
@@ -696,6 +764,7 @@ hex capture start                        // capture.start; needs a listening Hex
 │   └── Fails to start -> sink closed, bundle removed, last outcome `failed`;
 │       Esc and the next ⌥⇧S see nothing recording
 ├── Release microphone while idle -> the capture keeps the microphone open
+│   (even while the display sleeps or the session is locked)
 └── Already recording -> unchanged, same bundle
 
 While it records                         // capture.audio
@@ -734,14 +803,37 @@ hex capture stop                         // capture.stop
 │   written beside it; only the steps that read the movie wait for it, and it
 │   starts where its first frame was shown (video_offset_ms)
 └── In the background, on one capture-finish thread, one capture at a time:
-    ├── 16 kHz audio with its start offset and gaps -> SealedCapture::finish
-    ├── Words: 30 s chunks, each a foreground job on the dictation engine's model,
-    │   after queued dictation, before meeting chunks; waits while dictation records
-    │   or transcribes; never interrupts a live stream
+    ├── 16 kHz audio streamed to audio.wav.partial as it records, and renamed to
+    │   audio.wav only once this build writes the capture's unfinished.json: a
+    │   streamed capture's audio.wav never exists without a journal, so one
+    │   still recording or waiting its turn never looks recoverable (a crash
+    │   there leaves the partial, which retention cleans up like any other
+    │   media). Leading start offset and gaps are written as silence, so WAV
+    │   time stays capture time
+    ├── Words: on the Parakeet and GGUF paths, audio.wav read in 30 s pieces
+    │   (iPhone and replay narration are decoded in memory), each a foreground
+    │   job on the dictation engine's model, after queued dictation, before
+    │   meeting chunks; waits while dictation records or transcribes; never
+    │   interrupts a live stream. Apple reads the file itself
     ├── Word times moved earlier by the model's measured lag (Parakeet Unified
     │   English: starts −280 ms, −520 ms after a ≥ 250 ms pause; ends −195 ms);
     │   other models and Apple keep their own times
-    ├── Past 20 min -> audio kept to 20 min, the rest one gap
+    ├── A model that gives no word times (GigaAM v3) has each 30 s piece's
+    │   text spread over that piece's own audio (a clip held in memory, over
+    │   the whole of it) as estimated times, so keyframes and the editor have
+    │   somewhere to put it; a bundle already on disk without them counts and
+    │   spreads its own text
+    │   (`scrawl_capture::transcribe::word_count`, the Captures pane's
+    │   `words_for_editor`)
+    ├── Past 8 h -> audio.wav stops growing and the rest is one gap; a disk
+    │   guard, never a memory bound (iPhone and replay narration are decoded in
+    │   memory and so are not covered by it), and scrawl.json's
+    │   audioStoppedAtMs makes summary.md say "Audio stopped at 8:00:00; the
+    │   rest of this capture has no audio" (a failed audio write says where too)
+    ├── Cancel or a failed screen source -> the partial audio is closed and
+    │   removed with the bundle; a crash leaves it, and retention trashes it
+    │   like any other media (a movie and a partial are never a bundle recover
+    │   rebuilds)
     ├── recording.mp4, capture.json, audio.wav, frames/, scrawl.json,
     │   summary.md; then every file 0600 and folder 0700
     ├── Keyframes decoded from recording.mp4 by scrawl-helper (beside `hex`: in
@@ -753,8 +845,46 @@ hex capture stop                         // capture.stop
     │   language. Check: scrawl-capture keyframes
     │   spoken_cues_count_in_other_languages
     ├── Transcription fails -> logged; the bundle has no words, and the outcome says why
-    ├── Written -> image and text copied to the clipboard (Scrawl's handoff)
+    ├── Written -> image and text copied to the clipboard (Scrawl's handoff),
+    │   or the light zip alone with Labs › Copy a capture as one file (capture.copy)
     └── Sent -> the capture-route thread (capture.route)
+
+Copying a written capture                 // capture.copy; Labs › Copy a capture as one file
+├── Off (default) -> the bundle's summary text on the clipboard, as before:
+│   macOS and Windows through Scrawl's handoff (Windows may also put the
+│   contact sheet PNG when the clipboardImage experiment is on), Linux the
+│   summary text through Hex's paster
+├── On -> crates/capture/src/slim_zip.rs writes <stem>.scrawl.slim.zip inside
+│   the bundle (a temp name, then rename) and puts only that file on the
+│   clipboard: macOS a file URL through handoff::copy_file_to_clipboard (the
+│   screenshot card's file copy uses it too), Windows CF_HDROP (a DROPFILES
+│   header and a double-NUL-terminal UTF-16 path list), Linux text/uri-list
+│   (the X11 `text/uri-list` target, or wl-copy --type text/uri-list)
+│   ├── Contents: the bundle's files recursively, paths relative to its root,
+│   │   STORED (no compression), UTF-8 names, a DOS timestamp
+│   ├── Left out: HEAVY_MEDIA (recording.mp4, recording.mov, audio.wav,
+│   │   frames-full/, contact-sheet-full.png), .media-pending, .media-sending,
+│   │   .deliver.json and its .tmp, and any earlier *.slim.zip or temp file;
+│   │   symlinks are skipped
+│   ├── summary.md inside the zip is generated with the bundle folder as `.`,
+│   │   so its header reads anywhere it is unzipped; the summary.md on disk
+│   │   is unchanged
+│   ├── A failed build or clipboard write is logged, and the capture copies
+│   │   as it did before
+│   ├── Refused rather than written as ZIP64 at 0xFFFF files or 0xFFFFFFFF
+│   │   bytes
+│   ├── A terminal paste gets no text: the clipboard holds only the file
+│   ├── scrawl.json and summary.md still name media the zip leaves out
+│   │   (recording.mp4, audio.wav, frames-full/), because they describe the
+│   │   whole capture
+│   └── The capsule's Paste, Inspect, Send to…, routing, and retention still
+│       see the same bundle; the zip goes when the bundle does
+│       // checks: `cargo test --manifest-path crates/capture/Cargo.toml --lib slim_zip`
+│       // (CRC-32 vector, central-directory read-back, excludes, header path,
+│       // a second copy); a_file_is_one_percent_encoded_uri_list_line (linux/paste.rs);
+│       // copy_capture_zip_is_its_own_switch_and_everywhere (labs.rs)
+│       // not verified: pasting the zip into a real chat or agent app on any OS,
+│       // and the Windows clipboard write (cross-compiled only)
 
 What a send carries                      // capture.send (router opencode::send_bundle)
 ├── One prompt: the summary (transcript, marks, notes) as text, then the
@@ -764,13 +894,19 @@ What a send carries                      // capture.send (router opencode::send_
 │   capture folder. The picture does not depend on the folder, so an OpenCode
 │   server on another machine reads it; the text only names where it was recorded
 ├── Every request goes to the running local service over HTTP
-│   (service.json); a service that isn't up is never started
+│   (service.json); a service that isn't up is never started. On Windows with
+│   Labs › OpenCode in WSL on, a service in the default WSL distribution
+│   answers instead (capture.route). The prompt's "Recorded at" line names the
+│   capture folder as its Linux `/mnt/…` path; the summary header keeps the
+│   Windows path
 ├── With an agent host (routing's agentHost), the request body travels on SSH
 │   stdin to a Python 3 standard-library HTTP client. The contact sheet stays
 │   inline; the bundle copy follows the accepted prompt in the background
 │   (the prompt says the folder may still be arriving). Credentials stay remote.
 │   An explicitly configured agentOpencode keeps the CLI and synchronous copy;
 │   without Python 3, the default path falls back to the CLI before any HTTP send
+│       The light-files tar leaves out any `*.slim.zip` and its temp file too:
+│       that copy is this Mac's clipboard attachment, not the capture
 │   └── macOS/Linux reuse the SSH connection for 60 s after its last use,
 │       through an owner-only control socket; Windows opens each connection.
 │       API reads now honor their caller's deadline over SSH too, including
@@ -806,22 +942,20 @@ Where it goes                            // capture.route; capture.routing's aut
 │   NoAnswer | Unreachable. Background refinements preserve an open search and
 │   selected session; a pick or Undo cancels them
 │   ├── Rule -> only a rule the person saved (`routing.sites`, `routing.apps`,
-│   │   a Shift pick's), or a page that names its session (a
-│   │   `<meta name="opencode-session">` tag or an `.opencode-session` file in
-│   │   its folder, found through symlinked folders too), which beats any rule
-│   │   and is sent to that exact session, a subagent's included ("page names
-│   │   it"): a three-second countdown begins at Written. A folder
+│   │   `routing.terminals`, a Shift pick's): a three-second countdown begins
+│   │   when the rule is shown. A folder
 │   │   rule shows its repository while its session resolves; it sends once both
 │   │   the countdown and resolution finish. Undo during the countdown posts
 │   │   nothing. The capsule's `Hold` pauses the countdown while the pointer is
 │   │   on it and resumes it with what it had left (at least 1 s; a hold the
 │   │   capsule never ends lapses after 2 min, and the next capture resumes
 │   │   it). Sending -> Sent, or Queued when OpenCode didn't take it. Whatever
-│   │   autoSend, smartRouting, or jevRouting say, a saved rule or signed page
-│   │   sends and nothing else sends on its own. smartRouting off decides with the port
+│   │   autoSend, smartRouting, or jevRouting say, no page or publisher can
+│   │   authorize a send or override a saved rule. smartRouting off decides with the port
 │   │   ladder, after rules and addresses, on the same look
 │   ├── Guess -> everything else the router would send (Jev's pick, HOME when
-│   │   Jev couldn't tell, a dev server's port, a page's data-session or
+│   │   Jev couldn't tell, a dev server's port, a page's opencode-session tag,
+│   │   `.opencode-session` file, data-session or
 │   │   publisher, a name that was said, the captured app's checkout (the one
 │   │   open session folder named like the app, such as `…/hex` for Hex's own
 │   │   Settings; smartRouting only), the port ladder) is suggestion #1, its
@@ -849,9 +983,9 @@ Where it goes                            // capture.route; capture.routing's aut
 │           ~/.local/state/opencode, or OPENCODE_PASSWORD), never the password.
 │           The capture stays saved and copied. Check: capture_host::routing
 │           a_look_that_read_no_sessions_answers_unreachable,
-│           a_failed_send_says_what_went_wrong. Known gap (#1131): Hex on
-│           Windows can't read the registration of an OpenCode running in WSL,
-│           so that setup isn't supported
+│           a_failed_send_says_what_went_wrong. On Windows with Labs ›
+│           OpenCode in WSL on, the capture router reaches the WSL service
+│           too (capture.send)
 ├── An answer for a capsule already closed (dismissed, or past its hold)
 │   leaves it closed; `hex capture list` and `send` still offer the capture
 ├── Starting another capture preserves an older rule's accepted pending send;
@@ -874,8 +1008,10 @@ Where it goes                            // capture.route; capture.routing's aut
 
 hex capture list|show|send|route         // capture.cli; docs/cli.md
 ├── list [--limit N] -> the newest bundles in the captures folder: mode, words,
-│   where it went
-├── show <capture> -> one capture's words, files, and send
+│   where it went; words count a model's own word times, else the words in the
+│   transcript's text
+├── show <capture> -> one capture's words, files, and send; a capture whose
+│   audio stopped early (the 8 h disk guard, or a failed write) says where
 ├── send <capture> [--to <session>] [--always] -> needs a listening Hex
 │   ├── The last routed capture -> as the capsule's pick (no --to: the Rule's
 │   │   session, a Guess's first suggestion, or the recorded destination), so
@@ -888,7 +1024,8 @@ hex capture list|show|send|route         // capture.cli; docs/cli.md
 
 hex capture cancel -> engine cancelled, sink closed, bundle removed
 hex capture status -> recording (bundle, elapsed), bundles still writing, last outcome
-                      (words, audio gaps, or why it has no transcript)
+                      (words, audio gaps, or why it has no transcript, and where
+                      its audio stopped if it did)
 Hex quits mid-capture -> cancelled, bundle removed; captures still writing stop
 transcribing between chunks and keep their audio (shutdown waits ≤ 2 s)
 
@@ -912,7 +1049,7 @@ transcribing between chunks and keep their audio (shutdown waits ≤ 2 s)
 │   without stopping the buffer, probes and decodes keyframes with `scrawl-helper`,
 │   writes `capture.json` and `scrawl.json` (`missing: "no_audio"`), copies to
 │   the clipboard, and feeds `capture.route`
-└── `capture.replay_hotkey` (unbound by default; recordable in the lab's drawer,
+└── `capture.replay_hotkey` (unbound by default; recordable in
     Settings › Annotate while the lab is on, or `hex settings set capture.replay_hotkey`)
     ├── Tap (< 300 ms) -> exports the silent 15 s clip at once, no mic opened
     └── Hold (≥ 300 ms) -> exports the frozen 15 s clip at the press and records
@@ -961,7 +1098,9 @@ Checks:
 - Words, in parakeet.rs: `chunked_word_transcription_keeps_word_times_across_chunks`
   and `word_transcription_is_a_foreground_request_on_the_shared_engine`;
   `foreground_work_waits_for_an_open_stream_instead_of_interrupting_it` in
-  [transcription/engine.rs](../../src/transcription/engine.rs).
+  [transcription/engine.rs](../../src/transcription/engine.rs);
+  `a_transcript_without_word_times_counts_the_words_it_says` in
+  [transcribe.rs](../../crates/capture/src/transcribe.rs).
 - Host, in capture_host.rs (a fake engine that writes through Scrawl's real
   `finalize_capture_bundle_with_flags`, without a screen):
   `controls_are_idempotent_and_stop_writes_a_scrawl_bundle`,
@@ -970,12 +1109,32 @@ Checks:
   `scrawls_engine_claims_nothing_machine_wide`,
   `the_timeline_resamples_pads_gaps_and_ends_at_the_stop`,
   `a_pending_gap_and_a_stalled_tail_come_back_from_the_closed_sink`,
-  `padding_past_the_length_limit_stays_bounded`,
+  `a_gap_is_digital_silence_where_it_happened`,
+  `a_capture_longer_than_twenty_minutes_keeps_all_of_its_audio`,
+  `past_the_guard_the_file_stops_and_the_rest_is_one_gap`,
+  `the_guard_records_where_the_audio_stopped`,
+  `a_write_failure_stops_the_audio_where_the_file_stopped`,
+  `a_mid_capture_write_failure_stops_where_the_file_stopped`,
   `captures_finish_one_at_a_time_and_starts_wait_for_room`,
   `a_capture_queued_behind_a_slow_finish_has_already_stopped`,
   `a_failed_start_raced_by_stop_never_wedges_later_starts`,
   `the_engine_config_comes_from_hex`, and
   `shutdown_cancels_the_recording_capture_and_waits_for_its_cleanup`.
+  In capture_host/wav_file.rs: `a_finished_file_reads_back_and_can_be_trimmed`,
+  `a_keep_past_the_written_samples_keeps_them_all`, and
+  `the_file_is_owner_only`.
+  In capture_host/words.rs: `pieces_past_the_first_window_keep_their_place_on_the_clock`,
+  `an_untimed_piece_spreads_over_its_own_audio_only`, and
+  `a_model_without_word_times_spreads_its_text_over_the_clip`;
+  `an_untimed_capture_gets_its_words_spread_over_its_length` in
+  [rune_ui/captures.rs](../../src/rune_ui/captures.rs).
+- The audio-stopped notice: `summary_says_where_a_captures_audio_stopped` in
+  [sketch.rs](../../crates/capture/src/sketch.rs);
+  `lengths_read_as_clocks_at_an_hour` and
+  `old_bundles_load_without_app_context_and_new_ones_round_trip` (which proves
+  `audioStoppedAtMs` is absent until it happens) in
+  [model.rs](../../crates/router/src/model.rs);
+  `the_guard_records_where_the_audio_stopped` above.
 - Shortcut and input, in capture_host.rs: `the_host_is_absent_while_captures_are_off`,
   `the_shortcut_starts_and_a_later_press_stops`,
   `input_reaches_only_the_capture_that_is_recording`, `tap_flags_become_modifiers`,
@@ -996,11 +1155,27 @@ Checks:
   capture.rs `a_shift_click_is_part_of_the_drawing`.
 - iPhone: `an_iphone_capture_narrates_with_hex_audio_and_finishes_when_its_mirror_ends`
   and `a_mirror_ending_never_stops_a_screen_capture` in capture_host.rs;
-  `since_moves_audio_and_gaps_onto_a_later_clock` in
+  `since_moves_audio_and_gaps_onto_a_later_clock`,
+  `audio_streamed_to_disk_counts_its_samples_and_can_be_read_back` (reading a
+  streamed recording consumes its partial), and
+  `a_streamed_recording_whose_file_is_gone_has_no_samples` in
   [audio.rs](../../crates/capture/src/audio.rs). The mirror, its
   `--no-microphone`, and the camera prompt have not run in Hex.
+- Streaming and recovery, in [recover.rs](../../crates/capture/src/recover.rs):
+  `a_capture_that_has_not_been_journaled_is_never_owed_a_rebuild` (and the
+  live case
+  of `recover_picks_up_old_video_and_audio_without_a_journal_but_never_a_live_capture`);
+  `a_streamed_audio_takes_its_final_name_only_when_its_build_settles_it` in
+  [pipeline.rs](../../crates/capture/src/pipeline.rs);
+  `a_journaled_capture_adopts_its_streamed_audio` in
+  [recover.rs](../../crates/capture/src/recover.rs) (a crash between the
+  journal and `audio.wav`);
+  `a_crashed_capture_with_only_partial_audio_is_cleaned_up` in
+  [retention.rs](../../crates/capture/src/retention.rs).
 - Routing, in [routing.rs](../../src/capture_host/routing.rs):
   `only_a_saved_rule_sends_on_its_own`,
+  `page_metadata_is_only_a_suggestion_and_never_overrides_a_saved_rule`
+  (early and late page reads, a fake recipient, the send deadline advanced),
   `a_rule_sends_and_lists_the_rest`,
   `a_guess_sends_nothing_and_a_failure_still_lists_recent_sessions`, and
   its `looked` tests, which write a bundle and route it through `look` and
@@ -1016,7 +1191,8 @@ Checks:
   `an_app_rules_folder_is_read_with_the_sessions`, and
   `a_look_past_its_deadline_skips_what_it_hadnt_begun`
   in [look.rs](../../crates/router/src/routing/look.rs); the CLI's
-  `a_capture_on_disk_summarizes_its_mode_words_and_send` in
+  `a_capture_on_disk_summarizes_its_mode_words_and_send` and
+  `a_capture_without_word_times_counts_the_words_it_says` in
   [library.rs](../../src/capture_host/library.rs), the protocol round trips in
   control.rs, and `control_commands_parse` in main.rs.
 - Switching, in capture_host.rs:
@@ -1028,9 +1204,10 @@ Checks:
   `a_pick_that_cannot_start_says_why`,
   `the_first_click_or_scroll_means_work_started`, and
   `the_newest_grab_takes_only_its_keys_until_it_drops`. Paste and Inspect
-  need a written capture
-  (`controls_are_idempotent_and_stop_writes_a_scrawl_bundle`); neither has
-  pasted into or opened anything in a test.
+  need a written capture. `paste_only_hands_off_the_shown_written_annotation_once`
+  and `clicks_on_the_capsule_do_what_they_say` distinguish local Paste from
+  picking a row by pointer or Enter in search. They record actions, not native
+  clipboard, focus or insertion in a receiving application.
 - Capsule, in rune_ui/capture_capsule (feature builds only): the flow tests
   (`chips_fold_once_seen_when_work_starts_but_never_under_the_pointer`,
   `the_shortcut_records_the_pickers_screen_and_a_chip_discards_the_recording`,

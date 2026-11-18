@@ -70,6 +70,23 @@ let
     # Annotate runs ffmpeg and ffprobe; the headless build includes libx264.
     ffmpeg-headless
   ];
+  # Every Git dependency Cargo.lock pins, with the revision its output hash was
+  # computed from. scripts/check-nix-git-pins.py fails a pull request that bumps
+  # one without the other, before Nix reports a hash mismatch.
+  cargoGitDependencies = {
+    "transcribe-rs-0.3.11" = {
+      rev = "e37c66b6df43af51fde8dec34f98a07aaf09564c";
+      hash = "sha256-MJJiug3LfbKsuHcL2+LJk95+j5kk/MWzb5ihdBlHLmE=";
+    };
+    "rune-0.0.1" = {
+      rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90";
+      hash = "sha256-aXs5tgrATglYprmwjDdIFkyp9gHCor7CFdla1aqJfZo=";
+    };
+    "transcribe-cpp-sys-0.4.1" = {
+      rev = "c76002365904bfab993bb3e2f589d7a49632719e";
+      hash = "sha256-yZcKJjOrjg+y7svGzIEpIXVKpH/sm9DcQz6jMhVRxNM=";
+    };
+  };
 in
 rustPlatform.buildRustPackage (finalAttrs: {
   pname = "hex";
@@ -89,20 +106,83 @@ rustPlatform.buildRustPackage (finalAttrs: {
       ../resources
       ../assets
       ../packaging
+      # The Labs registry's published copy: a Rust test compares it to the registry.
+      ../site/src/labs.json
       ../macos/HexMicrophoneDriver/Info.plist
       # Built in: a 2.3.1 install moves itself into this installer's layout.
       ../.github/release/install-linux.sh
     ];
   };
 
-  cargoLock = {
-    lockFile = ../Cargo.lock;
-    outputHashes = {
-      "transcribe-rs-0.3.11" = "sha256-MJJiug3LfbKsuHcL2+LJk95+j5kk/MWzb5ihdBlHLmE=";
-      "rune-0.0.1" = "sha256-Uw4oL+rWrg91LNtNuAXjIp42JetwRxnB3nbn5sLAW2A=";
-      "transcribe-cpp-sys-0.4.1" = "sha256-BAc2qKUMBZ5D6+Bq12NaZ1+ntWxHv95TYcAMTt3a5X8=";
-    };
-  };
+  # nixpkgs' vendor directory keeps every crate in one place, keyed by name and
+  # version, so it cannot hold two copies from different sources. Rune's
+  # `vendor/tiny-skia-path` is a path dependency inside Rune (a Git crate here)
+  # at 0.11.4, the same name and version as resvg's from crates.io, so this
+  # vendors crates.io's crates in `registry/` and every Git source's crates in
+  # `git/`, and points each source at its own directory: Cargo tells them apart
+  # by source. The script is importCargoLock's, rewritten; each fragment below
+  # must still be in it (the guard says which is gone), so a nixpkgs change
+  # fails loudly here instead of vendoring something wrong.
+  cargoDeps =
+    (rustPlatform.importCargoLock {
+      lockFile = ../Cargo.lock;
+      outputHashes = builtins.mapAttrs (_: dependency: dependency.hash) cargoGitDependencies;
+    }).overrideAttrs
+      (old: {
+        buildCommand =
+          let
+            # importCargoLock's script, and what this override turns it into.
+            fragments = [
+              {
+                what = "the single vendored-sources config";
+                from = ''
+                  [source.crates-io]
+                  replace-with = "vendored-sources"
+
+                  [source.vendored-sources]
+                  directory = "cargo-vendor-dir"'';
+                to = ''
+                  [source.crates-io]
+                  replace-with = "registry-vendor-dir"
+
+                  [source.registry-vendor-dir]
+                  directory = "cargo-vendor-dir/registry"
+
+                  [source.git-vendor-dir]
+                  directory = "cargo-vendor-dir/git"'';
+              }
+              {
+                what = "the one-directory crate link";
+                from = ''ln -s "$crate" $out/$(basename "$crate" | cut -c 34-)'';
+                to = ''
+                  dest=$(basename "$crate" | cut -c 34-)
+                        if [ -e "$crate/.cargo-config" ]; then
+                          mkdir -p $out/git
+                          ln -s "$crate" $out/git/$dest
+                        else
+                          mkdir -p $out/registry
+                          ln -s "$crate" $out/registry/$dest
+                        fi'';
+              }
+              {
+                what = "the Git source config append";
+                from = ''cat "$crate/.cargo-config" >> $out/.cargo/config.toml'';
+                to = ''sed 's/replace-with = "vendored-sources"/replace-with = "git-vendor-dir"/' "$crate/.cargo-config" >> $out/.cargo/config.toml'';
+              }
+            ];
+            missing = builtins.filter (fragment: !(lib.hasInfix fragment.from old.buildCommand)) fragments;
+          in
+          if missing != [ ] then
+            throw (
+              "nix/package.nix: importCargoLock's vendor script changed; re-apply the split into "
+              + "a registry and a Git vendor directory. Missing: "
+              + lib.concatMapStringsSep ", " (fragment: fragment.what) missing
+            )
+          else
+            lib.replaceStrings (map (fragment: fragment.from) fragments) (map (
+              fragment: fragment.to
+            ) fragments) old.buildCommand;
+      });
 
   nativeBuildInputs = [
     pkg-config

@@ -27,7 +27,6 @@ pub(crate) struct HostState {
     pub(crate) listener: DesktopListenerSnapshot,
     pub(crate) transcription: DesktopTranscriptionSnapshot,
     pub(crate) update: DesktopUpdateStatus,
-    pub(crate) capture: CaptureSnapshot,
     pub(crate) window_open: bool,
 }
 
@@ -35,6 +34,8 @@ pub(crate) struct HostState {
 /// waiting on the transport's worker thread.
 pub(crate) trait Host {
     fn state(&self) -> Result<HostState, ControlError>;
+    /// Queries the listener owner; a missing answer is never an idle capture.
+    fn capture(&self) -> Result<CaptureSnapshot, ControlError>;
     /// Hands a dictation command to the listener's own queue, as its
     /// shortcut would; `print` rides along with a printing stop, and `raw`
     /// with a start that skips processing.
@@ -45,9 +46,17 @@ pub(crate) trait Host {
         raw: bool,
     ) -> Result<(), ControlError>;
     fn paste_last(&self) -> Result<(), ControlError>;
+    /// Runs the focused field's text through its Output steps and replaces
+    /// it, where this OS has Labs › Transform typed text.
+    fn typed_text(&self) -> Result<(), ControlError> {
+        Err(ControlError::new(
+            "unsupported",
+            "Transform typed text is Linux only",
+        ))
+    }
     /// Saves `settings` as the window would and lets the runtime, the
     /// listener, and an open window adopt them.
-    fn save(&self, settings: AppSettings) -> Result<(), ControlError>;
+    fn save(&self, base: &AppSettings, settings: AppSettings) -> Result<(), ControlError>;
     fn history(&self) -> Option<crate::history::History>;
     fn show_window(&self, pane: Option<Pane>) -> Result<(), ControlError>;
     /// Closes the window; false when it wasn't open.
@@ -117,7 +126,7 @@ fn command(host: &dyn Host, command: ControlCommand) -> ControlReply {
         ControlCommand::Quit { force } | ControlCommand::Restart { force } => {
             let restart = matches!(command, ControlCommand::Restart { .. });
             reply(
-                super::check_quit(&meeting_report(), capture(host), force)
+                super::check_quit(&meeting_report(), host.capture(), force)
                     .and_then(|()| host.quit(restart))
                     .map(|()| {
                         ControlReply::done(if restart {
@@ -128,6 +137,15 @@ fn command(host: &dyn Host, command: ControlCommand) -> ControlReply {
                     }),
             )
         }
+        ControlCommand::Dictation {
+            action: CaptureAction::Start,
+            print: true,
+            ..
+        } => ControlReply::error(
+            "unsupported",
+            "`hex dictation start --print` is macOS only; `hex dictation stop --print` \
+             still prints here",
+        ),
         ControlCommand::Dictation {
             action,
             print: true,
@@ -146,6 +164,10 @@ fn command(host: &dyn Host, command: ControlCommand) -> ControlReply {
         ControlCommand::PasteLast => reply(
             host.paste_last()
                 .map(|()| ControlReply::done("Pasting the last dictation")),
+        ),
+        ControlCommand::TypedText => reply(
+            host.typed_text()
+                .map(|()| ControlReply::done("Transforming the focused text")),
         ),
         ControlCommand::MeetingRecord { title } => meeting(false, title),
         ControlCommand::MeetingStop => meeting(true, None),
@@ -226,9 +248,10 @@ fn command(host: &dyn Host, command: ControlCommand) -> ControlReply {
         })),
         ControlCommand::VocabularyAdd { .. } | ControlCommand::VocabularyRemove { .. } => {
             reply(load().and_then(|mut settings| {
+                let base = settings.clone();
                 let reply = super::edit_vocabulary(&mut settings.vocabulary, &command)?;
                 if matches!(reply, ControlReply::Done { changed: true, .. }) {
-                    host.save(settings)?;
+                    host.save(&base, settings)?;
                 }
                 Ok(reply)
             }))
@@ -333,10 +356,6 @@ fn meeting(stop: bool, title: Option<String>) -> ControlReply {
     })
 }
 
-fn capture(host: &dyn Host) -> Result<CaptureSnapshot, ControlError> {
-    host.state().map(|state| state.capture)
-}
-
 fn load() -> Result<AppSettings, ControlError> {
     AppSettings::load().map_err(|error| {
         ControlError::new("internal", format!("couldn't read settings: {error:#}"))
@@ -377,16 +396,9 @@ fn commit(
     if !change.changed(before) {
         return Ok(ControlReply::unchanged(unchanged()));
     }
-    host.save(change.settings)?;
+    host.save(before, change.settings)?;
     for effect in change.effects {
         match effect {
-            settings::Effect::HistoryRetention(retention) => {
-                if let Some(history) = host.history()
-                    && let Err(error) = history.set_retention(retention)
-                {
-                    tracing::warn!(%error, "could not apply history retention");
-                }
-            }
             settings::Effect::DockIcon => {}
             settings::Effect::CheckForUpdates => {
                 let _ = host.check_for_updates();
@@ -481,12 +493,16 @@ fn clear_history(host: &dyn Host) -> Result<ControlReply, ControlError> {
         .history()
         .ok_or_else(|| ControlError::new("unavailable", "history couldn't be opened"))?;
     let count = history.search("").len();
-    if count == 0 {
+    let rollup = history.has_usage();
+    if count == 0 && !rollup {
         return Ok(ControlReply::unchanged("History is already empty"));
     }
     history
         .clear()
         .map_err(|error| ControlError::new("failed", format!("couldn't clear history: {error}")))?;
+    if count == 0 {
+        return Ok(ControlReply::done("Cleared history stats"));
+    }
     Ok(ControlReply::done(format!(
         "Cleared {count} dictation{}",
         if count == 1 { "" } else { "s" }
@@ -516,27 +532,18 @@ fn launch_at_login(host: &dyn Host, enabled: Option<bool>) -> ControlReply {
     }
 }
 
-/// What the listener is doing, from the event log's latest state.
-pub(crate) fn capture_from_state(
-    state: Option<crate::desktop::events::VoiceState>,
-) -> CaptureSnapshot {
-    use crate::desktop::events::VoiceState;
-    CaptureSnapshot {
-        recording: matches!(state, Some(VoiceState::Dictating))
-            .then_some(super::CaptureKind::Dictation),
-        pending_jobs: usize::from(matches!(state, Some(VoiceState::Transcribing))),
-        microphone_unavailable: false,
-    }
-}
-
 fn status(host: &dyn Host) -> Result<ControlReply, ControlError> {
     let state = host.state()?;
     let settings = &state.settings;
-    let selection = &settings.transcription;
-    let definition = crate::transcription::models::definition(selection.model);
-    let installed = crate::transcription::models::is_installed(definition, &selection.language);
+    let ready = crate::desktop::onboarding::model_ready(&settings.transcription);
     let capture = if state.listener.running {
-        CaptureReport::from(state.capture)
+        match host.capture() {
+            Ok(snapshot) => CaptureReport::from(snapshot),
+            Err(_) => CaptureReport {
+                state: CaptureState::Unknown,
+                ..Default::default()
+            },
+        }
     } else {
         CaptureReport {
             state: CaptureState::Idle,
@@ -556,7 +563,7 @@ fn status(host: &dyn Host) -> Result<ControlReply, ControlError> {
                 .or(state.listener.warning.as_ref())
             {
                 Some(warning) => format!("{} ({warning})", state.listener.status),
-                None => state.listener.status.clone(),
+                None => state.listener.status.to_string(),
             },
             shortcuts: match &state.listener.shortcuts {
                 crate::desktop::host::DesktopShortcuts::Portal(granted) => granted
@@ -572,16 +579,13 @@ fn status(host: &dyn Host) -> Result<ControlReply, ControlError> {
         capture,
         meeting: meeting_report(),
         model: ModelReport {
-            id: selection.model.as_str().into(),
-            name: definition.name.into(),
-            language: selection.language.clone(),
-            installed,
             preparing: state
                 .transcription
                 .preparing
                 .map(|model| model.as_str().into()),
             downloaded_bytes: state.transcription.downloaded_bytes,
             error: state.transcription.error.clone(),
+            ..ModelReport::saved(&settings.transcription)
         },
         features: FeatureReport {
             meetings: crate::app_settings::meetings_enabled(),
@@ -593,10 +597,10 @@ fn status(host: &dyn Host) -> Result<ControlReply, ControlError> {
         },
         // Linux and Windows gate dictation on no privacy permission.
         permissions: PermissionReport {
-            ready: installed,
+            ready,
             microphone: "ready".into(),
             accessibility: "ready".into(),
-            transcription_model: installed,
+            transcription_model: ready,
         },
         window: WindowReport {
             open: state.window_open,
@@ -617,8 +621,12 @@ mod tests {
     #[derive(Default)]
     struct FakeHost {
         recording: bool,
+        service: bool,
+        pending_jobs: usize,
+        unresponsive: bool,
         quits: Mutex<Vec<bool>>,
         dictations: Mutex<Vec<CaptureAction>>,
+        history: Option<crate::history::History>,
     }
 
     impl Host for FakeHost {
@@ -627,9 +635,11 @@ mod tests {
                 settings: AppSettings::default(),
                 listener: DesktopListenerSnapshot {
                     running: true,
-                    status: "Enabled".into(),
+                    warming: false,
+                    status: crate::desktop::host::ListenerStatus::Enabled,
                     warning: None,
                     notice: None,
+                    last_failure: None,
                     shortcuts: Default::default(),
                     shortcuts_configurable: false,
                 },
@@ -641,11 +651,22 @@ mod tests {
                     preparing: None,
                 },
                 update: DesktopUpdateStatus::Current,
-                capture: capture_from_state(
-                    self.recording
-                        .then_some(crate::desktop::events::VoiceState::Dictating),
-                ),
                 window_open: false,
+            })
+        }
+        fn capture(&self) -> Result<CaptureSnapshot, ControlError> {
+            if self.unresponsive {
+                return Err(ControlError::new("unavailable", "listener didn't answer"));
+            }
+            Ok(CaptureSnapshot {
+                recording: if self.service {
+                    Some(super::super::CaptureKind::Service)
+                } else {
+                    self.recording
+                        .then_some(super::super::CaptureKind::Dictation)
+                },
+                pending_jobs: self.pending_jobs,
+                ..Default::default()
             })
         }
         fn dictation(
@@ -663,11 +684,11 @@ mod tests {
         fn paste_last(&self) -> Result<(), ControlError> {
             Ok(())
         }
-        fn save(&self, _: AppSettings) -> Result<(), ControlError> {
+        fn save(&self, _: &AppSettings, _: AppSettings) -> Result<(), ControlError> {
             Ok(())
         }
         fn history(&self) -> Option<crate::history::History> {
-            None
+            self.history.clone()
         }
         fn show_window(&self, _: Option<Pane>) -> Result<(), ControlError> {
             Ok(())
@@ -712,6 +733,38 @@ mod tests {
     }
 
     #[test]
+    fn clearing_history_with_only_a_usage_rollup_still_deletes_it() {
+        let directory =
+            std::env::temp_dir().join(format!("hex-control-clear-usage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("history.json");
+        let history = crate::history::History::new(crate::history::HistoryStore::open(
+            path.clone(),
+            crate::history::HistoryRetention::Week,
+            crate::history::now_ms(),
+        ));
+        crate::history::usage::count(
+            &crate::history::usage::path(&path),
+            crate::history::now_ms(),
+            4,
+            1_000,
+        )
+        .unwrap();
+        assert!(history.has_usage());
+
+        let host = FakeHost {
+            history: Some(history.clone()),
+            ..Default::default()
+        };
+        let reply = ask(&host, ControlCommand::HistoryClear);
+        assert!(matches!(reply, ControlReply::Done { changed: true, .. }));
+        assert!(!history.has_usage());
+        assert!(history.search("").is_empty());
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
     fn quitting_waits_for_a_recording_unless_forced() {
         let host = FakeHost {
             recording: true,
@@ -727,6 +780,48 @@ mod tests {
             "ok"
         );
         assert_eq!(*host.quits.lock().unwrap(), [true]);
+    }
+
+    #[test]
+    fn quit_and_status_use_the_owner_even_without_dictating_log_events() {
+        for (host, expected) in [
+            (
+                FakeHost {
+                    service: true,
+                    ..Default::default()
+                },
+                CaptureState::Recording,
+            ),
+            (
+                FakeHost {
+                    pending_jobs: 2,
+                    ..Default::default()
+                },
+                CaptureState::Transcribing,
+            ),
+            (
+                FakeHost {
+                    unresponsive: true,
+                    ..Default::default()
+                },
+                CaptureState::Unknown,
+            ),
+        ] {
+            assert_eq!(
+                code(&ask(&host, ControlCommand::Quit { force: false })),
+                "busy"
+            );
+            assert!(host.quits.lock().unwrap().is_empty());
+            let ControlReply::Status(status) = ask(&host, ControlCommand::Status) else {
+                panic!("expected status");
+            };
+            assert_eq!(status.capture.state, expected);
+            assert_eq!(status.capture.pending_jobs, host.pending_jobs);
+            assert_eq!(
+                code(&ask(&host, ControlCommand::Quit { force: true })),
+                "ok"
+            );
+        }
     }
 
     #[test]
@@ -749,7 +844,7 @@ mod tests {
             print: true,
             raw: false,
         };
-        assert_eq!(code(&ask(&host, start_print)), "invalid-value");
+        assert_eq!(code(&ask(&host, start_print)), "unsupported");
         assert_eq!(
             *host.dictations.lock().unwrap(),
             [CaptureAction::Stop, CaptureAction::Stop]
@@ -761,6 +856,7 @@ mod tests {
         let host = FakeHost::default();
         for command in [
             ControlCommand::LaunchAtLogin { enabled: None },
+            ControlCommand::TypedText,
             ControlCommand::ScrawlCaptureUndo,
             ControlCommand::WindowStory {
                 story: "HUD".into(),

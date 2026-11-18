@@ -1,5 +1,5 @@
 //! The OpenCode model catalog and the model and thinking pickers that each
-//! mode's rewriting uses, and Labs › Choose meeting summary model's picker:
+//! mode's rewriting uses, and Meetings › Settings' summary model picker:
 //! the catalog loads off the UI thread only while a pane that uses it shows,
 //! a stopped OpenCode is looked for again at a coarse interval, failures
 //! wait for an explicit retry, and choosing a mode's model also picks its
@@ -13,13 +13,13 @@ use rune_kit::{
     Badge, Combobox, ComboboxOption, ComboboxState, Placement, Select, SelectAppearance,
 };
 
-use super::controls::{ButtonKind, Paint, button, icon_row, setting_row};
+use super::controls::{ButtonKind, Paint, button, setting_row};
 use super::modes::Selection;
 use super::{Menu, Ui};
 use crate::app_settings::AppSettings;
 use crate::desktop::i18n::{tr, tr_fill};
 use crate::desktop::opencode_catalog::{
-    ModelCatalogState, OPENCODE_RETRY_INTERVAL, OpenCodeFeature, model_presentation,
+    ModelCatalogState, ModelDefault, OPENCODE_RETRY_INTERVAL, OpenCodeFeature, model_presentation,
     model_variants, open_opencode_docs, opencode_unavailable_copy, provider_label,
     start_model_catalog_load,
 };
@@ -31,15 +31,15 @@ const MODEL_FIELD_WIDTH: f32 = 240.0;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Target {
     Mode(Selection),
-    /// `meetings.opencode_model` (Labs › Choose meeting summary model): no
-    /// thinking variant, and its default entry clears it, so Hex picks one
-    /// of its fast models.
+    /// `meetings.opencode_model` (Meetings › Settings › Summaries): no
+    /// thinking variant, and its default entry clears it, so OpenCode's own
+    /// default model writes them.
     MeetingSummary,
 }
 
 /// The meeting summary picker's default entry, and the field while it is
 /// chosen.
-pub(super) const SUMMARY_AUTOMATIC: &str = "Hex picks a fast model";
+pub(super) const SUMMARY_AUTOMATIC: &str = "OpenCode's default model";
 
 pub(super) struct Models {
     state: ModelCatalogState,
@@ -48,6 +48,9 @@ pub(super) struct Models {
     retry_at: Option<Instant>,
     /// The model popover: open, its search, and its highlight.
     pub(super) picker: ComboboxState,
+    /// Whether the popover was open at the last poll, so opening it reads
+    /// the catalog again.
+    picker_was_open: bool,
 }
 
 impl Default for Models {
@@ -57,6 +60,7 @@ impl Default for Models {
             receiver: None,
             retry_at: None,
             picker: ComboboxState::default(),
+            picker_was_open: false,
         }
     }
 }
@@ -71,14 +75,22 @@ impl Models {
     /// field does.
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn open_picker(&mut self) {
-        self.picker.open = true;
-        self.picker.search.focused = true;
+        let _ = self
+            .picker
+            .step(rune_kit::ComboboxEvent::Toggle { current: None });
     }
 
     /// Adopts a finished load. While `wanted` (a pane that uses the catalog
     /// shows), loads it the first time and looks for a stopped OpenCode
     /// now and then; otherwise touches nothing.
     pub(super) fn poll(&mut self, wanted: bool) -> bool {
+        let opened = self.picker.is_open() && !self.picker_was_open;
+        self.picker_was_open = self.picker.is_open();
+        // Opening the picker reads the catalog again, keeping the models it
+        // shows until the new list arrives.
+        if wanted && opened && self.receiver.is_none() {
+            self.start_load();
+        }
         if let Some(receiver) = &self.receiver {
             let Ok(state) = receiver.try_recv() else {
                 return false;
@@ -178,6 +190,21 @@ impl Models {
         models
     }
 
+    /// [`Models::fixture`] listing only a model Hex doesn't recommend, so an
+    /// unset key really gets OpenCode's own default.
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn fixture_unranked() -> Self {
+        let mut models = Self::fixture();
+        if let ModelCatalogState::Loaded(catalog) = &mut models.state {
+            catalog
+                .models
+                .retain(|choice| choice.key == "opencode/grok-code");
+            catalog.default_key = Some("opencode/grok-code".into());
+            catalog.default_name = Some("Grok Code Fast".into());
+        }
+        models
+    }
+
     pub(super) fn fixture_not_running() -> Self {
         Self {
             state: ModelCatalogState::NotRunning,
@@ -190,7 +217,10 @@ impl Models {
 fn selected(settings: &AppSettings, target: Target) -> (Option<&str>, Option<&str>) {
     match target {
         Target::Mode(selection) => {
-            let processing = &super::modes::mode(settings, selection).post_processing;
+            let Some(mode) = super::modes::mode(settings, selection) else {
+                return (None, None);
+            };
+            let processing = &mode.post_processing;
             (processing.model.as_deref(), processing.variant.as_deref())
         }
         Target::MeetingSummary => (
@@ -212,7 +242,10 @@ fn set_model(
 ) {
     match target {
         Target::Mode(selection) => {
-            let processing = &mut super::modes::mode_mut(settings, selection).post_processing;
+            let Some(mode) = super::modes::mode_mut(settings, selection) else {
+                return;
+            };
+            let processing = &mut mode.post_processing;
             processing.model = model;
             processing.variant = variant;
         }
@@ -274,7 +307,8 @@ fn status(models: &Models) -> String {
 pub(super) fn rows(ui: &Ui, p: Paint, target: Target, layer: &mut Vec<El>) -> Vec<El> {
     let (model, variant) = selected(&ui.settings, target);
     let meeting = target == Target::MeetingSummary;
-    // Hex, not OpenCode's default, picks a meeting summary model left unset.
+    // An unset meeting summary uses OpenCode's own default model, so the field
+    // names that instead of a mode's automatic or default presentation.
     let presentation = if meeting && model.is_none() {
         None
     } else {
@@ -316,11 +350,13 @@ pub(super) fn rows(ui: &Ui, p: Paint, target: Target, layer: &mut Vec<El>) -> Ve
                     .font(p.k.ty.small)
                     .color(p.muted()),
             )
-            .children(
-                presentation
-                    .is_default
-                    .then(|| Badge::new(tr("Default")).build(p.k)),
-            ),
+            .children(presentation.default.map(|default| {
+                Badge::new(match default {
+                    ModelDefault::Automatic => tr("Automatic"),
+                    ModelDefault::OpenCode => tr("Default"),
+                })
+                .build(p.k)
+            })),
         None if meeting => field.child(
             text(tr(SUMMARY_AUTOMATIC))
                 .key("name")
@@ -345,7 +381,8 @@ pub(super) fn rows(ui: &Ui, p: Paint, target: Target, layer: &mut Vec<El>) -> Ve
         )
         .label(field_label);
     let picker = model_picker(ui, p, target, field, layer);
-    let refresh = ui.models.available().then(|| {
+    // The meeting picker reads the catalog again each time it opens instead.
+    let refresh = (!meeting && ui.models.available()).then(|| {
         button(
             p,
             "refresh-models",
@@ -361,13 +398,12 @@ pub(super) fn rows(ui: &Ui, p: Paint, target: Target, layer: &mut Vec<El>) -> Ve
         .child(picker)
         .children(refresh);
     if meeting {
-        let about = super::platform_settings::summary_model_about(model.unwrap_or_default());
-        return vec![icon_row(
+        let about = super::platform_settings::summary_model_problem(model.unwrap_or_default());
+        return vec![setting_row(
             p,
             "meeting-summary-model",
-            &super::icons::SPARKLES,
-            tr("Summary model"),
-            Some(about.as_str()),
+            tr("Model"),
+            about,
             control,
         )];
     }
@@ -421,9 +457,19 @@ pub(super) fn rows(ui: &Ui, p: Paint, target: Target, layer: &mut Vec<El>) -> Ve
     rows
 }
 
-/// The model field's popover: a search over every model, with the OpenCode
-/// default first. Options are keyed by their place in the catalog, since
-/// model keys contain slashes.
+/// The popover's unset entry: Hex's automatic ranked pick while the catalog
+/// lists a ranked model, else OpenCode's own default model.
+fn default_entry_label(catalog: &ModelCatalog) -> &'static str {
+    if catalog.automatic_default() {
+        tr("Automatic")
+    } else {
+        tr("Use OpenCode default")
+    }
+}
+
+/// The model field's popover: a search over every model, with the automatic
+/// or OpenCode default first. Options are keyed by their place in the catalog,
+/// since model keys contain slashes.
 fn model_picker(ui: &Ui, p: Paint, target: Target, field: El, layer: &mut Vec<El>) -> El {
     let catalog = ui.models.catalog();
     let mut keys = Vec::new();
@@ -434,7 +480,7 @@ fn model_picker(ui: &Ui, p: Paint, target: Target, field: El, layer: &mut Vec<El
             options.push(ComboboxOption::new("0", tr(SUMMARY_AUTOMATIC)));
         } else if let Some(name) = &catalog.default_name {
             keys.push(None);
-            let mut option = ComboboxOption::new("0", tr("Use OpenCode default"));
+            let mut option = ComboboxOption::new("0", default_entry_label(catalog));
             option.detail = name.clone();
             options.push(option);
         }

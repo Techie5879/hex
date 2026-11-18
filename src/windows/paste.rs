@@ -11,7 +11,7 @@ use windows_sys::Win32::System::DataExchange::{CountClipboardFormats, GetClipboa
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MapVirtualKeyExW, SendInput, VK_CONTROL, VK_LWIN, VK_MENU,
-    VK_RWIN, VK_SHIFT, VK_V,
+    VK_RETURN, VK_RWIN, VK_SHIFT, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
@@ -37,6 +37,12 @@ const PLAIN_PASTE_STEMS: &[&str] = &["javaw", "java"];
 
 fn paste_with_shift_into(stem: Option<&str>, terminal_paste: bool) -> bool {
     terminal_paste && !stem.is_some_and(|stem| PLAIN_PASTE_STEMS.contains(&stem))
+}
+
+/// A paste with Ctrl+Shift+V when this capture asks for it (Labs › Terminal
+/// paste shortcut) or the saved Terminal paste setting is on.
+fn shift_paste(for_this_capture: bool, terminal_paste: bool) -> bool {
+    for_this_capture || terminal_paste
 }
 
 enum ClipboardSnapshot {
@@ -115,6 +121,15 @@ impl ClipboardRestore {
         self.last_sequence = Some(inserted_sequence);
         self.generation
     }
+
+    /// Labs › Keep dictation on clipboard: the paste stays on the clipboard,
+    /// so no earlier snapshot may come back and any pending restore stands
+    /// down.
+    fn keep(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.original = None;
+        self.last_sequence = None;
+    }
 }
 
 impl WindowsPaster {
@@ -127,7 +142,9 @@ impl WindowsPaster {
         })
     }
 
-    pub fn paste(&mut self, text: &str) -> Result<()> {
+    /// Pastes `text`, with Ctrl+Shift+V when `shift` asks for it or the
+    /// saved Terminal paste setting is on. Java games still take Ctrl+V.
+    pub fn paste(&mut self, text: &str, shift: bool) -> Result<()> {
         if text.trim().is_empty() {
             return Err(eyre!("refusing to paste an empty transcript"));
         }
@@ -136,14 +153,21 @@ impl WindowsPaster {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let original_sequence = clipboard_sequence();
+        // Read as the paste commits, so the toggle applies at once.
+        let keep = crate::labs::keep_on_clipboard();
         // A clipboard Hex can't snapshot (an app's private format) never
         // blocks the paste: the transcript still goes in, and that
-        // clipboard just isn't restored afterwards.
-        let snapshot = match ClipboardSnapshot::read(&mut self.clipboard) {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                tracing::warn!(%error, "pasting without restoring the previous Windows clipboard");
-                None
+        // clipboard just isn't restored afterwards. Keeping the paste needs
+        // no snapshot at all.
+        let snapshot = if keep {
+            None
+        } else {
+            match ClipboardSnapshot::read(&mut self.clipboard) {
+                Ok(snapshot) => Some(snapshot),
+                Err(error) => {
+                    tracing::warn!(%error, "pasting without restoring the previous Windows clipboard");
+                    None
+                }
             }
         };
         wait_for_conflicting_modifiers();
@@ -152,16 +176,31 @@ impl WindowsPaster {
                 "the clipboard changed while the transcript was being prepared"
             ));
         }
-        // Marked so Windows keeps the transcript out of clipboard history
-        // (Win+V) and cloud sync, as macOS marks it transient (#851).
-        self.clipboard
-            .set()
-            .exclude_from_history()
-            .exclude_from_cloud()
-            .text(text.to_string())
-            .wrap_err("could not place the transcript on the Windows clipboard")?;
-        let transcript_sequence = clipboard_sequence();
-        let generation = restore.register(snapshot, original_sequence, transcript_sequence);
+        if keep {
+            // Labs › Keep dictation on clipboard: an ordinary entry, so
+            // Windows keeps it in clipboard history (Win+V) and cloud sync,
+            // as macOS keeps its kept entry ordinary too.
+            self.clipboard
+                .set()
+                .text(text.to_string())
+                .wrap_err("could not place the transcript on the Windows clipboard")?;
+            restore.keep();
+        } else {
+            // Marked so Windows keeps the transcript out of clipboard history
+            // (Win+V) and cloud sync, as macOS marks it transient (#851).
+            self.clipboard
+                .set()
+                .exclude_from_history()
+                .exclude_from_cloud()
+                .text(text.to_string())
+                .wrap_err("could not place the transcript on the Windows clipboard")?;
+        }
+        let generation = if keep {
+            None
+        } else {
+            let transcript_sequence = clipboard_sequence();
+            Some(restore.register(snapshot, original_sequence, transcript_sequence))
+        };
         drop(restore);
 
         let stem = crate::windows::input::foreground_process_stem();
@@ -171,12 +210,17 @@ impl WindowsPaster {
         }
         let shift = paste_with_shift_into(
             stem.as_deref(),
-            self.paste_with_shift.load(Ordering::Relaxed),
+            shift_paste(shift, self.paste_with_shift.load(Ordering::Relaxed)),
         );
         if let Err(error) = send_paste_shortcut(shift) {
-            restore_clipboard_generation(&self.clipboard_restore, generation);
+            if let Some(generation) = generation {
+                restore_clipboard_generation(&self.clipboard_restore, generation);
+            }
             return Err(error);
         }
+        let Some(generation) = generation else {
+            return Ok(());
+        };
         let clipboard_restore = self.clipboard_restore.clone();
         let restore_delay = if remote_desktop {
             REMOTE_DESKTOP_RESTORE_DELAY
@@ -188,6 +232,44 @@ impl WindowsPaster {
             restore_clipboard_generation(&clipboard_restore, generation);
         });
         Ok(())
+    }
+
+    /// Labs › YOLO mode: one press of Return after a paste, once
+    /// the paste has had [`crate::dictation::yolo_mode::SETTLE`] to land.
+    pub fn press_return(&mut self) -> Result<()> {
+        thread::sleep(crate::dictation::yolo_mode::SETTLE);
+        wait_for_conflicting_modifiers();
+        let scan = foreground_scan_code(VK_RETURN);
+        let inputs = [
+            keyboard_input(VK_RETURN, scan, 0),
+            keyboard_input(VK_RETURN, scan, KEYEVENTF_KEYUP),
+        ];
+        let sent = send_inputs(&inputs);
+        if sent != inputs.len() as u32 {
+            send_inputs(&inputs[1..]);
+            return Err(eyre!(
+                "Windows accepted only {sent} of 2 synthetic Return events; an elevated target window may reject input"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Labs › Copy dictation only: leaves `text` on the clipboard for the
+    /// user to paste, with no keystroke and no restore. A pending restore
+    /// stands down and no earlier snapshot comes back.
+    pub fn copy_only(&mut self, text: &str) -> Result<()> {
+        if text.trim().is_empty() {
+            return Err(eyre!("refusing to copy an empty transcript"));
+        }
+        let mut restore = self
+            .clipboard_restore
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        restore.keep();
+        self.clipboard
+            .set()
+            .text(text.to_string())
+            .wrap_err("could not place the transcript on the Windows clipboard")
     }
 }
 
@@ -343,6 +425,18 @@ mod tests {
     }
 
     #[test]
+    fn keeping_the_paste_cancels_a_pending_restore() {
+        let mut restore = ClipboardRestore::default();
+        let generation = restore.register(Some(ClipboardSnapshot::Text("original".into())), 10, 11);
+
+        restore.keep();
+
+        assert_ne!(restore.generation, generation);
+        assert!(restore.original.is_none());
+        assert_eq!(restore.last_sequence, None);
+    }
+
+    #[test]
     fn an_unreadable_clipboard_still_pastes_and_restores_nothing() {
         let mut restore = ClipboardRestore::default();
         restore.register(Some(ClipboardSnapshot::Text("old".into())), 1, 2);
@@ -368,6 +462,14 @@ mod tests {
         assert!(!paste_with_shift_into(Some("javaw"), true));
         assert!(!paste_with_shift_into(Some("java"), true));
         assert!(!paste_with_shift_into(Some("notepad"), false));
+    }
+
+    #[test]
+    fn a_terminal_paste_capture_overrides_the_saved_setting() {
+        assert!(shift_paste(true, false));
+        assert!(shift_paste(false, true));
+        assert!(shift_paste(true, true));
+        assert!(!shift_paste(false, false));
     }
 
     /// US-layout scan codes for the chord's keys.

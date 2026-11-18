@@ -1,3 +1,5 @@
+pub(crate) mod return_to_app;
+
 use std::ffi::{c_char, c_void};
 use std::fs;
 use std::ops::RangeInclusive;
@@ -32,6 +34,12 @@ pub enum PasteMode {
     /// Labs › Copy dictation only: the text goes to the clipboard as an
     /// ordinary entry and nothing is pasted, typed, or restored.
     CopyOnly,
+    /// Labs › YOLO mode: pastes as `Continue` does, but what may be sent
+    /// can't be continued. `Return` sends it.
+    Send,
+    /// Labs › YOLO mode: presses Return after a `Send` paste; the text is
+    /// ignored.
+    Return,
 }
 
 struct PreparedClipboard {
@@ -43,6 +51,16 @@ struct PreparedClipboard {
 struct Continuation {
     revision: u64,
     inserted: String,
+}
+
+/// How Hex inserts a dictation into an app that can't take a paste.
+enum Typing {
+    /// Type the text as fast as its events post: Chromium 155 and 156 can drop
+    /// a ⌘V that races their own pasteboard change notification.
+    Burst,
+    /// Type one character at a time, paced: Microsoft's Windows App reads a
+    /// synthetic shortcut as its bare key (#1048), so it gets typed text.
+    Paced,
 }
 
 #[derive(Default)]
@@ -104,6 +122,10 @@ const PASTE_SETTLE_DELAY: Duration = Duration::from_millis(100);
 // change notification, however long Hex waits first (#136, #212). The bug
 // arrived with Chromium CL 8217390 and is fixed by CL 8503629 in 157.
 const CLIPBOARD_RACE_CHROMIUM: RangeInclusive<u32> = 155..=156;
+// Microsoft's Windows App (formerly Microsoft Remote Desktop) reads Hex's
+// synthetic ⌘V as a bare "v" (#1048), so Hex types its dictation instead,
+// one paced key at a time.
+const REMOTE_DESKTOP_CLIENTS: &[&str] = &["com.microsoft.rdc.macos", "com.microsoft.windowsapp"];
 const SYSTEM_TRANSLATED_FLAVOR: u32 = 1 << 8;
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -214,25 +236,17 @@ impl Paster {
         }
     }
 
-    /// Commit only after clipboard preparation, immediately before the first write.
-    /// A rejected commit leaves both the clipboard and continuation unchanged.
-    pub fn paste(
-        &mut self,
-        text: &str,
-        mode: PasteMode,
-        commit: impl FnOnce() -> bool,
-    ) -> Result<()> {
-        self.paste_text(text, mode, commit)
-    }
-
-    fn paste_text(
-        &mut self,
-        text: &str,
-        mode: PasteMode,
-        commit: impl FnOnce() -> bool,
-    ) -> Result<()> {
+    pub fn paste(&mut self, text: &str, mode: PasteMode) -> Result<()> {
         if matches!(mode, PasteMode::CopyOnly) {
-            return self.copy_only(text, commit);
+            return self.copy_only(text);
+        }
+        if matches!(mode, PasteMode::Send) {
+            self.paste(text, PasteMode::Continue)?;
+            self.continuation = None;
+            return Ok(());
+        }
+        if matches!(mode, PasteMode::Return) {
+            return keyboard::post_return();
         }
         let revision = self.activity.revision();
         let continuation = self.continuation.as_ref().filter(|continuation| {
@@ -244,32 +258,9 @@ impl Paster {
             None if crate::labs::smart_spacing() => with_smart_spacing(text),
             None => text.to_string(),
         };
-        if crate::dictation::context::frontmost_bundle_path()
-            .is_some_and(|bundle| has_clipboard_race(&bundle))
-        {
-            commit_prepared_paste(
-                || Ok(()),
-                commit,
-                |()| {
-                    if matches!(mode, PasteMode::Standalone) {
-                        self.continuation = None;
-                    }
-                    tracing::debug!("typing instead of pasting into Chromium 155 or 156");
-                    keyboard::type_text(&text)?;
-                    if crate::labs::keep_on_clipboard() {
-                        self.clipboard_restore
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .keep();
-                        if let Err(error) = write_clipboard_text(&self.clipboard, &text, false) {
-                            tracing::warn!(%error, "could not leave the dictation on the clipboard");
-                        }
-                    }
-                    Ok(())
-                },
-            )?;
-        } else {
-            self.paste_through_clipboard(&text, mode, commit)?;
+        match typing_for_frontmost() {
+            Some(typing) => self.type_into_frontmost(&text, mode, typing)?,
+            None => self.paste_through_clipboard(&text, mode)?,
         }
         self.continuation = (!matches!(mode, PasteMode::Standalone)).then_some(Continuation {
             revision,
@@ -278,86 +269,106 @@ impl Paster {
         Ok(())
     }
 
+    /// Inserts `text` as synthesized key events instead of a clipboard paste,
+    /// for the apps [`typing_for_frontmost`] names. Nothing is captured for a
+    /// restore; Labs › Keep dictation on clipboard still leaves the text on
+    /// the clipboard after typing.
+    fn type_into_frontmost(&mut self, text: &str, mode: PasteMode, typing: Typing) -> Result<()> {
+        if matches!(mode, PasteMode::Standalone) {
+            self.continuation = None;
+        }
+        match typing {
+            Typing::Burst => {
+                tracing::debug!("typing instead of pasting into Chromium 155 or 156");
+                keyboard::type_text(text)?;
+            }
+            Typing::Paced => {
+                tracing::debug!("typing instead of pasting into Windows App");
+                // Typing a transcript takes seconds, so the app in front is
+                // watched at each character: keys the user meant for another
+                // app never land there, and stopping keeps the text for Paste
+                // last dictation instead of pasting it a second time.
+                keyboard::type_text_paced(text, || {
+                    let in_front = remote_desktop_client_in_front();
+                    if !in_front {
+                        tracing::warn!("stopped typing into Windows App: another app is in front");
+                    }
+                    in_front
+                })?;
+            }
+        }
+        if crate::labs::keep_on_clipboard() {
+            self.clipboard_restore
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .keep();
+            if let Err(error) = write_clipboard_text(&self.clipboard, text, false) {
+                tracing::warn!(%error, "could not leave the dictation on the clipboard");
+            }
+        }
+        Ok(())
+    }
+
     /// Leaves `text` on the clipboard for the user to paste: no ⌘V, no typed
     /// text, and no restore. A pending restore stands down and no earlier
     /// snapshot comes back, and the next paste starts a new continuation.
-    fn copy_only(&mut self, text: &str, commit: impl FnOnce() -> bool) -> Result<()> {
-        commit_prepared_paste(
-            || Ok(()),
-            commit,
-            |()| {
-                self.continuation = None;
-                self.prepared_clipboard = None;
-                self.clipboard_restore
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .keep();
-                write_clipboard_text(&self.clipboard, text, false)
-            },
-        )
+    fn copy_only(&mut self, text: &str) -> Result<()> {
+        self.continuation = None;
+        self.prepared_clipboard = None;
+        self.clipboard_restore
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .keep();
+        write_clipboard_text(&self.clipboard, text, false)
     }
 
-    fn paste_through_clipboard(
-        &mut self,
-        text: &str,
-        mode: PasteMode,
-        commit: impl FnOnce() -> bool,
-    ) -> Result<()> {
-        let generation = commit_prepared_paste(
-            || {
-                let restore = self
-                    .clipboard_restore
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                let previous_change_count = self.clipboard.changeCount();
-                let prepared = self.prepared_clipboard.take();
-                let previous = if let Some(prepared) = prepared
-                    && prepared.change_count == previous_change_count
-                {
-                    tracing::debug!(
-                        clipboard_capture_ms = prepared.capture_ms,
-                        "used eagerly captured clipboard"
-                    );
-                    prepared.snapshot
-                } else {
-                    let started = Instant::now();
-                    let snapshot = capture_clipboard(&self.clipboard)?;
-                    tracing::debug!(
-                        clipboard_capture_ms = started.elapsed().as_millis(),
-                        "captured clipboard at paste time"
-                    );
-                    snapshot
-                };
-                if self.clipboard.changeCount() != previous_change_count {
-                    return Err(eyre!("clipboard changed while Hex was preserving it"));
+    fn paste_through_clipboard(&mut self, text: &str, mode: PasteMode) -> Result<()> {
+        let generation = {
+            let mut restore = self
+                .clipboard_restore
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let previous_change_count = self.clipboard.changeCount();
+            let prepared = self.prepared_clipboard.take();
+            let previous = if let Some(prepared) = prepared
+                && prepared.change_count == previous_change_count
+            {
+                tracing::debug!(
+                    clipboard_capture_ms = prepared.capture_ms,
+                    "used eagerly captured clipboard"
+                );
+                prepared.snapshot
+            } else {
+                let started = Instant::now();
+                let snapshot = capture_clipboard(&self.clipboard)?;
+                tracing::debug!(
+                    clipboard_capture_ms = started.elapsed().as_millis(),
+                    "captured clipboard at paste time"
+                );
+                snapshot
+            };
+            if self.clipboard.changeCount() != previous_change_count {
+                return Err(eyre!("clipboard changed while Hex was preserving it"));
+            }
+            if matches!(mode, PasteMode::Standalone) {
+                self.continuation = None;
+            }
+            // Read as the paste commits, so the toggle applies at once.
+            let keep = crate::labs::keep_on_clipboard();
+            if let Err(error) = write_clipboard_text(&self.clipboard, text, !keep) {
+                if let Err(restore_error) = restore_clipboard(&self.clipboard, &previous) {
+                    tracing::error!(%restore_error, "could not recover the clipboard after a failed write");
                 }
-                Ok((restore, previous, previous_change_count))
-            },
-            commit,
-            |(mut restore, previous, previous_change_count)| {
-                if matches!(mode, PasteMode::Standalone) {
-                    self.continuation = None;
-                }
-                // Read as the paste commits, so the toggle applies at once.
-                let keep = crate::labs::keep_on_clipboard();
-                if let Err(error) = write_clipboard_text(&self.clipboard, text, !keep) {
-                    if let Err(restore_error) = restore_clipboard(&self.clipboard, &previous) {
-                        tracing::error!(%restore_error, "could not recover the clipboard after a failed write");
-                    }
-                    return Err(error);
-                }
-                if keep {
-                    restore.keep();
-                    return Ok(None);
-                }
+                return Err(error);
+            }
+            if keep {
+                restore.keep();
+                None
+            } else {
                 let inserted_change_count = self.clipboard.changeCount();
-                Ok(Some(restore.register(
-                    previous,
-                    previous_change_count,
-                    inserted_change_count,
-                )))
-            },
-        )?;
+                Some(restore.register(previous, previous_change_count, inserted_change_count))
+            }
+        };
 
         let clipboard_restore = self.clipboard_restore.clone();
         complete_paste(
@@ -395,18 +406,28 @@ impl Paster {
     }
 }
 
-pub(crate) fn commit_prepared_paste<P, T>(
-    prepare: impl FnOnce() -> Result<P>,
-    commit: impl FnOnce() -> bool,
-    paste: impl FnOnce(P) -> Result<T>,
-) -> Result<T> {
-    let prepared = prepare()?;
-    // Waiting for restoration and materializing promised clipboard data remain cancellable.
-    // Once committed, even a failed first write may have changed the clipboard.
-    if !commit() {
-        return Err(eyre!("paste was cancelled"));
+/// How this paste inserts the text, or `None` for a clipboard paste. The
+/// bundle identifier decides first, so a remote desktop client never pays for
+/// the Chromium check; every other app keeps it.
+fn typing_for_frontmost() -> Option<Typing> {
+    if remote_desktop_client_in_front() {
+        return Some(Typing::Paced);
     }
-    paste(prepared)
+    let bundle = crate::dictation::context::frontmost_bundle_path()?;
+    has_clipboard_race(&bundle).then_some(Typing::Burst)
+}
+
+/// Whether the app in front is a remote desktop client that gets typed text.
+fn remote_desktop_client_in_front() -> bool {
+    crate::dictation::context::frontmost_bundle_id()
+        .as_deref()
+        .is_some_and(is_remote_desktop_client)
+}
+
+fn is_remote_desktop_client(bundle_id: &str) -> bool {
+    REMOTE_DESKTOP_CLIENTS
+        .iter()
+        .any(|client| client.eq_ignore_ascii_case(bundle_id))
 }
 
 /// Whether the app at `bundle` embeds a Chromium 155 or 156 framework. Every
@@ -833,46 +854,6 @@ mod tests {
     static PASTEBOARD_TEST: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn rejected_commit_does_not_write_paste_or_restore() {
-        let steps = RefCell::new(Vec::new());
-        let result = commit_prepared_paste(
-            || {
-                steps.borrow_mut().push("prepare");
-                Ok(())
-            },
-            || {
-                steps.borrow_mut().push("commit");
-                false
-            },
-            |()| {
-                steps.borrow_mut().push("write");
-                complete_paste(
-                    || {
-                        steps.borrow_mut().push("post");
-                        Ok(())
-                    },
-                    || steps.borrow_mut().push("restore"),
-                    |_| steps.borrow_mut().push("settle"),
-                )
-            },
-        );
-
-        assert_eq!(result.unwrap_err().to_string(), "paste was cancelled");
-        assert_eq!(steps.into_inner(), ["prepare", "commit"]);
-    }
-
-    #[test]
-    fn failed_preparation_does_not_commit_or_write() {
-        let result = commit_prepared_paste(
-            || Err::<(), _>(eyre!("snapshot failed")),
-            || panic!("failed preparation must remain cancellable"),
-            |()| -> Result<()> { panic!("failed preparation must not mutate the clipboard") },
-        );
-
-        assert_eq!(result.unwrap_err().to_string(), "snapshot failed");
-    }
-
-    #[test]
     fn sequential_pastes_settle_before_overwrite() {
         let clipboard = Cell::new("");
         let pending = Cell::new(false);
@@ -941,6 +922,22 @@ mod tests {
 
         assert_eq!(result.unwrap_err().to_string(), "post failed");
         assert_eq!(steps.into_inner(), ["post", "restore"]);
+    }
+
+    /// Microsoft's Windows App and the Remote Desktop client it replaced are
+    /// the apps whose dictation is typed instead of pasted (#1048).
+    #[test]
+    fn recognises_the_remote_desktop_clients_by_bundle_identifier() {
+        assert!(is_remote_desktop_client("com.microsoft.rdc.macos"));
+        assert!(is_remote_desktop_client("com.microsoft.windowsapp"));
+        assert!(is_remote_desktop_client("COM.MICROSOFT.WINDOWSAPP"));
+        for other in [
+            "com.apple.Safari",
+            "com.microsoft.Word",
+            "com.microsoft.rdc.macos.beta",
+        ] {
+            assert!(!is_remote_desktop_client(other), "{other}");
+        }
     }
 
     #[test]
@@ -1170,24 +1167,8 @@ mod tests {
             2,
         );
 
-        // A rejected commit changes nothing.
-        assert!(
-            paster
-                .paste("dictated text", PasteMode::CopyOnly, || false)
-                .is_err()
-        );
-        assert_eq!(
-            clipboard
-                .stringForType(unsafe { NSPasteboardTypeString })
-                .unwrap()
-                .to_string(),
-            "before"
-        );
-
         // Returns without posting ⌘V or typing: only the clipboard changes.
-        paster
-            .paste("dictated text", PasteMode::CopyOnly, || true)
-            .unwrap();
+        paster.paste("dictated text", PasteMode::CopyOnly).unwrap();
 
         assert_eq!(
             clipboard

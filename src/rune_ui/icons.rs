@@ -3,6 +3,27 @@
 
 use rune::Icon;
 
+/// A decorative line icon on the small neutral tile shared by Labs and What's new.
+pub(super) fn tile(p: super::Paint, icon: &'static Icon, size: f32) -> rune::El {
+    rune::el()
+        .key("tile")
+        .size(size, size)
+        .center()
+        .radius(if size > 40.0 {
+            p.k.radius.lg
+        } else {
+            p.k.radius.md
+        })
+        .fill(p.k.c.layer_02)
+        .border(p.hair, p.k.c.border_weak)
+        .a11y_hidden()
+        .child(
+            rune::icon(icon, (size * 0.5).round())
+                .key("glyph")
+                .color(p.k.c.icon_base),
+        )
+}
+
 macro_rules! line_icon {
     ($static:ident, $name:literal, [$($d:literal),+ $(,)?]) => {
         pub(super) static $static: Icon = Icon {
@@ -16,6 +37,11 @@ macro_rules! line_icon {
     };
 }
 
+line_icon!(
+    RETURN,
+    "hex-return",
+    ["M20 5v7a2 2 0 0 1-2 2H4", "m9 9-5 5 5 5"]
+);
 line_icon!(
     KEYBOARD,
     "hex-row-keyboard",
@@ -108,14 +134,18 @@ line_icon!(
         "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z",
     ]
 );
-line_icon!(
-    BOOK,
-    "hex-row-book",
-    [
-        "M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20",
-        "m8 13 4-7 4 7",
-        "M9.1 11h5.7",
-    ]
+macro_rules! book_icons {
+    ($outline:literal) => {
+        line_icon!(PLAIN_BOOK, "hex-plain-book", [$outline]);
+        line_icon!(
+            BOOK,
+            "hex-row-book",
+            [$outline, "m8 13 4-7 4 7", "M9.1 11h5.7"]
+        );
+    };
+}
+book_icons!(
+    "M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H19a1 1 0 0 1 1 1v18a1 1 0 0 1-1 1H6.5a1 1 0 0 1 0-5H20"
 );
 line_icon!(
     PASTE,
@@ -271,4 +301,24 @@ line_icon!(
         "m15 9-6 6",
         "m9 9 6 6"
     ]
+);
+line_icon!(
+    PEN,
+    "hex-row-pen",
+    [
+        "M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4.5 1.5L5 15z",
+        "m13.5 6.5 3 3",
+    ]
+);
+line_icon!(
+    ARROW_TOOL,
+    "hex-row-arrow-tool",
+    ["M5 19 19 5", "M10 5h9v9"]
+);
+line_icon!(BOX_TOOL, "hex-row-box", ["M4 5h16v14H4z"]);
+line_icon!(TEXT_TOOL, "hex-row-text-tool", ["M5 5h14", "M12 5v15"]);
+line_icon!(
+    CROP_TOOL,
+    "hex-row-crop",
+    ["M7 2.5V17h14.5", "M2.5 7H17v14.5"]
 );

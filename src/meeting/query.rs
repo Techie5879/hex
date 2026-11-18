@@ -339,8 +339,17 @@ impl Library {
         // A meeting past its retention is gone even before expiry moves it.
         let retention = crate::app_settings::meeting_retention();
         let now_ms = crate::desktop::events::now_ms();
+        let can_recover = super::recovery::can_recover();
         meetings.retain(|meeting| {
-            !super::expired(&meeting.manifest, meeting.status, retention, now_ms)
+            let directory = self.root.join(&meeting.id);
+            super::retention::readable(
+                &meeting.manifest,
+                meeting.status,
+                directory.join(super::FINAL_PENDING_FILE).exists()
+                    || (can_recover && super::recovery::awaiting(&directory)),
+                retention,
+                now_ms,
+            )
         });
         meetings.sort_by_key(|meeting| std::cmp::Reverse(meeting.start_ms()));
         skipped.sort_by(|left, right| left.id.cmp(&right.id));
@@ -735,13 +744,9 @@ fn load(directory: &Path, id: &str, in_progress: bool) -> Result<Meeting> {
             .ok()
             .map(|error| error.trim().to_string());
     let final_path = directory.join("transcript.ndjson");
-    // A recorder publishes the final NDJSON before the Markdown; without one,
-    // the NDJSON alone is the finished publication.
-    let final_ready = if in_progress {
-        final_path.exists() && directory.join("transcript.md").exists()
-    } else {
-        final_path.exists()
-    };
+    // Read-only readers never repair the second publication rename. Until
+    // both files exist, every reader uses the retained rolling transcript.
+    let final_ready = super::final_transcript_exists(directory);
     let status = if in_progress {
         manifest.status
     } else {
@@ -2116,7 +2121,7 @@ fn local_to_ms(
     u64::try_from(seconds).ok().map(|seconds| seconds * 1_000)
 }
 
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };
     let era = year.div_euclid(400);
     let year_of_era = year - era * 400;

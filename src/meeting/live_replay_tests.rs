@@ -259,6 +259,11 @@ fn meeting_live_replay() {
         retention_applies: false,
         export_sha256: None,
         mode: MeetingMode::Standard,
+        notes_export_path: None,
+        notes_export_sha256: None,
+        notes_export_removed: false,
+        audio_removed_at_ms: None,
+        imported: false,
     };
     write_manifest(&directory, &manifest).unwrap();
 

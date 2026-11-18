@@ -15,20 +15,32 @@ use color_eyre::eyre::{Result, eyre};
 use crate::calendar::{CalendarMeeting, ReminderScheduler, ReminderUpdate};
 use crate::dictation::context::ContextSnapshot;
 use crate::meeting::detection::{
-    AutoStop, BrowserPageMemory, CallPresence, Detection, MeetingCandidate, MeetingDetector,
-    MeetingSource, candidate_from_microphone,
+    AutoStop, BrowserPageMemory, CallPresence, CallSwitch, Detection, MeetingCandidate,
+    MeetingDetector, MeetingSource, OfferId, candidate_from_microphone,
 };
-use crate::meeting::{self, MeetingCalendar, MeetingRequest, MeetingStart};
+use crate::meeting::recovery::PendingFinals;
+use crate::meeting::{self, MeetingCalendar, MeetingRequest, MeetingStart, TrackWarning};
 use crate::microphone_activity::{ActiveMicrophoneApplication, active_microphone_applications};
 
+use call_switch::{
+    disarm_call_stop_unless_watching, watching_call_switch, withdraw_call_switch_stop,
+};
+
+#[cfg(test)]
+mod accepted_offer_tests;
+mod call;
+use call::{CallProbe, Origin, Recorder, SystemCallProbe};
+mod call_switch;
+
 pub(crate) enum ControllerCommand {
-    Record(MeetingCandidate),
+    Record(MeetingCandidate, Option<OfferId>),
     Dismiss,
     /// The offer's capsule closed on its timeout, unanswered: the call is
     /// offered again once its app releases and retakes the microphone.
-    OfferTimedOut,
+    OfferTimedOut(OfferId),
     Stop,
-    Open(String),
+    /// Import a local audio file as a meeting (macOS; Labs › Import audio).
+    Import(PathBuf),
     Summarize(String),
     /// Record a calendar meeting from its reminder, first opening its call
     /// link when `join`.
@@ -39,17 +51,21 @@ pub(crate) enum ControllerCommand {
     /// Open the meeting's call link without recording (Always record
     /// starts once the call is detected).
     JoinMeeting(CalendarMeeting),
+    /// Joined from the Labs menu: opens the call link without recording, and
+    /// records the occurrence so no reminder pops (closing the showing one).
+    JoinFromMenu(CalendarMeeting),
     /// Not now, or Don't record: the meeting's call is neither offered nor
     /// recorded automatically.
     DismissReminder(CalendarMeeting),
-    /// Keep recording on the call-ended capsule: Labs › Stop when the call
+    /// Keep recording on the call-ended capsule: Stop when the call
     /// ends doesn't stop this absence (it arms again if the call app comes
     /// back and leaves again).
     KeepRecording,
 }
 
 pub(crate) enum ControllerEvent {
-    Offer(MeetingCandidate),
+    Offer(OfferId, MeetingCandidate),
+    OfferWithdrawn(OfferId),
     /// A calendar meeting is about to start. `automatic` when its call
     /// service is set to Always record.
     Reminder {
@@ -73,94 +89,35 @@ pub(crate) enum ControllerEvent {
     },
     /// The recording's live chapters so far (Labs).
     Chapters(Vec<meeting::Chapter>),
-    OpenMeeting(String),
+    /// The microphone became digitally silent, or its audio returned.
+    SourceWarning {
+        warning: Option<TrackWarning>,
+    },
     Transcribing,
     /// `auto_stop` when the recording stops on its own after
-    /// [`crate::meeting::detection::AUTO_STOP_GRACE`] (Labs › Stop when the
+    /// [`crate::meeting::detection::AUTO_STOP_GRACE`] (Stop when the
     /// call ends).
     CallEnded {
         app: String,
         auto_stop: bool,
     },
-    /// A pending stop after [`ControllerEvent::CallEnded`] was dropped
-    /// without Keep recording: the call app came back (`returned`), or the
-    /// lab was turned off while the call stayed away.
-    AutoStopCancelled {
-        returned: bool,
-    },
     /// Keep recording was accepted; restore the recording indicator.
     RecordingContinued,
+    /// A pending automatic stop was dropped because the call came back
+    /// (Labs › Stop when the call ends): its notice goes, and the recording
+    /// capsule returns.
+    CallEndedWithdrawn,
     Finished(Box<meeting::MeetingManifest>),
     Failed {
         title: String,
         error: String,
     },
+    /// An audio file could not be imported as a meeting (macOS).
+    ImportFailed {
+        error: String,
+    },
     NotesStarted,
     NotesFinished(Box<meeting::MeetingManifest>),
-}
-
-/// How a recording began, which decides whether Labs › Stop when the call
-/// ends may stop it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Origin {
-    /// Always record started it with no click.
-    Automatic,
-    /// The user accepted a detected call's offer (Record, or … › Always
-    /// record): its call app was on the microphone, and it is the one
-    /// watched.
-    AcceptedOffer,
-    /// The menu bar, `hex meetings record`, or a calendar reminder: no call
-    /// was seen on the microphone, so none may end it.
-    Requested,
-}
-
-impl Origin {
-    /// A `Record` command's origin: an offered call's candidate names its
-    /// source and app; a manual request names neither.
-    fn of_record(candidate: &MeetingCandidate) -> Self {
-        if candidate.source != MeetingSource::Manual && candidate.application.is_some() {
-            Self::AcceptedOffer
-        } else {
-            Self::Requested
-        }
-    }
-
-    /// Whether the recording may stop once its call ends, with the lab on.
-    fn stops_when_call_ends(self) -> bool {
-        matches!(self, Self::Automatic | Self::AcceptedOffer)
-    }
-}
-
-/// Starts the recorder thread; tests substitute one that records nothing.
-type Recorder = fn(
-    meeting::MeetingStart,
-    &AtomicBool,
-    Option<SyncSender<meeting::RecordingUpdate>>,
-) -> Result<meeting::MeetingManifest>;
-
-/// Whether a recording's call app is still in the call; tests substitute
-/// their own readings.
-trait CallProbe {
-    /// Whether `application` holds the microphone; an error when the read
-    /// failed.
-    fn on_microphone(&mut self, application: &str) -> Result<bool>;
-    /// Whether `application` plays audio; a failed read counts as playing.
-    fn playing(&mut self, application: &str) -> bool;
-}
-
-/// The Mac's microphone and output activity.
-struct SystemCallProbe;
-
-impl CallProbe for SystemCallProbe {
-    fn on_microphone(&mut self, application: &str) -> Result<bool> {
-        Ok(active_microphone_applications()?
-            .iter()
-            .any(|candidate| candidate.canonical_bundle_id() == Some(application)))
-    }
-
-    fn playing(&mut self, application: &str) -> bool {
-        call_app_playing(application)
-    }
 }
 
 struct ActiveRecording {
@@ -169,12 +126,31 @@ struct ActiveRecording {
     app_label: String,
     origin: Origin,
     presence: CallPresence,
-    /// Labs › Stop when the call ends, armed while the call is over.
+    /// Stop when the call ends, armed while the call is over.
     auto_stop: AutoStop,
+    /// The call's own code, watching the browser's page for another call
+    /// (Stop when the call ends, browsers that never release the
+    /// microphone between calls).
+    call_switch: CallSwitch,
+    /// Stop when the call ends, armed while the page names a different
+    /// call. Its own deadline: a browser still on the microphone keeps the
+    /// call app present, so the absence one is dropped every pass.
+    call_stop: AutoStop,
     stop: Arc<AtomicBool>,
     updates: Receiver<meeting::RecordingUpdate>,
     reported_started: bool,
     worker: JoinHandle<Result<meeting::MeetingManifest>>,
+}
+
+impl ActiveRecording {
+    /// Ends this recording and its call's snooze as a hand stop does: a call
+    /// app back after leaving it is a new call (Always record starts again).
+    fn end(&self, detector: &mut MeetingDetector, events: &SyncSender<ControllerEvent>) {
+        if !self.stop.swap(true, Ordering::Relaxed) {
+            detector.recording_stopped();
+            let _ = events.send(ControllerEvent::Transcribing);
+        }
+    }
 }
 
 /// The meeting state mirrored into the menu bar.
@@ -188,8 +164,20 @@ pub enum MeetingMenuState {
         title: String,
         /// Live chapters, for Copy Section (Labs).
         chapters: Vec<meeting::Chapter>,
+        /// The microphone is digitally silent, as a call app holding it with
+        /// voice processing leaves it (#1518).
+        warning: Option<TrackWarning>,
     },
     Transcribing,
+}
+
+impl MeetingMenuState {
+    /// Sets the recording's microphone warning; other states have none.
+    pub(crate) fn source_warning(&mut self, warning: Option<TrackWarning>) {
+        if let Self::Recording { warning: shown, .. } = self {
+            *shown = warning;
+        }
+    }
 }
 
 pub struct ListenerConfig {
@@ -205,6 +193,7 @@ pub(crate) fn controller_loop(
 ) -> Result<()> {
     let mut detector = MeetingDetector::default();
     let mut recording: Option<ActiveRecording> = None;
+    let mut importing: Option<ImportWorker> = None;
     let mut reminders = Reminders::default();
     let mut observed_microphone_apps = Vec::new();
     let mut browser = BrowserWatch::new(ContextSnapshot::capture_for_meeting);
@@ -214,19 +203,23 @@ pub(crate) fn controller_loop(
 
     while !shutdown.load(Ordering::Relaxed) {
         let enabled = crate::app_settings::meetings_enabled();
+        let previous_offer = detector.open_offer();
+        poll_import(&mut importing, &events);
         let requested_commands = meeting_requests
             .try_iter()
             .take(8)
             .map(|request| match request {
                 MeetingRequest::Start { title } => {
-                    ControllerCommand::Record(MeetingCandidate::manual_titled(title))
+                    ControllerCommand::Record(MeetingCandidate::manual_titled(title), None)
                 }
                 MeetingRequest::Stop => ControllerCommand::Stop,
                 MeetingRequest::Summarize(id) => ControllerCommand::Summarize(id),
+                MeetingRequest::Import(path) => ControllerCommand::Import(path),
             });
         for command in commands.try_iter().take(8).chain(requested_commands) {
             handle_command(
                 &mut recording,
+                &mut importing,
                 &mut detector,
                 &mut reminders,
                 command,
@@ -239,14 +232,21 @@ pub(crate) fn controller_loop(
         poll_recording(
             &mut recording,
             &mut detector,
+            &mut browser,
             &events,
             &mut SystemCallProbe,
-            crate::labs::stop_when_call_ends(),
+            crate::app_settings::meeting_stop_when_call_ends(),
             Instant::now(),
         )?;
         reminders.poll(enabled, recording.is_some(), &events);
         pending_finals.poll(enabled, recording.is_some(), &events);
         expiry.poll();
+
+        // Meetings off: detection never runs, so a remembered switch must not
+        // outlive the setting and start a call when it comes back.
+        if recording.is_none() && !enabled {
+            detector.forget_switched_call();
+        }
 
         if recording.is_none() && enabled {
             let choices = crate::app_settings::meeting_provider_choices();
@@ -261,10 +261,19 @@ pub(crate) fn controller_loop(
                     continue;
                 }
                 Ok(Some(Detection::Offer(candidate))) => {
-                    let _ = events.send(ControllerEvent::Offer(candidate));
+                    // Offers record by hand, which never watches a page: the
+                    // call whose page named this one is not kept for it.
+                    detector.take_switched_from();
+                    if let Some(id) = detector.open_offer() {
+                        let _ = events.send(ControllerEvent::Offer(id, candidate));
+                    }
                 }
                 Ok(Some(Detection::Record(candidate))) => {
-                    let start = reminders.start_for(&candidate);
+                    let mut start = reminders.start_for(&candidate);
+                    // Detected while the page still named the stopped call:
+                    // this recording keeps that code, so the page naming it
+                    // never ends this one (#1896).
+                    start.switched_from = detector.take_switched_from();
                     start_recording(
                         &mut recording,
                         &mut reminders,
@@ -276,10 +285,22 @@ pub(crate) fn controller_loop(
                 }
                 Ok(None) => {}
             }
-        } else {
+        } else if !watching_call_switch(
+            recording.as_ref(),
+            crate::app_settings::meeting_stop_when_call_ends(),
+        ) {
             // Nothing is watched now: no answer read before this may come
-            // back as fresh when detection resumes.
+            // back as fresh when detection resumes. A recording that watches
+            // its browser's page for another call keeps reading it.
             browser.reset();
+        }
+        if !enabled || recording.is_some() {
+            detector.withdraw_offer();
+        }
+        if let Some(id) = previous_offer
+            && detector.open_offer() != Some(id)
+        {
+            let _ = events.send(ControllerEvent::OfferWithdrawn(id));
         }
         thread::sleep(Duration::from_millis(500));
     }
@@ -295,6 +316,22 @@ pub(crate) fn controller_loop(
             .join()
             .map_err(|_| eyre!("meeting recorder panicked"))??;
     }
+    if let Some(importing) = importing {
+        // A failed import during shutdown is reported, not propagated: it
+        // must not skip joining the pending finals below.
+        match importing.worker.join() {
+            Ok(Ok(manifest)) => {
+                tracing::info!(
+                    meeting = manifest.id,
+                    "audio import finished while shutting down"
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "audio import did not finish before shutdown");
+            }
+            Err(_) => tracing::error!("meeting import panicked"),
+        }
+    }
     pending_finals.join();
     Ok(())
 }
@@ -304,101 +341,41 @@ const EXPIRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Moves meetings past their retention to the Trash: at launch, then
 /// hourly, and soon after the setting changes. Meetings off still expires
-/// what was recorded, since kept meetings are a liability.
+/// what was recorded, since kept meetings are a liability. A separate audio
+/// retention runs after the whole-meeting pass, and only while its Labs
+/// feature is on.
 #[derive(Default)]
 struct MeetingExpiry {
-    last: Option<(Instant, Option<crate::app_settings::MeetingRetention>)>,
+    last: Option<(
+        Instant,
+        Option<crate::app_settings::MeetingRetention>,
+        Option<crate::app_settings::MeetingRetention>,
+    )>,
 }
 
 impl MeetingExpiry {
     fn poll(&mut self) {
         let retention = crate::app_settings::meeting_retention();
-        if self
-            .last
-            .is_some_and(|(at, last)| last == retention && at.elapsed() < EXPIRY_INTERVAL)
-        {
+        let audio = crate::app_settings::meeting_audio_retention();
+        if self.last.is_some_and(|(at, last, last_audio)| {
+            last == retention && last_audio == audio && at.elapsed() < EXPIRY_INTERVAL
+        }) {
             return;
         }
-        self.last = Some((Instant::now(), retention));
+        self.last = Some((Instant::now(), retention, audio));
         if let Err(error) = meeting::expire(retention) {
             tracing::warn!(%error, "could not expire old meetings");
         }
-    }
-}
-
-/// How long finishing pending transcripts waits for the dictation engine
-/// before loading its own model, as a recording without one does.
-const ENGINE_GRACE: Duration = Duration::from_secs(30);
-
-/// Finishes, once per launch, the transcripts of meetings Hex quit while
-/// recording. It waits for the dictation engine so the work borrows its
-/// model rather than loading a second copy.
-struct PendingFinals {
-    since: Instant,
-    checked: bool,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl PendingFinals {
-    fn new() -> Self {
-        Self {
-            since: Instant::now(),
-            checked: false,
-            worker: None,
-        }
-    }
-
-    fn poll(&mut self, enabled: bool, recording: bool, events: &SyncSender<ControllerEvent>) {
-        if self.checked
-            || !enabled
-            || recording
-            || (crate::transcription::engine::TranscriptionEngine::shared().is_none()
-                && self.since.elapsed() < ENGINE_GRACE)
-        {
-            return;
-        }
-        self.checked = true;
-        let ids = meeting::pending_final_transcripts();
-        if ids.is_empty() {
-            return;
-        }
-        let events = events.clone();
-        self.worker = thread::Builder::new()
-            .name("meeting-pending-finals".into())
-            .spawn(move || {
-                for id in ids {
-                    if crate::desktop::process_exit::quitting() {
-                        return;
-                    }
-                    match meeting::finish_pending(&id) {
-                        Ok(Some(manifest)) => {
-                            tracing::info!(meeting = id, "finished a pending meeting transcript");
-                            if meeting::notes_wanted() {
-                                start_notes(manifest.id, &events);
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::warn!(%error, meeting = id, "could not finish a pending meeting transcript");
-                        }
-                    }
-                }
-            })
-            .map_err(|error| tracing::error!(%error, "could not start pending meeting transcripts"))
-            .ok();
-    }
-
-    fn join(self) {
-        if let Some(worker) = self.worker
-            && worker.join().is_err()
-        {
-            tracing::error!("pending meeting transcripts panicked");
+        if let Err(error) = meeting::expire_audio(audio) {
+            tracing::warn!(%error, "could not expire old meeting audio");
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_command(
     recording: &mut Option<ActiveRecording>,
+    importing: &mut Option<ImportWorker>,
     detector: &mut MeetingDetector,
     reminders: &mut Reminders,
     command: ControllerCommand,
@@ -407,10 +384,22 @@ fn handle_command(
     record: Recorder,
 ) {
     match command {
-        ControllerCommand::Record(_) | ControllerCommand::RecordMeeting { .. } if !enabled => {
+        ControllerCommand::Record(..) | ControllerCommand::RecordMeeting { .. } if !enabled => {
             tracing::warn!("ignored a meeting recording request while meetings are off");
         }
-        ControllerCommand::Record(candidate) if recording.is_none() => {
+        ControllerCommand::Import(_) if !enabled => {
+            tracing::warn!("ignored an audio import while meetings are off");
+        }
+        ControllerCommand::Import(_) if !crate::labs::meeting_import() => {
+            tracing::warn!("ignored an audio import while Labs › Import audio is off");
+            let _ = events.send(ControllerEvent::ImportFailed {
+                error: "Labs › Import audio is off".into(),
+            });
+        }
+        ControllerCommand::Import(path) => start_import(recording, importing, path, events),
+        ControllerCommand::Record(candidate, offer)
+            if recording.is_none() && (offer.is_none() || offer == detector.open_offer()) =>
+        {
             tracing::info!(
                 source = candidate.source.label(),
                 application = candidate.application.as_deref(),
@@ -450,36 +439,43 @@ fn handle_command(
                 crate::calendar::open_link(&link.url);
             }
         }
+        ControllerCommand::JoinFromMenu(meeting) => {
+            if let Some(occurrence) = reminders.scheduler.joined_elsewhere(&meeting) {
+                let _ = events.send(ControllerEvent::ReminderWithdrawn { occurrence });
+            }
+            if let Some(link) = &meeting.link {
+                crate::calendar::open_link(&link.url);
+            }
+        }
         ControllerCommand::DismissReminder(meeting) => {
             reminders.scheduler.answered(&meeting.occurrence());
             snooze_calendar_call(detector, &meeting);
             tracing::info!("calendar meeting reminder dismissed");
         }
         ControllerCommand::Stop => {
-            if let Some(active) = recording.as_ref()
-                && !active.stop.swap(true, Ordering::Relaxed)
-            {
-                // Stopped by hand: the next call in the same app is offered
-                // once this one has left the microphone for a few seconds.
-                detector.recording_stopped();
-                let _ = events.send(ControllerEvent::Transcribing);
+            if let Some(active) = recording.as_ref() {
+                active.end(detector, events);
             }
         }
         ControllerCommand::KeepRecording => {
             if let Some(active) = recording.as_mut()
                 && !active.stop.load(Ordering::Relaxed)
             {
-                active.auto_stop.disarm();
-                tracing::info!("kept recording after the call ended");
-                let _ = events.send(ControllerEvent::RecordingContinued);
+                let changed = active.call_switch.changed();
+                let page_stop = active.call_stop.disarm();
+                active.call_switch.keep();
+                // Kept through, the page's next call never starts on this
+                // stop's behalf.
+                detector.forget_switched_call();
+                if active.auto_stop.disarm() || changed || page_stop {
+                    tracing::info!("kept recording after the call ended");
+                    let _ = events.send(ControllerEvent::RecordingContinued);
+                }
             }
         }
-        ControllerCommand::Open(id) => {
-            let _ = events.send(ControllerEvent::OpenMeeting(id));
-        }
         ControllerCommand::Summarize(id) => start_notes(id, events),
-        ControllerCommand::OfferTimedOut => detector.offer_timed_out(),
-        ControllerCommand::Dismiss | ControllerCommand::Record(_) => {}
+        ControllerCommand::OfferTimedOut(id) => detector.offer_timed_out(id),
+        ControllerCommand::Dismiss | ControllerCommand::Record(..) => {}
     }
 }
 
@@ -491,6 +487,14 @@ struct Start {
     meeting: MeetingStart,
     title: String,
     app_label: String,
+    /// The call's own code, when its page named one: the recording watches
+    /// that browser's page for another call under Stop when the call
+    /// ends. Calendar and manual recordings have none.
+    call: Option<String>,
+    /// The code of the call whose recording stopped while its page kept
+    /// naming it, when this recording was detected in its place: it is kept,
+    /// so the page still naming it never ends this one.
+    switched_from: Option<String>,
 }
 
 impl Start {
@@ -499,6 +503,8 @@ impl Start {
             meeting: candidate.recording_start(),
             title: candidate.title.clone(),
             app_label: candidate.source.label().into(),
+            call: candidate.call.clone(),
+            switched_from: None,
         }
     }
 }
@@ -520,6 +526,8 @@ fn calendar_start(meeting: &CalendarMeeting) -> Start {
         app_label: provider
             .map_or("Meeting", |provider| provider.label())
             .into(),
+        call: None,
+        switched_from: None,
     }
 }
 
@@ -570,23 +578,84 @@ struct Reminders {
     change_count: Option<u64>,
     /// Wall-clock time of the last read, so a wake from sleep rereads.
     read_at_ms: Option<i64>,
+    /// The last read ran only for the menu snapshot, not for reminders: when
+    /// reminders come back they read at once instead of reusing it.
+    menu_only_read: bool,
+    /// The menu has read since the lab came on: its first poll reads at once
+    /// instead of waiting out the minute.
+    menu_read: bool,
     read_failed: bool,
 }
 
+/// Where a successful calendar read goes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReadSources {
+    /// The list reminders schedule from and detected calls are titled by:
+    /// only while reminders are active.
+    meetings: bool,
+    /// Labs › Upcoming meetings in menu bar's own snapshot.
+    menu: bool,
+}
+
+impl ReadSources {
+    fn new(reminders: bool, menu: bool) -> Self {
+        Self {
+            meetings: reminders,
+            menu,
+        }
+    }
+}
+
 impl Reminders {
+    /// Forces the extra reads a poll needs beyond a stale read or a store
+    /// change: the menu's first read after the lab comes on, and reminders'
+    /// first read after a menu-only one left their list empty.
+    fn prepare_read(&mut self, reminders: bool, menu: bool) {
+        if !menu {
+            self.menu_read = false;
+        } else if !self.menu_read {
+            self.read_at_ms = None;
+        }
+        if reminders && self.menu_only_read {
+            self.read_at_ms = None;
+            self.menu_only_read = false;
+        }
+    }
+
     fn poll(&mut self, enabled: bool, recording: bool, events: &SyncSender<ControllerEvent>) {
         let settings = crate::app_settings::calendar_settings();
-        if !enabled || !settings.reminders_active() {
+        // Labs › Upcoming meetings in menu bar lists the same read with
+        // reminders off, but only while a calendar is connected; while it is
+        // off nothing here changes at all.
+        let menu_on = crate::calendar_menu::lab_on();
+        let menu = crate::calendar_menu::wanted(settings.connected);
+        let reminders = settings.reminders_active();
+        let reads = ReadSources::new(reminders, menu);
+        if !enabled || !(reminders || menu) {
             self.meetings.clear();
             self.change_count = None;
             self.read_at_ms = None;
+            if menu_on {
+                crate::calendar_menu::clear();
+            }
+            self.menu_only_read = false;
+            self.menu_read = false;
             if let Some(occurrence) = self.scheduler.clear() {
                 let _ = events.send(ControllerEvent::ReminderWithdrawn { occurrence });
             }
             return;
         }
+        if !reminders {
+            // The menu's list is the read's own: with reminders off the read
+            // never feeds the list recordings are titled and reminded from.
+            self.meetings.clear();
+            if let Some(occurrence) = self.scheduler.clear() {
+                let _ = events.send(ControllerEvent::ReminderWithdrawn { occurrence });
+            }
+        }
         let now_ms = crate::calendar::wall_clock_ms();
         let changes = crate::calendar::change_count();
+        self.prepare_read(reminders, menu);
         let stale = self
             .read_at_ms
             .is_none_or(|read_at| (now_ms - read_at).abs() >= CALENDAR_REREAD_MS);
@@ -595,8 +664,13 @@ impl Reminders {
             self.read_at_ms = Some(now_ms);
             match crate::calendar::read_meetings(&settings, now_ms) {
                 Ok(meetings) => {
-                    self.meetings = meetings;
                     self.read_failed = false;
+                    if reads.menu {
+                        crate::calendar_menu::publish(Some(&meetings), now_ms);
+                    }
+                    if reads.meetings {
+                        self.meetings = meetings;
+                    }
                 }
                 Err(error) => {
                     if !self.read_failed {
@@ -604,8 +678,18 @@ impl Reminders {
                     }
                     self.read_failed = true;
                     self.meetings.clear();
+                    if reads.menu {
+                        crate::calendar_menu::clear();
+                    }
                 }
             }
+            self.menu_only_read = !reads.meetings;
+        }
+        if menu {
+            self.menu_read = true;
+        }
+        if !reminders {
+            return;
         }
         let lead_ms = settings.lead().as_millis() as i64;
         match self.step(recording, now_ms, lead_ms) {
@@ -684,6 +768,95 @@ fn records_automatically(
         })
 }
 
+/// An audio file being transcribed as a meeting on its own worker thread
+/// (macOS; Labs › Import audio).
+struct ImportWorker {
+    worker: JoinHandle<Result<meeting::MeetingManifest>>,
+}
+
+/// Starts importing `path`, refusing while a recording or another import
+/// runs. Failures reach the Meetings pane as an import error.
+fn start_import(
+    recording: &mut Option<ActiveRecording>,
+    importing: &mut Option<ImportWorker>,
+    path: PathBuf,
+    events: &SyncSender<ControllerEvent>,
+) {
+    if recording.is_some() {
+        let _ = events.send(ControllerEvent::ImportFailed {
+            error: "Stop the recording before importing audio".into(),
+        });
+        return;
+    }
+    if importing.is_some() {
+        let _ = events.send(ControllerEvent::ImportFailed {
+            error: "An audio import is already running".into(),
+        });
+        return;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        let _ = events.send(ControllerEvent::ImportFailed {
+            error: "Importing audio is only available on macOS".into(),
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let started = thread::Builder::new()
+            .name("meeting-import".into())
+            .spawn(move || meeting::import::import(&path));
+        match started {
+            Ok(worker) => *importing = Some(ImportWorker { worker }),
+            Err(error) => {
+                let _ = events.send(ControllerEvent::ImportFailed {
+                    error: error.to_string(),
+                });
+            }
+        }
+    }
+}
+
+/// Finishes an import worker, starting notes as a finished recording would.
+fn poll_import(importing: &mut Option<ImportWorker>, events: &SyncSender<ControllerEvent>) {
+    if !importing
+        .as_ref()
+        .is_some_and(|worker| worker.worker.is_finished())
+    {
+        return;
+    }
+    let Some(worker) = importing.take() else {
+        return;
+    };
+    match worker.worker.join() {
+        Ok(Ok(manifest)) if manifest.status == meeting::MeetingStatus::Complete => {
+            tracing::info!(meeting = manifest.id, "imported audio was transcribed");
+            if meeting::notes_wanted() {
+                start_notes(manifest.id, events);
+            }
+        }
+        Ok(Ok(manifest)) => {
+            tracing::info!(
+                meeting = manifest.id,
+                status = ?manifest.status,
+                "left an imported meeting for the next launch"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "could not import audio as a meeting");
+            let _ = events.send(ControllerEvent::ImportFailed {
+                error: format!("{error:#}"),
+            });
+        }
+        Err(_) => {
+            tracing::error!("an audio import panicked");
+            let _ = events.send(ControllerEvent::ImportFailed {
+                error: "the audio import stopped".into(),
+            });
+        }
+    }
+}
+
 fn start_recording(
     recording: &mut Option<ActiveRecording>,
     reminders: &mut Reminders,
@@ -707,6 +880,7 @@ fn start_recording(
     // Stop can send six updates before the controller next drains them.
     let (update_sender, updates) = mpsc::sync_channel(16);
     let application = start.meeting.application.clone();
+    let call_switch = CallSwitch::with_kept(start.call, start.switched_from);
     let meeting_start = start.meeting;
     let worker = thread::spawn(move || record(meeting_start, &worker_stop, Some(update_sender)));
     let _ = events.send(ControllerEvent::Starting);
@@ -717,6 +891,8 @@ fn start_recording(
         origin,
         presence: CallPresence::default(),
         auto_stop: AutoStop::default(),
+        call_switch,
+        call_stop: AutoStop::default(),
         stop,
         updates,
         reported_started: false,
@@ -727,6 +903,7 @@ fn start_recording(
 fn poll_recording(
     recording: &mut Option<ActiveRecording>,
     detector: &mut MeetingDetector,
+    browser: &mut BrowserWatch,
     events: &SyncSender<ControllerEvent>,
     probe: &mut impl CallProbe,
     lab_on: bool,
@@ -755,10 +932,11 @@ fn poll_recording(
                 meeting::RecordingUpdate::Chapters(chapters) => {
                     let _ = events.send(ControllerEvent::Chapters(chapters));
                 }
+                meeting::RecordingUpdate::SourceWarning { warning } => {
+                    let _ = events.send(ControllerEvent::SourceWarning { warning });
+                }
                 meeting::RecordingUpdate::Transcribing => {
-                    if !active.stop.swap(true, Ordering::Relaxed) {
-                        let _ = events.send(ControllerEvent::Transcribing);
-                    }
+                    active.end(detector, events);
                 }
             }
         }
@@ -824,13 +1002,12 @@ fn poll_recording(
         if present {
             detector.keep_snooze_alive();
         }
-        if (present || !auto_stop) && active.auto_stop.disarm() {
-            tracing::info!(
-                application,
-                returned = present,
-                "a pending stop after the call ended was cancelled"
-            );
-            let _ = events.send(ControllerEvent::AutoStopCancelled { returned: present });
+        // The call came back (or its setting went off mid-count): the stop it
+        // armed is gone, and its notice goes with the last one counting.
+        if (present || !auto_stop)
+            && withdraw_stop(&mut active.auto_stop, &active.call_stop, events)
+        {
+            tracing::info!(application, "the pending automatic stop is withdrawn");
         }
         if active.presence.observe_at(present, now) {
             tracing::info!(
@@ -851,12 +1028,100 @@ fn poll_recording(
                 application,
                 "meeting recording stopped automatically after its call ended"
             );
-            if !active.stop.swap(true, Ordering::Relaxed) {
-                let _ = events.send(ControllerEvent::Transcribing);
+            active.end(detector, events);
+        }
+
+        // Stop when the call ends, in a browser that never releases
+        // the microphone between calls: the page naming another call ends
+        // this one (#1775). Only a positive read of a different code counts;
+        // a tab naming no call never does.
+        if watching_call_switch(
+            Some(active),
+            crate::app_settings::meeting_stop_when_call_ends(),
+        ) {
+            let applications = active_microphone_applications();
+            let microphone = applications.as_ref().ok().and_then(|applications| {
+                applications
+                    .iter()
+                    .find(|candidate| candidate.canonical_bundle_id() == Some(application))
+            });
+            if let Some(microphone) = microphone {
+                let context = browser.recording_context(microphone);
+                let candidate = candidate_from_microphone(microphone, &context);
+                let current = candidate
+                    .as_ref()
+                    .and_then(|candidate| candidate.call.clone());
+                if active.call_switch.observe(current.as_deref()) {
+                    tracing::info!(
+                        application,
+                        from = active.call_switch.recorded().unwrap_or_default(),
+                        to = current.as_deref().unwrap_or_default(),
+                        "the page named a different call; the recording stops after its grace unless kept"
+                    );
+                    // The browser stays on the microphone and its next reads
+                    // can still name the ended call (or none): remember the
+                    // call the page named, so detection starts that one.
+                    if let Some(candidate) = candidate.filter(|candidate| candidate.call.is_some())
+                    {
+                        detector.call_switched(
+                            active.call_switch.recorded().map(str::to_owned),
+                            candidate,
+                        );
+                    }
+                    active.call_stop.arm_at(now);
+                    let _ = events.send(ControllerEvent::CallEnded {
+                        app: active.app_label.clone(),
+                        auto_stop: true,
+                    });
+                }
+                // The page names the recorded call again (or one the user
+                // kept): whatever change was counting is over. A page that
+                // names no call neither starts nor ends a count.
+                withdraw_call_switch_stop(
+                    &active.call_switch,
+                    &mut active.call_stop,
+                    &active.auto_stop,
+                    detector,
+                    events,
+                );
+            }
+            if active.call_stop.due_at(now) {
+                tracing::info!(
+                    application,
+                    "meeting recording stopped automatically after its page named another call"
+                );
+                active.end(detector, events);
             }
         }
     }
+
+    // Stop when the call ends turned off while a page change was counting:
+    // the deadline goes rather than stopping the recording when it comes back.
+    let stop_on_end = crate::app_settings::meeting_stop_when_call_ends();
+    disarm_call_stop_unless_watching(recording, stop_on_end, detector, events);
     Ok(())
+}
+
+/// Drops an armed stop whose call came back or whose setting went off (both share one notice).
+fn withdraw_stop(
+    stop: &mut AutoStop,
+    other: &AutoStop,
+    events: &SyncSender<ControllerEvent>,
+) -> bool {
+    if !stop.disarm() {
+        return false;
+    }
+    if !other.armed() {
+        let _ = events.send(ControllerEvent::CallEndedWithdrawn);
+    }
+    true
+}
+
+/// Whether a recording stops on its own once its call ends: only one Hex
+/// started automatically (Always record), and only with Stop when
+/// the call ends on. Manual and offered recordings never do.
+fn stops_when_call_ends(automatic: bool, lab_on: bool) -> bool {
+    automatic && lab_on
 }
 
 /// Whether the call app still plays audio; a failed read counts as playing,
@@ -878,8 +1143,21 @@ fn call_app_playing(application: &str) -> bool {
     }
 }
 
-/// How often a browser's tabs are queried while it holds the microphone.
+/// How often a browser's tabs are queried while it has just started holding
+/// the microphone: enough to find a call's site within the 20 s unknown-page
+/// threshold (`detection::BROWSER_STABLE_FOR`).
 const TAB_QUERY_INTERVAL: Duration = Duration::from_secs(1);
+/// How long that one-second burst lasts after a browser starts holding the
+/// microphone.
+const TAB_QUERY_BURST: Duration = Duration::from_secs(30);
+/// How often they are queried after the burst; `BrowserPageMemory` (60 s)
+/// carries the page between answers.
+const TAB_QUERY_BACKOFF: Duration = Duration::from_secs(30);
+/// How often they are queried while a recording watches its page for another
+/// call (Stop when the call ends): a switched call must be named well
+/// within `detection::CALL_CHANGED_AFTER`, and no answer older than
+/// [`TAB_QUERY_MAX_AGE`] says what the browser shows.
+const TAB_QUERY_WATCH: Duration = Duration::from_secs(2);
 /// A tab query that finished longer ago than this no longer says what the
 /// browser shows.
 const TAB_QUERY_MAX_AGE: Duration = Duration::from_secs(5);
@@ -906,6 +1184,13 @@ struct TabProbe {
     running: Option<InFlight>,
     generation: u64,
     started: Option<Instant>,
+    /// The browser this watch began for, and when: its first 30 s ask every
+    /// second, then every 30 s.
+    burst: Option<(String, Instant)>,
+    /// A recording watches this page (Stop when the call ends): ask
+    /// every [`TAB_QUERY_WATCH`], however long the browser has held the
+    /// microphone.
+    watching: bool,
     latest: Option<(String, ContextSnapshot, Instant)>,
 }
 
@@ -916,6 +1201,8 @@ impl TabProbe {
             running: None,
             generation: 0,
             started: None,
+            burst: None,
+            watching: false,
             latest: None,
         }
     }
@@ -938,10 +1225,11 @@ impl TabProbe {
             Some((_, Err(mpsc::TryRecvError::Disconnected))) => self.running = None,
             Some((_, Err(mpsc::TryRecvError::Empty))) | None => {}
         }
+        let interval = self.interval(bundle_id, now);
         if self.running.is_none()
             && self
                 .started
-                .is_none_or(|started| now.saturating_duration_since(started) >= TAB_QUERY_INTERVAL)
+                .is_none_or(|started| now.saturating_duration_since(started) >= interval)
         {
             self.started = Some(now);
             let (sender, receiver) = mpsc::sync_channel(1);
@@ -980,10 +1268,38 @@ impl TabProbe {
     /// Nothing is watched: an answer, finished or still being read, must not
     /// outlive the call. A query in flight is not abandoned (it ends by its
     /// own timeout, and no second one starts beside it); its answer is
-    /// dropped.
+    /// dropped. The next call starts with a fresh one-second burst.
     fn reset(&mut self) {
         self.latest = None;
+        self.burst = None;
         self.generation += 1;
+    }
+
+    /// How far apart this browser's tab queries are: every two seconds while
+    /// a recording watches its page for another call, else one second through
+    /// the first 30 s it holds the microphone, then every 30 s.
+    fn interval(&mut self, bundle_id: &str, now: Instant) -> Duration {
+        if self.watching {
+            return TAB_QUERY_WATCH;
+        }
+        let bursting = match &self.burst {
+            Some((watching, since)) if watching.as_str() == bundle_id => {
+                now.saturating_duration_since(*since) < TAB_QUERY_BURST
+            }
+            _ => true,
+        };
+        if self
+            .burst
+            .as_ref()
+            .is_none_or(|(watching, _)| watching.as_str() != bundle_id)
+        {
+            self.burst = Some((bundle_id.to_string(), now));
+        }
+        if bursting {
+            TAB_QUERY_INTERVAL
+        } else {
+            TAB_QUERY_BACKOFF
+        }
     }
 }
 
@@ -1027,6 +1343,24 @@ impl BrowserWatch {
         let now = Instant::now();
         let page = self.probe.page(bundle_id, now);
         self.memory.recall(application, page, now)
+    }
+
+    /// The page while a recording watches it for another call (Stop
+    /// when the call ends): read every couple of seconds rather than backing
+    /// off, so a call switched to in the same browser is named. It is the
+    /// probe's newest answer, never `BrowserPageMemory`'s: a page seen once
+    /// must not name the call for 60 s while the reads fail.
+    fn recording_context(&mut self, application: &ActiveMicrophoneApplication) -> ContextSnapshot {
+        if !application.is_browser() {
+            return ContextSnapshot::default();
+        }
+        let Some(bundle_id) = application.canonical_bundle_id() else {
+            return ContextSnapshot::default();
+        };
+        self.probe.watching = true;
+        let page = self.probe.page(bundle_id, Instant::now());
+        self.probe.watching = false;
+        page
     }
 }
 
@@ -1083,7 +1417,7 @@ fn detect_meeting(
 
 /// Writes notes on a background thread; the UI refreshes from the manifest
 /// whether generation succeeds or fails.
-fn start_notes(id: String, events: &SyncSender<ControllerEvent>) {
+pub(super) fn start_notes(id: String, events: &SyncSender<ControllerEvent>) {
     let finished = events.clone();
     if meeting::spawn_summary(id, move |result| {
         if let Ok(manifest) = result {
@@ -1116,388 +1450,565 @@ pub fn probe() -> Result<()> {
 mod tests {
     use super::*;
 
-    const TEAMS: &str = "com.microsoft.teams2";
-    const SLACK: &str = "com.tinyspeck.slackmacgap";
-    const ZOOM: &str = "us.zoom.xos";
-
-    /// Records nothing: reports a start, then waits for Stop.
-    fn fake_record(
-        start: meeting::MeetingStart,
-        stop: &AtomicBool,
-        updates: Option<SyncSender<meeting::RecordingUpdate>>,
-    ) -> Result<meeting::MeetingManifest> {
-        if let Some(updates) = updates {
-            let _ = updates.send(meeting::RecordingUpdate::Started {
-                id: "synthetic".into(),
-                title: start.title.unwrap_or_else(|| "Synthetic call".into()),
-            });
-        }
-        while !stop.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(2));
-        }
-        Err(eyre!("nothing was recorded"))
+    #[test]
+    fn only_reminders_keep_the_titling_and_reminder_list() {
+        let menu_only = ReadSources::new(false, true);
+        assert!(!menu_only.meetings);
+        assert!(menu_only.menu);
+        // Reminders keep the read they always had.
+        let reminders = ReadSources::new(true, false);
+        assert!(reminders.meetings);
+        assert!(!reminders.menu);
+        let both = ReadSources::new(true, true);
+        assert!(both.meetings);
+        assert!(both.menu);
     }
 
-    /// Synthetic call activity: the apps on the microphone (`None` when the
-    /// read fails) and whether the call app plays audio.
-    #[derive(Default)]
-    struct Probe {
-        microphone: Option<Vec<&'static str>>,
-        playing: bool,
-        asked: Vec<String>,
-    }
-
-    impl CallProbe for Probe {
-        fn on_microphone(&mut self, application: &str) -> Result<bool> {
-            self.asked.push(application.into());
-            let microphone = self
-                .microphone
-                .as_ref()
-                .ok_or_else(|| eyre!("no microphone reading"))?;
-            Ok(microphone.contains(&application))
-        }
-
-        fn playing(&mut self, _application: &str) -> bool {
-            self.playing
-        }
-    }
-
-    /// The meeting controller with a fake recorder and synthetic call
-    /// activity, on a clock the test moves.
-    struct Controller {
-        recording: Option<ActiveRecording>,
-        detector: MeetingDetector,
-        reminders: Reminders,
-        events: SyncSender<ControllerEvent>,
-        received: Receiver<ControllerEvent>,
-        probe: Probe,
-        lab_on: bool,
-        epoch: Instant,
-        now_ms: u64,
-    }
-
-    impl Controller {
-        fn new(lab_on: bool, microphone: &[&'static str]) -> Self {
-            let (events, received) = mpsc::sync_channel(1024);
-            Self {
-                recording: None,
-                detector: MeetingDetector::default(),
-                reminders: Reminders::default(),
-                events,
-                received,
-                probe: Probe {
-                    microphone: Some(microphone.to_vec()),
-                    ..Probe::default()
-                },
-                lab_on,
-                epoch: Instant::now(),
-                now_ms: 0,
-            }
-        }
-
-        fn command(&mut self, command: ControllerCommand) {
-            handle_command(
-                &mut self.recording,
-                &mut self.detector,
-                &mut self.reminders,
-                command,
-                true,
-                &self.events,
-                fake_record,
-            );
-        }
-
-        /// Polls until the recorder reports its start.
-        fn started(&mut self) -> bool {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                self.poll();
-                if let Some(active) = &self.recording
-                    && active.reported_started
-                {
-                    // Only Always record says it started automatically.
-                    let expected = active.origin == Origin::Automatic;
-                    return self.received.try_iter().any(|event| {
-                        matches!(event, ControllerEvent::RecordingStarted { automatic, .. }
-                            if automatic == expected)
-                    });
-                }
-                thread::sleep(Duration::from_millis(2));
-            }
-            false
-        }
-
-        fn poll(&mut self) {
-            poll_recording(
-                &mut self.recording,
-                &mut self.detector,
-                &self.events,
-                &mut self.probe,
-                self.lab_on,
-                self.epoch + Duration::from_millis(self.now_ms),
-            )
-            .unwrap();
-        }
-
-        /// One pass a second, as the loop's 500 ms passes would, until
-        /// `until_ms`.
-        fn run_until(&mut self, until_ms: u64) {
-            while self.now_ms < until_ms {
-                self.now_ms = (self.now_ms + 1_000).min(until_ms);
-                self.poll();
-            }
-        }
-
-        fn stopped(&self) -> bool {
-            self.recording
-                .as_ref()
-                .is_some_and(|active| active.stop.load(Ordering::Relaxed))
-        }
-
-        /// What the controller reported since last asked.
-        fn reported(&self) -> Vec<&'static str> {
-            self.received
-                .try_iter()
-                .filter_map(|event| match event {
-                    ControllerEvent::CallEnded {
-                        auto_stop: true, ..
-                    } => Some("call ended, stops"),
-                    ControllerEvent::CallEnded {
-                        auto_stop: false, ..
-                    } => Some("call ended"),
-                    ControllerEvent::AutoStopCancelled { returned: true } => {
-                        Some("stop cancelled, call back")
-                    }
-                    ControllerEvent::AutoStopCancelled { returned: false } => {
-                        Some("stop cancelled")
-                    }
-                    ControllerEvent::Transcribing => Some("transcribing"),
-                    ControllerEvent::RecordingContinued => Some("recording continues"),
-                    _ => None,
-                })
-                .collect()
-        }
-    }
-
-    impl Drop for Controller {
-        fn drop(&mut self) {
-            if let Some(active) = self.recording.take() {
-                active.stop.store(true, Ordering::Relaxed);
-                let _ = active.worker.join();
-            }
-        }
-    }
-
-    fn offered(bundle_id: &str) -> MeetingCandidate {
-        let application = ActiveMicrophoneApplication {
-            pid: 7,
-            bundle_id: bundle_id.into(),
-            name: bundle_id.into(),
+    #[test]
+    fn a_menu_only_read_and_a_new_lab_both_force_an_immediate_read() {
+        // Reminders coming back after a menu-only read must not reuse it:
+        // their titling and reminder list is empty.
+        let mut reminders = Reminders {
+            read_at_ms: Some(1_000),
+            menu_only_read: true,
+            ..Reminders::default()
         };
-        candidate_from_microphone(&application, &ContextSnapshot::default()).unwrap()
-    }
+        reminders.prepare_read(true, true);
+        assert_eq!(reminders.read_at_ms, None);
+        assert!(!reminders.menu_only_read);
 
-    fn teams_meeting() -> CalendarMeeting {
-        CalendarMeeting {
-            link: Some(crate::calendar::CallLink {
-                provider: crate::calendar::CallProvider::Teams,
-                url: "https://teams.microsoft.com/l/meetup-join/synthetic".into(),
-            }),
-            ..meeting("standup", 0, 30)
-        }
-    }
+        // The menu's first poll after the lab comes on reads at once too.
+        let mut reminders = Reminders {
+            read_at_ms: Some(1_000),
+            ..Reminders::default()
+        };
+        reminders.prepare_read(true, true);
+        assert_eq!(reminders.read_at_ms, None);
 
-    /// Teams leaves the microphone at 2 s while Zoom keeps it.
-    fn leave_at_2_s(controller: &mut Controller) {
-        controller.run_until(2_000);
-        controller.probe.microphone = Some(vec![ZOOM]);
-    }
+        // Once the menu has read, a fresh read is kept.
+        reminders.menu_read = true;
+        reminders.read_at_ms = Some(2_000);
+        reminders.prepare_read(true, true);
+        assert_eq!(reminders.read_at_ms, Some(2_000));
 
-    #[test]
-    fn an_accepted_teams_or_slack_offer_stops_30_s_after_its_call_ends() {
-        for (bundle_id, source) in [
-            (TEAMS, MeetingSource::Teams),
-            (SLACK, MeetingSource::SlackHuddle),
-        ] {
-            let mut controller = Controller::new(true, &[bundle_id, ZOOM]);
-            let candidate = offered(bundle_id);
-            assert_eq!(candidate.source, source);
-            controller.command(ControllerCommand::Record(candidate));
-            // Clicked, so never "Started automatically".
-            assert!(controller.started(), "{bundle_id}");
-            assert_eq!(
-                controller.recording.as_ref().unwrap().origin,
-                Origin::AcceptedOffer
-            );
-
-            controller.run_until(2_000);
-            // Only the offered call's app counts: Zoom on the microphone
-            // never keeps this call alive.
-            controller.probe.microphone = Some(vec![ZOOM]);
-            // Away from 3 s; the call ends 3 s later and stops 30 s after.
-            controller.run_until(6_000);
-            assert_eq!(controller.reported(), ["call ended, stops"]);
-            controller.run_until(35_000);
-            assert!(!controller.stopped(), "{bundle_id} stopped before 30 s");
-            controller.run_until(36_000);
-            assert!(controller.stopped(), "{bundle_id}");
-            assert_eq!(controller.reported(), ["transcribing"]);
-            assert!(
-                controller
-                    .probe
-                    .asked
-                    .iter()
-                    .all(|asked| asked == bundle_id)
-            );
-        }
+        // With the menu off nothing is forced, and its next turn reads.
+        reminders.prepare_read(true, false);
+        assert_eq!(reminders.read_at_ms, Some(2_000));
+        assert!(!reminders.menu_read);
+        reminders.prepare_read(true, true);
+        assert_eq!(reminders.read_at_ms, None);
     }
 
     #[test]
-    fn always_record_still_stops_and_still_says_it_started_automatically() {
-        let mut controller = Controller::new(true, &[TEAMS]);
-        let start = Start::from_candidate(&offered(TEAMS));
-        start_recording(
-            &mut controller.recording,
-            &mut controller.reminders,
-            start,
-            Origin::Automatic,
-            &controller.events,
-            fake_record,
+    fn joining_from_the_menu_withdraws_its_reminder_and_starts_nothing() {
+        let (events, received) = mpsc::sync_channel(4);
+        let mut reminders = Reminders::default();
+        let meeting = meeting("sync", 100, 30);
+        assert!(matches!(
+            reminders
+                .scheduler
+                .poll(std::slice::from_ref(&meeting), 99 * MINUTE, MINUTE),
+            Some(ReminderUpdate::Show(_))
+        ));
+        let mut recording = None;
+        handle_command(
+            &mut recording,
+            &mut None,
+            &mut MeetingDetector::default(),
+            &mut reminders,
+            ControllerCommand::JoinFromMenu(meeting.clone()),
+            true,
+            &events,
+            meeting::record,
         );
-        assert!(controller.started());
-        leave_at_2_s(&mut controller);
-        controller.run_until(36_000);
-        assert!(controller.stopped());
-        assert_eq!(controller.reported(), ["call ended, stops", "transcribing"]);
-    }
-
-    #[test]
-    fn manual_and_calendar_recordings_never_stop_when_a_call_ends() {
-        // A manual recording is tied to no call, so nothing is watched.
-        let mut controller = Controller::new(true, &[TEAMS]);
-        controller.command(ControllerCommand::Record(MeetingCandidate::manual_titled(
-            Some("Design sync".into()),
-        )));
-        assert!(controller.started());
+        assert!(recording.is_none(), "joining from the menu never records");
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ControllerEvent::ReminderWithdrawn { occurrence })
+                if occurrence == meeting.occurrence()
+        ));
+        // It was recorded as reminded, so it never pops later.
         assert_eq!(
-            controller.recording.as_ref().unwrap().origin,
-            Origin::Requested
+            reminders
+                .scheduler
+                .poll(std::slice::from_ref(&meeting), 100 * MINUTE, MINUTE),
+            None
         );
-        leave_at_2_s(&mut controller);
-        controller.run_until(120_000);
-        assert!(!controller.stopped());
-        assert!(controller.probe.asked.is_empty());
+    }
 
-        // A calendar recording watches its Teams link's app but, started
-        // before any call was seen, only says the call ended.
-        let mut controller = Controller::new(true, &[TEAMS]);
-        controller.command(ControllerCommand::RecordMeeting {
-            meeting: teams_meeting(),
-            join: false,
+    #[test]
+    fn only_automatic_recordings_stop_when_the_call_ends_and_only_with_the_lab_on() {
+        assert!(stops_when_call_ends(true, true));
+        // Manual, offered, and calendar recordings never stop on their own.
+        assert!(!stops_when_call_ends(false, true));
+        // The toggle off leaves every recording running until Stop.
+        assert!(!stops_when_call_ends(true, false));
+        assert!(!stops_when_call_ends(false, false));
+    }
+
+    #[test]
+    fn keep_recording_disarms_a_pending_automatic_stop() {
+        let (events, _received) = mpsc::sync_channel(4);
+        let (_update_sender, updates) = mpsc::sync_channel(1);
+        let mut recording = Some(ActiveRecording {
+            title: "WhatsApp call".into(),
+            application: Some("net.whatsapp.WhatsApp".into()),
+            app_label: "WhatsApp".into(),
+            origin: Origin::Automatic,
+            presence: CallPresence::default(),
+            auto_stop: AutoStop::default(),
+            call_switch: CallSwitch::new(None),
+            call_stop: AutoStop::default(),
+            stop: Arc::new(AtomicBool::new(false)),
+            updates,
+            reported_started: true,
+            worker: thread::spawn(|| Err(eyre!("not recording"))),
         });
-        assert!(controller.started());
-        leave_at_2_s(&mut controller);
-        controller.run_until(120_000);
-        assert!(!controller.stopped());
-        assert_eq!(controller.reported(), ["call ended"]);
+        if let Some(active) = recording.as_mut() {
+            active.auto_stop.arm_at(Instant::now());
+        }
+        handle_command(
+            &mut recording,
+            &mut None,
+            &mut MeetingDetector::default(),
+            &mut Reminders::default(),
+            ControllerCommand::KeepRecording,
+            true,
+            &events,
+            meeting::record,
+        );
+    }
+
+    /// A recording as `start_recording` builds one, for the checks that only
+    /// read its state.
+    fn active_recording(
+        application: Option<&str>,
+        automatic: bool,
+        call: Option<&str>,
+    ) -> ActiveRecording {
+        let (_update_sender, updates) = mpsc::sync_channel(1);
+        ActiveRecording {
+            title: "Meet - Design sync".into(),
+            application: application.map(str::to_string),
+            app_label: "Google Meet".into(),
+            origin: if automatic {
+                Origin::Automatic
+            } else {
+                Origin::Requested
+            },
+            presence: CallPresence::default(),
+            auto_stop: AutoStop::default(),
+            call_switch: CallSwitch::new(call.map(str::to_string)),
+            call_stop: AutoStop::default(),
+            stop: Arc::new(AtomicBool::new(false)),
+            updates,
+            reported_started: true,
+            worker: thread::spawn(|| Err(eyre!("not recording"))),
+        }
     }
 
     #[test]
-    fn with_the_lab_off_an_accepted_offer_records_until_stop() {
-        let mut controller = Controller::new(false, &[TEAMS]);
-        controller.command(ControllerCommand::Record(offered(TEAMS)));
-        assert!(controller.started());
-        // Muted but still playing would count only with the lab on.
-        controller.probe.playing = true;
-        leave_at_2_s(&mut controller);
-        controller.run_until(120_000);
-        assert!(!controller.stopped());
-        assert_eq!(controller.reported(), ["call ended"]);
+    fn keep_recording_disarms_the_call_switch_stop_too() {
+        let (events, _received) = mpsc::sync_channel(4);
+        let mut active = active_recording(
+            Some("company.thebrowser.Browser"),
+            true,
+            Some("abc-defg-hij"),
+        );
+        active.auto_stop.arm_at(Instant::now());
+        active.call_stop.arm_at(Instant::now());
+        let mut recording = Some(active);
+        handle_command(
+            &mut recording,
+            &mut None,
+            &mut MeetingDetector::default(),
+            &mut Reminders::default(),
+            ControllerCommand::KeepRecording,
+            true,
+            &events,
+            meeting::record,
+        );
+        let active = recording.as_mut().unwrap();
+        assert!(!active.auto_stop.disarm(), "the absence stop was dropped");
+        assert!(
+            !active.call_stop.disarm(),
+            "the call switch stop was dropped"
+        );
+        assert!(!active.stop.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn a_muted_call_or_a_failed_read_never_stops_an_accepted_offer() {
-        // Muted: off the microphone but still playing the call.
-        let mut controller = Controller::new(true, &[SLACK]);
-        controller.command(ControllerCommand::Record(offered(SLACK)));
-        assert!(controller.started());
-        controller.probe.playing = true;
-        leave_at_2_s(&mut controller);
-        controller.run_until(120_000);
-        assert!(!controller.stopped());
-        assert!(controller.reported().is_empty());
-
-        // The read fails mid-countdown: counted as present, so the stop is
-        // dropped and the absence starts over once reads work again.
-        let mut controller = Controller::new(true, &[TEAMS]);
-        controller.command(ControllerCommand::Record(offered(TEAMS)));
-        assert!(controller.started());
-        leave_at_2_s(&mut controller);
-        controller.run_until(10_000);
-        controller.probe.microphone = None;
-        controller.run_until(60_000);
-        assert!(!controller.stopped());
-        assert_eq!(
-            controller.reported(),
-            ["call ended, stops", "stop cancelled, call back"]
+    fn keep_recording_keeps_the_code_that_was_counting() {
+        use crate::meeting::detection::CALL_CHANGED_AFTER;
+        let (events, _received) = mpsc::sync_channel(4);
+        let mut active = active_recording(
+            Some("company.thebrowser.Browser"),
+            true,
+            Some("abc-defg-hij"),
         );
-        controller.probe.microphone = Some(vec![]);
-        controller.run_until(93_000);
-        assert!(!controller.stopped(), "a new absence gets its full grace");
-        controller.run_until(94_000);
-        assert!(controller.stopped());
+        // Another code has shown long enough to be a different call.
+        let base = Instant::now();
+        assert!(!active.call_switch.observe_at(Some("xyz-wxyz-xyz"), base));
+        assert!(
+            active
+                .call_switch
+                .observe_at(Some("xyz-wxyz-xyz"), base + CALL_CHANGED_AFTER)
+        );
+        assert!(active.call_switch.changed());
+        active.call_stop.arm_at(Instant::now());
+        let mut recording = Some(active);
+        handle_command(
+            &mut recording,
+            &mut None,
+            &mut MeetingDetector::default(),
+            &mut Reminders::default(),
+            ControllerCommand::KeepRecording,
+            true,
+            &events,
+            meeting::record,
+        );
+        let active = recording.as_mut().unwrap();
+        assert!(!active.call_switch.changed());
+        assert!(!active.call_stop.disarm());
+        // Keeping again with nothing counting never forgets the kept code.
+        handle_command(
+            &mut recording,
+            &mut None,
+            &mut MeetingDetector::default(),
+            &mut Reminders::default(),
+            ControllerCommand::KeepRecording,
+            true,
+            &events,
+            meeting::record,
+        );
+        let active = recording.as_mut().unwrap();
+        let later = base + Duration::from_secs(120);
+        assert!(!active.call_switch.observe_at(Some("xyz-wxyz-xyz"), later));
+        assert!(
+            !active
+                .call_switch
+                .observe_at(Some("xyz-wxyz-xyz"), later + CALL_CHANGED_AFTER),
+            "the kept code ended the recording anyway"
+        );
+        assert!(!active.call_switch.changed());
+        assert!(!active.stop.load(Ordering::Relaxed));
     }
 
     #[test]
-    fn a_returning_call_keep_recording_or_the_lab_off_cancels_the_stop() {
-        // Teams comes back within the grace: nothing stops, and leaving
-        // again arms a new stop.
-        let mut controller = Controller::new(true, &[TEAMS]);
-        controller.command(ControllerCommand::Record(offered(TEAMS)));
-        assert!(controller.started());
-        leave_at_2_s(&mut controller);
-        controller.run_until(10_000);
-        controller.probe.microphone = Some(vec![TEAMS]);
-        controller.run_until(60_000);
-        assert!(!controller.stopped());
-        assert_eq!(
-            controller.reported(),
-            ["call ended, stops", "stop cancelled, call back"]
-        );
-        controller.probe.microphone = Some(vec![]);
-        controller.run_until(93_000);
-        assert!(!controller.stopped());
-        controller.run_until(94_000);
-        assert!(controller.stopped());
+    fn only_an_automatic_browser_call_with_a_code_keeps_reading_its_page() {
+        let arc = Some("company.thebrowser.Browser");
+        assert!(watching_call_switch(
+            Some(&active_recording(arc, true, Some("abc-defg-hij"))),
+            true
+        ));
+        // Stop when the call ends off: the page is dropped as before.
+        assert!(!watching_call_switch(
+            Some(&active_recording(arc, true, Some("abc-defg-hij"))),
+            false
+        ));
+        // Manual/offered recordings never watch.
+        assert!(!watching_call_switch(
+            Some(&active_recording(arc, false, Some("abc-defg-hij"))),
+            true
+        ));
+        // A page that named no code has nothing to compare.
+        assert!(!watching_call_switch(
+            Some(&active_recording(arc, true, None)),
+            true
+        ));
+        // A call app is ended by its microphone, not by a page.
+        assert!(!watching_call_switch(
+            Some(&active_recording(
+                Some("us.zoom.xos"),
+                true,
+                Some("abc-defg-hij")
+            )),
+            true
+        ));
+        // Calendar and manual recordings have no application.
+        assert!(!watching_call_switch(
+            Some(&active_recording(None, true, Some("abc-defg-hij"))),
+            true
+        ));
+        assert!(!watching_call_switch(None, true));
+        // Once told to stop (transcribing), the page is dropped and detection
+        // resumes with a fresh burst.
+        let stopped = active_recording(arc, true, Some("abc-defg-hij"));
+        stopped.stop.store(true, Ordering::Relaxed);
+        assert!(!watching_call_switch(Some(&stopped), true));
+    }
 
-        // Keep recording: this absence never stops it; the capsule closes
-        // itself, and the controller restores its recording indicator.
-        let mut controller = Controller::new(true, &[TEAMS]);
-        controller.command(ControllerCommand::Record(offered(TEAMS)));
-        assert!(controller.started());
-        leave_at_2_s(&mut controller);
-        controller.run_until(10_000);
-        controller.command(ControllerCommand::KeepRecording);
-        controller.run_until(120_000);
-        assert!(!controller.stopped());
-        assert_eq!(
-            controller.reported(),
-            ["call ended, stops", "recording continues"]
+    #[test]
+    fn turning_the_lab_off_drops_an_armed_call_switch_stop() {
+        let (events, received) = mpsc::sync_channel(4);
+        let arc = Some("company.thebrowser.Browser");
+        let mut active = active_recording(arc, true, Some("abc-defg-hij"));
+        active.call_stop.arm_at(Instant::now());
+        let mut recording = Some(active);
+        disarm_call_stop_unless_watching(
+            &mut recording,
+            false,
+            &mut MeetingDetector::default(),
+            &events,
         );
+        let active = recording.as_mut().unwrap();
+        assert!(!active.call_stop.disarm(), "the armed stop was kept");
+        assert!(!active.stop.load(Ordering::Relaxed));
+        // Its notice would otherwise claim a stop nothing is counting.
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ControllerEvent::CallEndedWithdrawn)
+        ));
+        assert!(received.try_recv().is_err(), "one withdrawal only");
 
-        // The lab turned off mid-countdown: the call is still away.
-        let mut controller = Controller::new(true, &[TEAMS]);
-        controller.command(ControllerCommand::Record(offered(TEAMS)));
-        assert!(controller.started());
-        leave_at_2_s(&mut controller);
-        controller.run_until(10_000);
-        controller.lab_on = false;
-        controller.run_until(120_000);
-        assert!(!controller.stopped());
-        assert_eq!(
-            controller.reported(),
-            ["call ended, stops", "stop cancelled"]
+        // While its setting is on and the page watched, the deadline stays.
+        let mut active = active_recording(arc, true, Some("abc-defg-hij"));
+        active.call_stop.arm_at(Instant::now());
+        let mut recording = Some(active);
+        disarm_call_stop_unless_watching(
+            &mut recording,
+            true,
+            &mut MeetingDetector::default(),
+            &events,
         );
+        assert!(recording.as_mut().unwrap().call_stop.disarm());
+        assert!(
+            received.try_recv().is_err(),
+            "a watched page keeps its stop"
+        );
+    }
+
+    #[test]
+    fn the_page_returning_during_the_grace_forgets_the_switched_call() {
+        use crate::meeting::detection::CALL_CHANGED_AFTER;
+        let (events, _received) = mpsc::sync_channel(4);
+        let mut detector = MeetingDetector::default();
+        detector.call_switched(Some("abc-defg-hij".into()), meet_candidate());
+        let mut active = active_recording(
+            Some("company.thebrowser.Browser"),
+            true,
+            Some("abc-defg-hij"),
+        );
+        // The page named the next call long enough to arm the stop, then came
+        // back to the recorded one before the grace ran out.
+        let base = Instant::now();
+        assert!(!active.call_switch.observe_at(Some("xyz-wxyz-xyz"), base));
+        assert!(
+            active
+                .call_switch
+                .observe_at(Some("xyz-wxyz-xyz"), base + CALL_CHANGED_AFTER)
+        );
+        active.call_stop.arm_at(Instant::now());
+        assert!(!active.call_switch.observe_at(
+            Some("abc-defg-hij"),
+            base + CALL_CHANGED_AFTER + Duration::from_secs(1)
+        ));
+        withdraw_call_switch_stop(
+            &active.call_switch,
+            &mut active.call_stop,
+            &active.auto_stop,
+            &mut detector,
+            &events,
+        );
+        assert!(!active.call_stop.disarm(), "the stop was left pending");
+        assert!(
+            detector.switched_call().is_none(),
+            "the withdrawn stop kept the call its page named"
+        );
+    }
+
+    #[test]
+    fn a_hand_stop_keeps_the_switched_call() {
+        let (events, _received) = mpsc::sync_channel(4);
+        let mut detector = MeetingDetector::default();
+        detector.call_switched(Some("abc-defg-hij".into()), meet_candidate());
+        let mut active = active_recording(
+            Some("company.thebrowser.Browser"),
+            true,
+            Some("abc-defg-hij"),
+        );
+        active.call_stop.arm_at(Instant::now());
+        // Stop pressed during the grace: the recording is already stopping,
+        // so its armed page stop goes without forgetting the call its page
+        // named, and the next recording starts that call.
+        active.stop.store(true, Ordering::Relaxed);
+        let mut recording = Some(active);
+        disarm_call_stop_unless_watching(&mut recording, false, &mut detector, &events);
+        assert!(
+            !recording.as_mut().unwrap().call_stop.disarm(),
+            "the armed stop was kept"
+        );
+        assert!(
+            detector.switched_call().is_some(),
+            "the hand stop forgot the call its page named"
+        );
+    }
+
+    #[test]
+    fn the_page_naming_the_recorded_call_again_withdraws_a_pending_stop() {
+        use crate::meeting::detection::CALL_CHANGED_AFTER;
+        let (events, received) = mpsc::sync_channel(4);
+        let mut active = active_recording(
+            Some("company.thebrowser.Browser"),
+            true,
+            Some("abc-defg-hij"),
+        );
+        // Another code counted long enough to arm the stop, then the
+        // recorded call's page came back before the deadline.
+        let base = Instant::now();
+        assert!(!active.call_switch.observe_at(Some("xyz-wxyz-xyz"), base));
+        assert!(
+            active
+                .call_switch
+                .observe_at(Some("xyz-wxyz-xyz"), base + CALL_CHANGED_AFTER)
+        );
+        active.call_stop.arm_at(Instant::now());
+        assert!(!active.call_switch.observe_at(
+            Some("abc-defg-hij"),
+            base + CALL_CHANGED_AFTER + Duration::from_secs(1)
+        ));
+        withdraw_call_switch_stop(
+            &active.call_switch,
+            &mut active.call_stop,
+            &active.auto_stop,
+            &mut MeetingDetector::default(),
+            &events,
+        );
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ControllerEvent::CallEndedWithdrawn)
+        ));
+        assert!(received.try_recv().is_err(), "one withdrawal only");
+        assert!(!active.call_stop.disarm(), "the stop was left pending");
+        assert!(!active.stop.load(Ordering::Relaxed));
+
+        // Nothing pending: nothing is withdrawn.
+        withdraw_call_switch_stop(
+            &active.call_switch,
+            &mut active.call_stop,
+            &active.auto_stop,
+            &mut MeetingDetector::default(),
+            &events,
+        );
+        assert!(received.try_recv().is_err());
+
+        // A page still naming another call keeps its stop and says nothing.
+        assert!(
+            !active
+                .call_switch
+                .observe_at(Some("xyz-wxyz-xyz"), base + Duration::from_secs(120))
+        );
+        active.call_stop.arm_at(Instant::now());
+        withdraw_call_switch_stop(
+            &active.call_switch,
+            &mut active.call_stop,
+            &active.auto_stop,
+            &mut MeetingDetector::default(),
+            &events,
+        );
+        assert!(active.call_stop.disarm(), "the stop was dropped mid-count");
+        assert!(received.try_recv().is_err());
+
+        // The recorded code back while the absence count runs: the page stop
+        // goes, but the shared notice stays for the other.
+        assert!(
+            !active
+                .call_switch
+                .observe_at(Some("abc-defg-hij"), base + Duration::from_secs(180))
+        );
+        active.call_stop.arm_at(Instant::now());
+        active.auto_stop.arm_at(Instant::now());
+        withdraw_call_switch_stop(
+            &active.call_switch,
+            &mut active.call_stop,
+            &active.auto_stop,
+            &mut MeetingDetector::default(),
+            &events,
+        );
+        assert!(!active.call_stop.disarm(), "the page stop was not dropped");
+        assert!(active.auto_stop.armed(), "the absence stop still counts");
+        assert!(received.try_recv().is_err(), "the notice stays");
+    }
+
+    #[test]
+    fn the_call_coming_back_withdraws_a_pending_absence_stop_once() {
+        let (events, received) = mpsc::sync_channel(4);
+        let mut absence = AutoStop::default();
+        let mut page = AutoStop::default();
+        assert!(
+            !withdraw_stop(&mut absence, &page, &events),
+            "nothing was counting"
+        );
+        assert!(received.try_recv().is_err());
+
+        // Both deadlines count one notice: the first to go leaves it up.
+        absence.arm_at(Instant::now());
+        page.arm_at(Instant::now());
+        assert!(withdraw_stop(&mut absence, &page, &events));
+        assert!(page.armed(), "the page stop still counts");
+        assert!(received.try_recv().is_err(), "the notice stays");
+
+        // The last one goes: the notice goes with it, once.
+        assert!(withdraw_stop(&mut page, &absence, &events));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(ControllerEvent::CallEndedWithdrawn)
+        ));
+        assert!(received.try_recv().is_err(), "one withdrawal only");
+
+        // The controller disarms every pass while the call is present, and
+        // only the pass that dropped a stop says anything.
+        assert!(!withdraw_stop(&mut absence, &page, &events));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn an_import_is_refused_while_a_recording_runs_or_another_import_does() {
+        let (events, received) = mpsc::sync_channel(4);
+        let (_update_sender, updates) = mpsc::sync_channel(1);
+        let mut recording = Some(ActiveRecording {
+            title: "Zoom call".into(),
+            application: None,
+            app_label: "Zoom".into(),
+            origin: Origin::Requested,
+            presence: CallPresence::default(),
+            auto_stop: AutoStop::default(),
+            call_switch: CallSwitch::new(None),
+            call_stop: AutoStop::default(),
+            stop: Arc::new(AtomicBool::new(false)),
+            updates,
+            reported_started: true,
+            worker: thread::spawn(|| Err(eyre!("not recording"))),
+        });
+        start_import(
+            &mut recording,
+            &mut None,
+            PathBuf::from("/tmp/call.m4a"),
+            &events,
+        );
+        match received.try_recv() {
+            Ok(ControllerEvent::ImportFailed { error }) => {
+                assert!(error.contains("Stop the recording"), "{error}");
+            }
+            _ => panic!("a recording did not refuse the import"),
+        }
+
+        let mut recording = None;
+        let mut importing = Some(ImportWorker {
+            worker: thread::spawn(|| Err(eyre!("not imported"))),
+        });
+        start_import(
+            &mut recording,
+            &mut importing,
+            PathBuf::from("/tmp/call.m4a"),
+            &events,
+        );
+        match received.try_recv() {
+            Ok(ControllerEvent::ImportFailed { error }) => {
+                assert!(error.contains("already running"), "{error}");
+            }
+            _ => panic!("a running import did not refuse another"),
+        }
     }
 
     fn banshee_tab() -> ContextSnapshot {
@@ -1507,6 +2018,18 @@ mod tests {
             window_title: Some("Standup".into()),
             ..ContextSnapshot::default()
         }
+    }
+
+    /// A Google Meet call's page in the test browser, for the call-switch
+    /// checks.
+    fn meet_candidate() -> MeetingCandidate {
+        let tab = ContextSnapshot {
+            application: Some("Brave Browser".into()),
+            browser_url: Some(url::Url::parse("https://meet.google.com/xyz-wxyz-xyz").unwrap()),
+            window_title: Some("Meet - Standup".into()),
+            ..ContextSnapshot::default()
+        };
+        candidate_from_microphone(&brave(), &tab).unwrap()
     }
 
     fn brave() -> ActiveMicrophoneApplication {
@@ -1611,6 +2134,97 @@ mod tests {
         assert_eq!(
             probe.page("com.brave.Browser", polled),
             ContextSnapshot::default()
+        );
+    }
+
+    #[test]
+    fn tab_queries_back_off_after_the_first_thirty_seconds_and_reset() {
+        use std::sync::atomic::AtomicUsize;
+        static QUERIES: AtomicUsize = AtomicUsize::new(0);
+        fn counted(_: &str) -> Result<ContextSnapshot> {
+            QUERIES.fetch_add(1, Ordering::SeqCst);
+            Ok(banshee_tab())
+        }
+        // A query runs on its own thread, so wait with a deadline until its
+        // answer is received: polling at the query's own start time can never
+        // start another one, so this only drains the answer.
+        let settle = |probe: &mut TabProbe, at: Instant, expected: usize| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while QUERIES.load(Ordering::SeqCst) < expected || probe.running.is_some() {
+                assert!(Instant::now() < deadline, "the tab query never finished");
+                probe.page("com.brave.Browser", at);
+                thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(QUERIES.load(Ordering::SeqCst), expected);
+        };
+        let mut probe = TabProbe::new(counted);
+        let started = Instant::now();
+        // The first 30 s ask every second; `started` records the query
+        // synchronously, so a backed-off call is proven by it not moving.
+        probe.page("com.brave.Browser", started);
+        assert_eq!(probe.started, Some(started));
+        settle(&mut probe, started, 1);
+        let at_1 = started + Duration::from_secs(1);
+        probe.page("com.brave.Browser", at_1);
+        assert_eq!(probe.started, Some(at_1));
+        settle(&mut probe, at_1, 2);
+
+        // From then on they are 30 s apart; an answer waits that long.
+        let at_29 = started + Duration::from_secs(29);
+        probe.page("com.brave.Browser", at_29);
+        assert_eq!(probe.started, Some(at_29));
+        settle(&mut probe, at_29, 3);
+        probe.page("com.brave.Browser", started + Duration::from_secs(31));
+        assert_eq!(
+            probe.started,
+            Some(at_29),
+            "a backed-off query started early"
+        );
+        let at_59 = started + Duration::from_secs(59);
+        probe.page("com.brave.Browser", at_59);
+        assert_eq!(probe.started, Some(at_59));
+        settle(&mut probe, at_59, 4);
+
+        // A reset starts a fresh burst at once.
+        probe.reset();
+        let at_61 = started + Duration::from_secs(61);
+        probe.page("com.brave.Browser", at_61);
+        assert_eq!(probe.started, Some(at_61));
+        settle(&mut probe, at_61, 5);
+    }
+
+    #[test]
+    fn a_watched_page_is_queried_every_two_seconds_instead_of_backing_off() {
+        fn counted(_: &str) -> Result<ContextSnapshot> {
+            Ok(banshee_tab())
+        }
+        let mut probe = TabProbe::new(counted);
+        let started = Instant::now();
+        // A recording watches its page: two seconds, however long the browser
+        // has held the microphone.
+        probe.watching = true;
+        assert_eq!(
+            probe.interval("com.brave.Browser", started),
+            TAB_QUERY_WATCH
+        );
+        assert_eq!(
+            probe.interval("com.brave.Browser", started + Duration::from_secs(31)),
+            TAB_QUERY_WATCH
+        );
+        assert_eq!(
+            probe.interval("com.brave.Browser", started + Duration::from_secs(120)),
+            TAB_QUERY_WATCH
+        );
+        // Once nothing watches, detection resumes with a fresh burst, then
+        // backs off as before.
+        probe.watching = false;
+        assert_eq!(
+            probe.interval("com.brave.Browser", started + Duration::from_secs(120)),
+            TAB_QUERY_INTERVAL
+        );
+        assert_eq!(
+            probe.interval("com.brave.Browser", started + Duration::from_secs(150)),
+            TAB_QUERY_BACKOFF
         );
     }
 

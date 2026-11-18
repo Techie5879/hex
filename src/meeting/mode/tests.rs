@@ -76,7 +76,7 @@ fn an_old_global_true_is_ignored_and_unrelated_labs_survive() {
         "shared_room_meetings": true, "meeting_speaker_names": true, "stop_when_call_ends": true
     }))
     .unwrap();
-    assert!(old.meeting_speaker_names && old.stop_when_call_ends);
+    assert!(old.meeting_speaker_names && old.stop_when_call_ends == Some(true));
     let saved = serde_json::to_value(old).unwrap();
     assert!(saved.get("shared_room_meetings").is_none());
     assert!(crate::labs::Feature::for_settings_key("labs.shared_room_meetings").is_none());

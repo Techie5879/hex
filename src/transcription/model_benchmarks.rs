@@ -21,7 +21,7 @@ impl ErrorMetric {
     }
 }
 
-/// Where one model's error rate comes from, as Labs › Benchmark details
+/// Where one model's error rate comes from, as Labs › Model test details
 /// shows it. Every `None` is something the source did not record and the
 /// picker says is unknown; nothing is guessed. Speed figures (`realtime`)
 /// have no record: they are upstream figures whose hardware and method are
@@ -146,6 +146,24 @@ const PARAKEET_ULTRA_RECORD: BenchmarkRecord = BenchmarkRecord {
     hardware: Some("CUDA"),
 };
 
+/// transcribe.cpp's published conversion benchmark for the Q8_0 file
+/// (`catalog/orukeet.json`, handy-computer/orukeet-gguf's card): LibriSpeech
+/// test-clean in full, batch 8, no timestamps, the `en` hint, decoded on CUDA
+/// at transcribe.cpp 37273409. The benchmark file's digest and the scorer
+/// versions are unrecorded; not measured in Hex.
+const ORUKEET_RECORD: BenchmarkRecord = BenchmarkRecord {
+    metric: ErrorMetric::Wer,
+    value: 1.86,
+    language: "en",
+    dataset: Some("LibriSpeech test-clean"),
+    source: Some("transcribe.cpp's published conversion benchmark"),
+    source_revision: Some("37273409"),
+    utterances: Some(2_620),
+    batch_size: Some(8),
+    timestamps: Some(false),
+    hardware: Some("CUDA"),
+};
+
 /// Hex's run of the same harness over LibriSpeech test-clean with the
 /// `en-US` prompt on apollo. Its FLEURS test runs scored 7.91% English and
 /// 10.39% German with the language set, 8.77% and 10.46% with Auto.
@@ -212,6 +230,7 @@ pub fn benchmark(model: &ModelDefinition) -> Option<BenchmarkRecord> {
         TranscriptionModelId::QwenCleoAsr17B => Some(QWENCLEO_RECORD),
         TranscriptionModelId::IvritWhisperLargeV3Turbo => Some(IVRIT_WHISPER_RECORD),
         TranscriptionModelId::ParakeetUltra => Some(PARAKEET_ULTRA_RECORD),
+        TranscriptionModelId::Orukeet => Some(ORUKEET_RECORD),
         TranscriptionModelId::Nemotron35Asr => Some(NEMOTRON_3_5_ASR_RECORD),
         TranscriptionModelId::GigaAmV3 => Some(GIGAAM_V3_RECORD),
         TranscriptionModelId::NbWhisperMedium => Some(NB_WHISPER_MEDIUM_RECORD),
@@ -225,7 +244,7 @@ pub fn benchmark(model: &ModelDefinition) -> Option<BenchmarkRecord> {
 }
 
 /// Whether `model` may keep a "Most accurate" badge for `language` with
-/// Labs › Benchmark details on: it has a record, and every other
+/// Labs › Model test details on: it has a record, and every other
 /// recommended model for the language that has one is comparable to it.
 pub(crate) fn most_accurate_is_comparable(model: &ModelDefinition, language: &str) -> bool {
     let Some(record) = benchmark(model) else {

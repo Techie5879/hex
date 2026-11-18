@@ -26,7 +26,7 @@ const EARS_COMPLETED_VISIBLE_DURATION: Duration = Duration::from_millis(700);
 const FAILED_VISIBLE_DURATION: Duration = Duration::from_millis(600);
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum DictationIndicatorEvent {
     Reset,
     /// HUD Lab's or a playground story's tuning.
@@ -61,25 +61,34 @@ pub enum DictationIndicatorEvent {
     },
     JobFailed {
         job_id: u64,
+        /// Why it failed, for Labs › Failure notices; the HUD ignores it.
+        message: Option<String>,
     },
-    Failed,
+    Failed {
+        /// Why it failed, for Labs › Failure notices; the HUD ignores it.
+        message: Option<String>,
+    },
 }
 
 impl DictationIndicatorEvent {
-    /// A `Meter` event from captured samples: their RMS and absolute peak;
-    /// `None` for no samples.
+    /// A `Meter` event from captured samples: their RMS and absolute peak
+    /// around the chunk's mean, so a microphone's DC offset never reads as
+    /// loudness; `None` for no samples.
     pub fn meter(samples: &[f32]) -> Option<Self> {
         if samples.is_empty() {
             return None;
         }
+        let count = samples.len() as f32;
+        let mean = samples.iter().sum::<f32>() / count;
         let mut sum_of_squares = 0.0;
         let mut peak = 0.0_f32;
         for sample in samples {
-            sum_of_squares += sample * sample;
-            peak = peak.max(sample.abs());
+            let centered = sample - mean;
+            sum_of_squares += centered * centered;
+            peak = peak.max(centered.abs());
         }
         Some(Self::Meter {
-            average: (sum_of_squares / samples.len() as f32).sqrt(),
+            average: (sum_of_squares / count).sqrt(),
             peak,
         })
     }
@@ -106,33 +115,11 @@ mod macos {
                 crate::macos_rune::wake_pump();
             }
         }
-
-        pub fn meter(&self, samples: &[f32]) {
-            if let Some(event) = DictationIndicatorEvent::meter(samples) {
-                self.send(event);
-            }
-        }
     }
 
     pub fn channel() -> (DictationIndicatorSender, Receiver<DictationIndicatorEvent>) {
         let (sender, receiver) = mpsc::channel();
         (DictationIndicatorSender(sender), receiver)
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn meter_reports_rms_and_peak() {
-            let (sender, receiver) = channel();
-            sender.meter(&[-0.5, 0.5]);
-            let DictationIndicatorEvent::Meter { average, peak } = receiver.recv().unwrap() else {
-                panic!("expected meter event");
-            };
-            assert!((average - 0.5).abs() < f32::EPSILON);
-            assert!((peak - 0.5).abs() < f32::EPSILON);
-        }
     }
 }
 
@@ -276,6 +263,20 @@ impl IndicatorModel {
         self.active
     }
 
+    /// Whether the HUD is recording a capture: the one phase whose only events
+    /// are meters, so the only one a recovery re-ask may act on (#1793).
+    #[cfg(any(target_os = "windows", test))]
+    pub fn recording(&self) -> bool {
+        self.phase == Phase::Recording
+    }
+
+    /// The meter's loudness, dBFS: tests check that a meter still updates it
+    /// when the update draws no frame of its own.
+    #[cfg(test)]
+    pub fn loudness(&self) -> f32 {
+        self.loudness
+    }
+
     /// What the HUD says to assistive technology: Recording, Transcribing,
     /// or Failed, in English (callers translate it); `None` while nothing
     /// shows or the HUD fades out.
@@ -358,10 +359,10 @@ impl IndicatorModel {
             DictationIndicatorEvent::JobCancelled { job_id } => {
                 self.finish_job(job_id, now, Phase::Cancelled);
             }
-            DictationIndicatorEvent::JobFailed { job_id } => {
+            DictationIndicatorEvent::JobFailed { job_id, .. } => {
                 self.finish_job(job_id, now, Phase::Failed);
             }
-            DictationIndicatorEvent::Failed => {
+            DictationIndicatorEvent::Failed { .. } => {
                 self.finish_capture(now, Phase::Failed);
             }
         }
@@ -473,11 +474,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn meter_reports_rms_and_peak() {
+        let Some(DictationIndicatorEvent::Meter { average, peak }) =
+            DictationIndicatorEvent::meter(&[-0.5, 0.5])
+        else {
+            panic!("expected a meter event");
+        };
+        assert!((average - 0.5).abs() < f32::EPSILON);
+        assert!((peak - 0.5).abs() < f32::EPSILON);
+        assert!(DictationIndicatorEvent::meter(&[]).is_none());
+    }
+
+    /// Some microphones (a Ryzen built-in digital microphone, #841) carry a
+    /// constant DC offset louder than the speech; the meter measures around
+    /// each chunk's mean, as the dictation silence gate does.
+    #[test]
+    fn a_dc_offset_never_reads_as_loudness() {
+        let Some(DictationIndicatorEvent::Meter { average, peak }) =
+            DictationIndicatorEvent::meter(&[0.2; 512])
+        else {
+            panic!("expected a meter event");
+        };
+        assert!(
+            average < 1e-5,
+            "a constant offset reads as silence: {average}"
+        );
+        assert!(peak < 1e-5, "and has no peak: {peak}");
+
+        let Some(DictationIndicatorEvent::Meter { average, peak }) =
+            DictationIndicatorEvent::meter(&[0.7, -0.3])
+        else {
+            panic!("expected a meter event");
+        };
+        assert!((average - 0.5).abs() < 1e-6);
+        assert!((peak - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn an_island_spreads_the_field_across_it_at_the_same_spacing() {
         let tuning = Tuning::default();
         assert_eq!(fill_island(tuning, None), tuning);
         let island = Island {
             notch: [185.0, 32.0],
+            bar: 0.0,
             width: 241.0,
             top: -64.0,
             ears: false,
@@ -525,7 +564,10 @@ mod tests {
         );
         assert_eq!(model.status(), Some("Transcribing"));
         model.handle(
-            DictationIndicatorEvent::JobFailed { job_id: 1 },
+            DictationIndicatorEvent::JobFailed {
+                job_id: 1,
+                message: None,
+            },
             start,
             false,
         );
@@ -533,6 +575,46 @@ mod tests {
         model.handle(DictationIndicatorEvent::Started, start, false);
         model.handle(DictationIndicatorEvent::Discarded, start, false);
         assert_eq!(model.status(), None);
+    }
+
+    /// Only the recording phase reports nothing but meters, so it is the only
+    /// phase a recovery re-ask may act on: `active` stays true through the
+    /// transcribing, done and failed looks, which draw their own frames (#1793).
+    #[test]
+    fn only_the_recording_phase_is_recording() {
+        let start = Instant::now();
+        let mut model = IndicatorModel::new(Tuning::default(), start);
+        assert!(!model.recording());
+        model.handle(DictationIndicatorEvent::Started, start, false);
+        assert!(model.recording());
+        model.handle(
+            DictationIndicatorEvent::Submitted { job_id: 1 },
+            start,
+            false,
+        );
+        assert!(!model.recording(), "transcribing draws its own frames");
+        model.handle(
+            DictationIndicatorEvent::JobFailed {
+                job_id: 1,
+                message: None,
+            },
+            start,
+            false,
+        );
+        assert!(!model.recording());
+        model.handle(DictationIndicatorEvent::Started, start, false);
+        assert!(model.recording());
+        model.handle(
+            DictationIndicatorEvent::Failed { message: None },
+            start,
+            false,
+        );
+        assert!(!model.recording());
+        model.handle(DictationIndicatorEvent::Started, start, false);
+        model.handle(DictationIndicatorEvent::Cancelled, start, false);
+        assert!(!model.recording());
+        model.handle(DictationIndicatorEvent::Reset, start, false);
+        assert!(!model.recording());
     }
 
     fn at(start: Instant, seconds: f32) -> Instant {
@@ -655,6 +737,7 @@ mod tests {
         };
         let ears = Island {
             notch: [185.0, 32.0],
+            bar: 34.0,
             width: 253.0,
             top: -64.0,
             ears: true,
@@ -679,7 +762,11 @@ mod tests {
         let mut model = IndicatorModel::new(Tuning::default(), start);
         model.handle(DictationIndicatorEvent::Started, start, false);
         run(&mut model, start, 0.0, 0.5);
-        model.handle(DictationIndicatorEvent::Failed, at(start, 0.5), false);
+        model.handle(
+            DictationIndicatorEvent::Failed { message: None },
+            at(start, 0.5),
+            false,
+        );
         let failed = run(&mut model, start, 0.5, 0.5);
         assert!(failed.last().unwrap().pose.fail > 0.9);
         run(&mut model, start, 1.0, 1.5);

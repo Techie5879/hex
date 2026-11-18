@@ -7,31 +7,26 @@ use std::time::{Duration, Instant};
 use rune::{Edge, El, Key, KeyEvent, Transition, Tx, col, row, spacer, text};
 
 use super::controls::{
-    ButtonKind, Choice, DESCRIPTION, KEY_GAP, KeySize, METRICS, Paint, button, fixed_select,
-    keycap, note, pulsing_dot, section, select, setting_row, status_dot,
+    ButtonKind, Choice, DESCRIPTION, KEY_GAP, KeySize, METRICS, Paint, button, keycap, note,
+    pulsing_dot, section, setting_row, status_dot,
 };
 use super::host;
 use super::{Menu, Request, Service, ShortcutTarget, Ui};
-use crate::app_settings::{
-    AppSettings, HotkeyBinding, HotkeyKey, HotkeyModifiers, KeyboardModelChoice, ModifierSide,
-};
+use crate::app_settings::{AppSettings, HotkeyBinding, HotkeyKey, HotkeyModifiers, ModifierSide};
 use crate::desktop::host::{
-    DesktopAction, DesktopGrantedShortcut, DesktopShortcut, DesktopShortcuts, DesktopUpdateStatus,
+    DesktopAction, DesktopGrantedShortcut, DesktopShortcut, DesktopUpdateStatus,
 };
 use crate::desktop::i18n::{tr, tr_fill};
 use crate::dictation::ShortcutMode;
-use crate::transcription::keyboard_model_switching::InputSource;
 use crate::transcription::models::{self as transcription_models, ModelPreparationStage};
+
+mod grants;
+
+pub(super) use self::grants::{gnome_clash_note, granted};
+use self::grants::{on_gnome, portal_grant};
 
 static CHECK: &rune::Icon = &rune_theme_opencode::icons::CHECK_SMALL;
 
-pub(super) const SOUND_VOLUME_STEPS: [(&str, f32); 5] = [
-    ("Off", 0.0),
-    ("25%", 0.25),
-    ("50%", 0.5),
-    ("75%", 0.75),
-    ("100%", 1.0),
-];
 /// How long a newly saved shortcut shows "Saved".
 const SAVED_FOR: Duration = Duration::from_secs(1);
 /// How long to wait for the service to start a requested shortcut edit.
@@ -223,7 +218,18 @@ pub(super) fn modifier_only_hint(peak: HotkeyModifiers) -> &'static str {
 }
 
 /// Saves a recorded chord, or keeps listening with why it was rejected.
+/// Plain ⌫ (or Delete) turns a shortcut that can be off off.
 fn record(ui: &mut Ui, target: ShortcutTarget, binding: Result<HotkeyBinding, &'static str>) {
+    if can_turn_off(target) && binding.as_ref().is_ok_and(HotkeyBinding::is_bare_erase) {
+        cancel_capture(ui);
+        if ui.update(|settings| turn_off(settings, target)) {
+            ui.capture = Capture::Saved {
+                target,
+                until: None,
+            };
+        }
+        return;
+    }
     let message = match binding.and_then(|binding| {
         validate(&ui.settings, target, &binding)?;
         Ok(binding)
@@ -334,7 +340,10 @@ pub(super) fn recorded_binding(event: &KeyEvent) -> Result<HotkeyBinding, &'stat
     // their Labs toggles in `validate` (Linux).
     let lone_labs_key = cfg!(target_os = "linux")
         && (HotkeyKey::section_name(&name) || HotkeyKey::special_name(&name));
-    if modifiers.is_empty() && !matches!(event.key, Key::Function(_)) && !lone_labs_key {
+    // Plain ⌫ or Delete turns an optional shortcut off (`record`);
+    // `validate` refuses it as a binding.
+    let erase = matches!(event.key, Key::Backspace | Key::Delete);
+    if modifiers.is_empty() && !matches!(event.key, Key::Function(_)) && !lone_labs_key && !erase {
         return Err(tr("Add a modifier"));
     }
     Ok(HotkeyBinding {
@@ -352,6 +361,12 @@ pub(super) fn validate(
     if binding.is_bare_primary_click() {
         return Err(tr("Add a modifier"));
     }
+    // Plain ⌫ turns a shortcut off rather than binding (`record`). Windows'
+    // cancel key may be any key alone, as it always could.
+    if binding.is_bare_erase() && !(cfg!(target_os = "windows") && target == ShortcutTarget::Cancel)
+    {
+        return Err(tr("Add a modifier"));
+    }
     // Menu, Pause, and Scroll Lock need Labs › Special keys alone (Linux).
     if cfg!(target_os = "linux")
         && binding.key.as_ref().is_some_and(HotkeyKey::is_special)
@@ -363,10 +378,27 @@ pub(super) fn validate(
             tr("Unsupported key")
         });
     }
-    // The § key alone needs Labs › Section key alone (Linux).
-    if cfg!(target_os = "linux") && binding.is_lone_section_key() && !settings.section_key_allowed()
+    // The ISO section key alone needs Labs › § key alone (Linux,
+    // macOS).
+    if cfg!(any(target_os = "linux", target_os = "macos"))
+        && binding.is_lone_section_key()
+        && !settings.section_key_allowed()
     {
         return Err(tr("Add a modifier"));
+    }
+    // Any shortcut on the microphone key needs Labs › Microphone key alone
+    // (macOS); a modifier doesn't excuse it.
+    if cfg!(target_os = "macos")
+        && binding.uses_microphone_key()
+        && !settings.microphone_key_allowed()
+    {
+        return Err(tr("Unsupported key"));
+    }
+    // macOS reads the microphone key at Hex's own session tap, before the
+    // annotated-session tap Screenshots' keys go through, so a shot never sees
+    // it however the labs are set.
+    if cfg!(target_os = "macos") && binding.uses_microphone_key() && is_screenshot(target) {
+        return Err(tr("Unsupported key"));
     }
     // A navigation key alone needs Labs › Special keys alone (Windows).
     if cfg!(target_os = "windows")
@@ -382,6 +414,21 @@ pub(super) fn validate(
     Ok(())
 }
 
+/// Whether `target` is one of the Screenshots keys, which read the keyboard at
+/// the annotated session, after Hex's microphone-key tap has taken the press.
+#[cfg(target_os = "macos")]
+fn is_screenshot(target: ShortcutTarget) -> bool {
+    matches!(
+        target,
+        ShortcutTarget::Screenshot | ShortcutTarget::ScreenshotRecord
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_screenshot(_: ShortcutTarget) -> bool {
+    false
+}
+
 /// Whether `binding` overlaps a shortcut `target` must not share: the other
 /// active shortcuts and, where meetings exist (macOS), meeting paste.
 pub(super) fn conflicts(
@@ -394,15 +441,22 @@ pub(super) fn conflicts(
         ShortcutTarget::Dictation => HotkeySlot::Dictation,
         ShortcutTarget::PasteLast => HotkeySlot::PasteLast,
         ShortcutTarget::RawDictation => HotkeySlot::RawDictation,
+        #[cfg(target_os = "linux")]
+        ShortcutTarget::TypedText => HotkeySlot::TypedText,
         ShortcutTarget::Cancel => HotkeySlot::Cancel,
         #[cfg(hex_capture)]
         ShortcutTarget::Capture => HotkeySlot::Capture,
         #[cfg(all(hex_capture, target_os = "macos"))]
         ShortcutTarget::CaptureReplay => HotkeySlot::CaptureReplay,
-        #[cfg(target_os = "macos")]
         ShortcutTarget::SecondDictation => HotkeySlot::SecondDictation,
         #[cfg(target_os = "macos")]
+        ShortcutTarget::ExtraDictation(index) => HotkeySlot::ExtraDictation(index),
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        ShortcutTarget::TerminalPaste => HotkeySlot::TerminalPaste,
+        #[cfg(target_os = "macos")]
         ShortcutTarget::Screenshot => HotkeySlot::Screenshot,
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::ScreenshotRecord => HotkeySlot::ScreenshotRecord,
     };
     settings.hotkey_in_use(slot, binding)
 }
@@ -428,15 +482,26 @@ pub(super) fn binding(settings: &AppSettings, target: ShortcutTarget) -> Option<
         ShortcutTarget::Dictation => Some(&settings.dictation_hotkey),
         ShortcutTarget::PasteLast => settings.paste_last_hotkey.as_ref(),
         ShortcutTarget::RawDictation => settings.raw_dictation_hotkey.as_ref(),
+        #[cfg(target_os = "linux")]
+        ShortcutTarget::TypedText => settings.typed_text_hotkey.as_ref(),
         ShortcutTarget::Cancel => Some(&settings.cancel_hotkey),
         #[cfg(hex_capture)]
         ShortcutTarget::Capture => Some(&settings.capture.hotkey),
         #[cfg(all(hex_capture, target_os = "macos"))]
         ShortcutTarget::CaptureReplay => settings.capture.replay_hotkey.as_ref(),
-        #[cfg(target_os = "macos")]
         ShortcutTarget::SecondDictation => settings.second_dictation_hotkey.as_ref(),
         #[cfg(target_os = "macos")]
+        ShortcutTarget::ExtraDictation(index) => settings
+            .extra_dictation_hotkeys
+            .get(index)?
+            .binding
+            .as_ref(),
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        ShortcutTarget::TerminalPaste => settings.terminal_paste_hotkey.as_ref(),
+        #[cfg(target_os = "macos")]
         ShortcutTarget::Screenshot => Some(&settings.screenshots.hotkey),
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::ScreenshotRecord => settings.screenshots.record_hotkey.as_ref(),
     }
 }
 
@@ -449,19 +514,60 @@ pub(super) fn set_binding(
         ShortcutTarget::Dictation => settings.dictation_hotkey = binding,
         ShortcutTarget::PasteLast => settings.paste_last_hotkey = Some(binding),
         ShortcutTarget::RawDictation => settings.raw_dictation_hotkey = Some(binding),
+        #[cfg(target_os = "linux")]
+        ShortcutTarget::TypedText => settings.typed_text_hotkey = Some(binding),
         ShortcutTarget::Cancel => settings.cancel_hotkey = binding,
         #[cfg(hex_capture)]
         ShortcutTarget::Capture => settings.capture.hotkey = binding,
         #[cfg(all(hex_capture, target_os = "macos"))]
         ShortcutTarget::CaptureReplay => settings.capture.replay_hotkey = Some(binding),
-        #[cfg(target_os = "macos")]
         ShortcutTarget::SecondDictation => settings.second_dictation_hotkey = Some(binding),
         #[cfg(target_os = "macos")]
+        ShortcutTarget::ExtraDictation(index) => {
+            // A row removed while its recorder commits keeps the rest.
+            if let Some(row) = settings.extra_dictation_hotkeys.get_mut(index) {
+                row.binding = Some(binding);
+            }
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        ShortcutTarget::TerminalPaste => settings.terminal_paste_hotkey = Some(binding),
+        #[cfg(target_os = "macos")]
         ShortcutTarget::Screenshot => settings.screenshots.hotkey = binding,
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::ScreenshotRecord => settings.screenshots.record_hotkey = Some(binding),
     }
 }
 
-/// Labs › Restore shortcut default: puts `default` back as `target`'s
+/// The shortcuts in General and Output that can be off: plain ⌫ while
+/// recording one turns it off.
+pub(super) fn can_turn_off(target: ShortcutTarget) -> bool {
+    match target {
+        ShortcutTarget::PasteLast
+        | ShortcutTarget::RawDictation
+        | ShortcutTarget::SecondDictation => true,
+        #[cfg(target_os = "linux")]
+        ShortcutTarget::TypedText => true,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        ShortcutTarget::TerminalPaste => true,
+        _ => false,
+    }
+}
+
+/// Turns off a shortcut [`can_turn_off`] allows; others keep their binding.
+pub(super) fn turn_off(settings: &mut AppSettings, target: ShortcutTarget) {
+    match target {
+        ShortcutTarget::PasteLast => settings.paste_last_hotkey = None,
+        ShortcutTarget::RawDictation => settings.raw_dictation_hotkey = None,
+        ShortcutTarget::SecondDictation => settings.second_dictation_hotkey = None,
+        #[cfg(target_os = "linux")]
+        ShortcutTarget::TypedText => settings.typed_text_hotkey = None,
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        ShortcutTarget::TerminalPaste => settings.terminal_paste_hotkey = None,
+        _ => {}
+    }
+}
+
+/// A shortcut row's Reset: puts `default` back as `target`'s
 /// shortcut under the rules a recorded one meets. A default another
 /// shortcut already uses changes nothing and opens the recorder with the
 /// usual conflict, so another can be recorded.
@@ -483,19 +589,13 @@ pub(super) fn restore_default(ui: &mut Ui, target: ShortcutTarget, default: Hotk
     }
 }
 
-pub(super) fn sound_volume_index(settings: &AppSettings) -> usize {
-    if !settings.sound_effects {
-        return 0;
+/// The tone volume the slider shows: zero while tones are off.
+pub(super) fn sound_volume(settings: &AppSettings) -> f32 {
+    if settings.sound_effects {
+        settings.sound_effect_volume.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
-    SOUND_VOLUME_STEPS[1..]
-        .iter()
-        .enumerate()
-        .min_by(|(_, (_, left)), (_, (_, right))| {
-            (settings.sound_effect_volume - left)
-                .abs()
-                .total_cmp(&(settings.sound_effect_volume - right).abs())
-        })
-        .map_or(0, |(index, _)| index + 1)
 }
 
 pub(super) fn toggle_menu(ui: &mut Ui, menu: Menu) {
@@ -608,10 +708,10 @@ pub(super) fn error_notes(p: Paint, error: &str) -> [El; 2] {
     ]
 }
 
-pub(super) fn listener_card(ui: &Ui, p: Paint) -> El {
+pub(super) fn listener_card(ui: &Ui, p: Paint) -> (String, El) {
     let running = ui.running();
     let status = match &ui.view {
-        Some(view) => tr(&view.listener.status).to_string(),
+        Some(view) => tr(view.listener.status.name()).to_string(),
         None if matches!(ui.service, Service::Fixture(_)) || ui.connection_error.is_some() => {
             tr("Service disconnected").to_string()
         }
@@ -639,11 +739,23 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> El {
         (true, ShortcutMode::Hold) => tr_fill("Ready anywhere · Hold {} to dictate", &shortcut),
         (false, _) => tr_fill("Enable Hex to dictate into any app with {}", &shortcut),
     };
+    let search = format!("{status} {hint} {} {}", tr("Enable"), tr("Disable"));
     let failure = ui
         .view
         .as_ref()
-        .and_then(|view| view.listener.warning.clone())
-        .map(|failure| (tr_fill("Last dictation failed: {}", &failure), p.danger()))
+        .and_then(|view| {
+            view.listener
+                .warning
+                .as_deref()
+                .or(view.listener.last_failure.as_deref())
+        })
+        .map(|failure| {
+            let explanation = crate::desktop::activity::failure_explanation(failure);
+            (
+                tr_fill("Last dictation failed: {}", &explanation),
+                p.danger(),
+            )
+        })
         .or_else(|| {
             ui.view
                 .as_ref()
@@ -659,11 +771,12 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> El {
                 .as_ref()
                 .and_then(|view| view.operation_error.clone())
         });
+    let action_label = if running { tr("Disable") } else { tr("Enable") };
     let action = if running {
         button(
             p,
             "toggle-listening",
-            tr("Disable"),
+            action_label,
             ButtonKind::Secondary,
             |ui: &mut Ui, _| ui.send(Request::Desktop(DesktopAction::StopListening)),
         )
@@ -671,7 +784,7 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> El {
         button(
             p,
             "toggle-listening",
-            tr("Enable"),
+            action_label,
             ButtonKind::Primary,
             |ui: &mut Ui, _| ui.send(Request::Desktop(DesktopAction::StartListening)),
         )
@@ -720,140 +833,7 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> El {
     if let Some(error) = error {
         rows.extend(error_notes(p, &error));
     }
-    section(p, "listening", tr("Status"), rows)
-}
-
-/// What a shortcuts portal granted for `target`, since the desktop decides
-/// which trigger Hex actually gets.
-pub(super) fn granted(ui: &Ui, p: Paint, target: ShortcutTarget) -> Option<(String, rune::Color)> {
-    Some(match portal_grant(ui, target)? {
-        DesktopGrantedShortcut {
-            trigger: Some(trigger),
-            ..
-        } => (tr_fill("Your desktop granted {}", trigger), p.muted()),
-        DesktopGrantedShortcut {
-            trigger: None,
-            unconfirmed: true,
-            ..
-        } => (
-            tr("Your desktop assigns this key itself, so Hex can't confirm it").to_string(),
-            p.muted(),
-        ),
-        DesktopGrantedShortcut { trigger: None, .. } => (
-            tr("Your desktop did not grant this shortcut").to_string(),
-            p.danger(),
-        ),
-    })
-}
-
-fn portal_grant(ui: &Ui, target: ShortcutTarget) -> Option<&DesktopGrantedShortcut> {
-    let Some(DesktopShortcuts::Portal(granted)) = ui.shortcuts() else {
-        return None;
-    };
-    let name = match target {
-        ShortcutTarget::Dictation => "Dictation",
-        ShortcutTarget::PasteLast => "Paste last dictation",
-        ShortcutTarget::RawDictation => "Dictate without processing",
-        // The portal never holds the cancel key.
-        ShortcutTarget::Cancel => return None,
-        // The portal lists Annotate's shortcut under that name.
-        #[cfg(hex_capture)]
-        ShortcutTarget::Capture => "Annotate",
-        #[cfg(all(hex_capture, target_os = "macos"))]
-        ShortcutTarget::CaptureReplay => return None,
-        // macOS has no shortcuts portal.
-        #[cfg(target_os = "macos")]
-        ShortcutTarget::SecondDictation | ShortcutTarget::Screenshot => return None,
-    };
-    granted.iter().find(|shortcut| shortcut.name == name)
-}
-
-/// Keys GNOME keeps for itself by default (window menu, input sources, app
-/// switching, the overview, screenshots, …), normalized as [`chord`] writes
-/// them. A portal shortcut on one is listed in GNOME Settings but never
-/// reaches Hex (#723).
-const GNOME_KEYS: &[&str] = &[
-    "alt+space",
-    "super+space",
-    "shift+super+space",
-    "alt+tab",
-    "alt+shift+tab",
-    "super+tab",
-    "alt+f1",
-    "alt+f2",
-    "alt+f4",
-    "alt+f7",
-    "alt+f8",
-    "alt+f10",
-    "super+a",
-    "super+h",
-    "super+l",
-    "super+s",
-    "super+v",
-    "super+up",
-    "super+down",
-    "super+left",
-    "super+right",
-    "print",
-    "alt+print",
-    "shift+print",
-    "alt+ctrl+delete",
-];
-
-/// `keys` (`Ctrl+Alt+Space`, `Super+D`) lowercased with its modifiers in
-/// one order, so the same chord always reads the same.
-fn chord(keys: &str) -> String {
-    let mut parts = keys
-        .split('+')
-        .map(|part| match part.trim().to_ascii_lowercase().as_str() {
-            "control" => "ctrl".to_string(),
-            "meta" | "logo" => "super".to_string(),
-            other => other.to_string(),
-        })
-        .collect::<Vec<_>>();
-    let key = parts.pop().unwrap_or_default();
-    parts.sort();
-    parts.push(key);
-    parts.join("+")
-}
-
-fn gnome_keeps(keys: &str) -> bool {
-    GNOME_KEYS.contains(&chord(keys).as_str())
-}
-
-#[cfg(target_os = "linux")]
-fn on_gnome() -> bool {
-    crate::linux::portal::gnome()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn on_gnome() -> bool {
-    false
-}
-
-/// On GNOME, the note under `target`'s row when its key, the one GNOME
-/// granted or else the one Hex asks for, is one GNOME keeps for itself.
-pub(super) fn gnome_clash_note(ui: &Ui, p: Paint, target: ShortcutTarget) -> Option<El> {
-    if !on_gnome() {
-        return None;
-    }
-    let keys = match portal_grant(ui, target) {
-        Some(DesktopGrantedShortcut {
-            trigger: Some(trigger),
-            ..
-        }) => trigger.clone(),
-        _ => binding(&ui.settings, target)?.keycaps().join("+"),
-    };
-    gnome_keeps(&keys).then(|| {
-        note(
-            "gnome-clash",
-            &tr_fill(
-                "GNOME uses {} itself, so it never reaches Hex. Record another shortcut, or change it in GNOME Settings › Keyboard › Keyboard Shortcuts.",
-                &keys,
-            ),
-            p.danger(),
-        )
-    })
+    (search, section(p, "listening", tr("Status"), rows))
 }
 
 /// The desktop kept `target`'s shortcut for itself: the note under its row.
@@ -1009,143 +989,43 @@ pub(super) fn input_source_rows(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<E
                 .get(&source.id)
                 .cloned();
             let source_id = source.id.clone();
-            let mut choices = vec![Choice {
-                label: tr("Don't switch").into(),
-                detail: None,
-                selected: mapped.is_none(),
-                choose: Box::new(move |ui| {
-                    ui.open = None;
-                    ui.update(|settings| {
-                        settings
-                            .keyboard_model_switching
-                            .mappings
-                            .remove(&source_id);
-                    });
-                }),
-            }];
-            choices.extend(
-                transcription_models::all_models()
-                    .into_iter()
-                    .filter_map(|model| {
-                        let fallback = ui.settings.transcription_for_model(model.id).language;
-                        if !model.available()
-                            || !matches!(model.runtime, transcription_models::ModelRuntime::Gguf(_))
-                            || !ui.picker.installed(model, &fallback)
-                        {
-                            return None;
-                        }
-                        let language = match &mapped {
-                            Some(choice) if model.supports_language(&choice.language) => {
-                                choice.language.clone()
-                            }
-                            _ => source.language_for(model, &fallback),
-                        };
-                        let source_id = source.id.clone();
-                        let id = model.id;
-                        Some(Choice {
-                            label: model.name.into(),
-                            detail: None,
-                            selected: mapped.as_ref().is_some_and(|choice| choice.model == id),
-                            choose: Box::new(move |ui| {
-                                ui.open = None;
-                                ui.update(|settings| {
-                                    settings.keyboard_model_switching.mappings.insert(
-                                        source_id.clone(),
-                                        KeyboardModelChoice {
-                                            model: id,
-                                            language: language.clone(),
-                                        },
-                                    );
-                                });
-                            }),
-                        })
-                    }),
-            );
-            let label = mapped.as_ref().map_or_else(
-                || tr("Don't switch").to_string(),
-                |choice| {
-                    let model = transcription_models::definition(choice.model);
-                    if ui.picker.installed(model, &choice.language) {
-                        model.name.into()
-                    } else {
-                        format!("{} · {}", model.name, tr("Not installed"))
-                    }
-                },
-            );
-            let mut controls = row().gap(8.0).center_y();
-            if let Some(choice) = &mapped {
-                controls =
-                    controls.child(input_source_language(ui, p, index, source, choice, layer));
-            }
-            setting_row(
+            let key = format!("input-source{index}");
+            let model_key = format!("input-source-model{index}");
+            let language_key = format!("input-source-language{index}");
+            super::speech_model::setting(
+                ui,
                 p,
-                &format!("input-source{index}"),
-                &source.name,
-                None,
-                controls.child(select(
-                    p,
-                    &format!("input-source-model{index}"),
-                    tr("Speech model"),
-                    &label,
-                    ui.open == Some(Menu::InputSourceModel(index)),
-                    choices,
-                    move |ui| toggle_menu(ui, Menu::InputSourceModel(index)),
-                    layer,
-                )),
+                super::speech_model::SpeechRow {
+                    key: &key,
+                    model_key: &model_key,
+                    language_key: &language_key,
+                    title: &source.name,
+                    description: None,
+                    choice: mapped,
+                    model_menu: Menu::InputSourceModel(index),
+                    language_menu: Menu::InputSourceLanguage(index),
+                },
+                |model, fallback| source.language_for(model, fallback),
+                move |ui, choice| {
+                    ui.update(|settings| match choice {
+                        Some(choice) => {
+                            settings
+                                .keyboard_model_switching
+                                .mappings
+                                .insert(source_id.clone(), choice);
+                        }
+                        None => {
+                            settings
+                                .keyboard_model_switching
+                                .mappings
+                                .remove(&source_id);
+                        }
+                    });
+                },
+                layer,
             )
         })
         .collect()
-}
-
-/// A mapped source's language: a select, or fixed for one-language models.
-fn input_source_language(
-    ui: &Ui,
-    p: Paint,
-    index: usize,
-    source: &InputSource,
-    choice: &KeyboardModelChoice,
-    layer: &mut Vec<El>,
-) -> El {
-    let key = format!("input-source-language{index}");
-    let current = transcription_models::language_name(&choice.language);
-    let codes = transcription_models::definition(choice.model).language_choices();
-    if codes.len() <= 1 {
-        return fixed_select(p, &key, tr("Language"), current);
-    }
-    let choices = codes
-        .into_iter()
-        .map(|code| {
-            let source_id = source.id.clone();
-            let model = choice.model;
-            Choice {
-                label: transcription_models::language_name(code).to_owned(),
-                detail: None,
-                selected: code == choice.language,
-                choose: Box::new(move |ui: &mut Ui| {
-                    ui.open = None;
-                    ui.update(|settings| {
-                        settings.keyboard_model_switching.mappings.insert(
-                            source_id.clone(),
-                            KeyboardModelChoice {
-                                model,
-                                language: code.to_owned(),
-                            },
-                        );
-                    });
-                }),
-            }
-        })
-        .collect();
-    select(
-        p,
-        &key,
-        tr("Language"),
-        current,
-        ui.open == Some(Menu::InputSourceLanguage(index)),
-        choices,
-        move |ui| toggle_menu(ui, Menu::InputSourceLanguage(index)),
-        layer,
-    )
 }
 
 /// The speech model row's description: preparation progress or its error.
@@ -1199,21 +1079,42 @@ const RECORDER_CAP_INSET: f32 = 3.0;
 const HELD_FADE: f32 = 8.0;
 const HELD_SHADOW_ROOM: f32 = (RECORDER_HEIGHT - KeySize::Small.height()) / 2.0;
 
+/// The recorders' keys for Labs › More dictation shortcuts' rows (macOS):
+/// one static key per row, in the rows' order.
+#[cfg(target_os = "macos")]
+const EXTRA_HOTKEY_KEYS: [&str; crate::app_settings::MAX_EXTRA_DICTATION_SHORTCUTS] = [
+    "extra-dictation-hotkey-1",
+    "extra-dictation-hotkey-2",
+    "extra-dictation-hotkey-3",
+    "extra-dictation-hotkey-4",
+];
+
 /// The recorder's key for `target`.
 pub(super) fn hotkey_key(target: ShortcutTarget) -> &'static str {
     match target {
         ShortcutTarget::Dictation => "dictation-hotkey",
         ShortcutTarget::PasteLast => "paste-last-hotkey",
         ShortcutTarget::RawDictation => "raw-dictation-hotkey",
+        #[cfg(target_os = "linux")]
+        ShortcutTarget::TypedText => "typed-text-hotkey",
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        ShortcutTarget::TerminalPaste => "terminal-paste-hotkey",
         ShortcutTarget::Cancel => "cancel-hotkey",
         #[cfg(hex_capture)]
         ShortcutTarget::Capture => "capture-hotkey",
         #[cfg(all(hex_capture, target_os = "macos"))]
         ShortcutTarget::CaptureReplay => "capture-replay-hotkey",
-        #[cfg(target_os = "macos")]
         ShortcutTarget::SecondDictation => "second-dictation-hotkey",
+        // Settings keeps at most four rows, so every one has its own key.
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::ExtraDictation(index) => EXTRA_HOTKEY_KEYS
+            .get(index)
+            .copied()
+            .unwrap_or("extra-dictation-hotkey"),
         #[cfg(target_os = "macos")]
         ShortcutTarget::Screenshot => "screenshot-hotkey",
+        #[cfg(target_os = "macos")]
+        ShortcutTarget::ScreenshotRecord => "screenshot-record-hotkey",
     }
 }
 
@@ -1423,9 +1324,17 @@ mod special_keys_tests {
             );
         }
     }
+}
 
-    /// Issue 1050: § alone only with Labs › Section key alone on; § with a
-    /// modifier as before.
+/// Issue 1050: the ISO section key alone needs Labs › § key alone on
+/// Linux and macOS; with a modifier it records as before. Linux's recorder
+/// checks the lab itself; macOS's recorder records the chord and `validate`
+/// refuses it here, before saving.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod section_key_tests {
+    use super::*;
+    use crate::app_settings::ISO_SECTION_KEY_CODE;
+
     #[test]
     fn section_alone_needs_its_labs_toggle() {
         let section = HotkeyBinding {
@@ -1452,11 +1361,123 @@ mod special_keys_tests {
         );
         assert_eq!(section.keycaps(), ["§"]);
     }
+
+    /// macOS labels the section key by what it types on a dead-key layout,
+    /// `{code: 10, label: "^"}`; validation still knows it is the section
+    /// key.
+    #[test]
+    fn a_dead_key_section_binding_needs_its_labs_toggle_on_macos() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let dead_key = HotkeyBinding {
+            modifiers: HotkeyModifiers::default(),
+            key: Some(HotkeyKey {
+                code: ISO_SECTION_KEY_CODE,
+                label: "^".into(),
+            }),
+        };
+        assert!(dead_key.is_lone_section_key());
+        let mut settings = AppSettings::default();
+        assert_eq!(
+            validate(&settings, ShortcutTarget::Dictation, &dead_key),
+            Err(tr("Add a modifier"))
+        );
+        settings.labs.section_key_alone = true;
+        assert_eq!(
+            validate(&settings, ShortcutTarget::Dictation, &dead_key),
+            Ok(())
+        );
+    }
+}
+
+/// Issue 181: any shortcut on the microphone (dictation) key needs Labs ›
+/// Microphone key alone on macOS, with or without a modifier. macOS's
+/// recorder records the chord and `validate` refuses it here, before saving,
+/// with the same "Unsupported key" the key gave before. Dictation, Cancel,
+/// and Screenshots all go through this check.
+#[cfg(all(test, target_os = "macos"))]
+#[path = "settings_microphone_key_tests.rs"]
+mod microphone_key_tests;
+
+/// Plain ⌫ while recording turns an optional shortcut off; a required one
+/// ignores it, and ⌫ with a modifier records like any key.
+#[cfg(test)]
+mod erase_tests {
+    use super::*;
+    use crate::app_settings::ModifierSide;
+
+    fn erase(modifiers: HotkeyModifiers) -> HotkeyBinding {
+        let key = if cfg!(target_os = "macos") {
+            HotkeyKey {
+                code: 51,
+                label: "Delete".into(),
+            }
+        } else {
+            HotkeyKey::named("backspace")
+        };
+        HotkeyBinding {
+            modifiers,
+            key: Some(key),
+        }
+    }
+
+    fn recording(target: ShortcutTarget) -> Ui {
+        let mut ui = super::super::scenes::mac_fixture();
+        ui.settings.paste_last_hotkey = Some(HotkeyBinding::paste_last_default());
+        begin_capture(&mut ui, target);
+        ui
+    }
+
+    #[test]
+    fn plain_erase_turns_an_optional_shortcut_off() {
+        let mut ui = recording(ShortcutTarget::PasteLast);
+        record(
+            &mut ui,
+            ShortcutTarget::PasteLast,
+            Ok(erase(HotkeyModifiers::default())),
+        );
+        assert_eq!(ui.settings.paste_last_hotkey, None);
+        assert!(matches!(ui.capture, Capture::Saved { .. }));
+    }
+
+    #[test]
+    fn a_required_shortcut_ignores_plain_erase() {
+        let mut ui = recording(ShortcutTarget::Dictation);
+        let dictation = ui.settings.dictation_hotkey.clone();
+        record(
+            &mut ui,
+            ShortcutTarget::Dictation,
+            Ok(erase(HotkeyModifiers::default())),
+        );
+        assert_eq!(ui.settings.dictation_hotkey, dictation);
+        assert!(matches!(
+            ui.capture,
+            Capture::Listening {
+                message: Some(_),
+                ..
+            }
+        ));
+        assert!(!can_turn_off(ShortcutTarget::Dictation));
+        assert!(!can_turn_off(ShortcutTarget::Cancel));
+    }
+
+    #[test]
+    fn erase_with_a_modifier_records() {
+        let mut ui = recording(ShortcutTarget::PasteLast);
+        let chord = erase(HotkeyModifiers {
+            control: Some(ModifierSide::Either),
+            ..HotkeyModifiers::default()
+        });
+        assert!(!chord.is_bare_erase());
+        record(&mut ui, ShortcutTarget::PasteLast, Ok(chord.clone()));
+        assert_eq!(ui.settings.paste_last_hotkey, Some(chord));
+    }
 }
 
 #[cfg(test)]
 mod gnome_keys_tests {
-    use super::*;
+    use super::grants::gnome_keeps;
 
     #[test]
     fn gnome_keeps_its_window_menu_key_however_it_is_written() {

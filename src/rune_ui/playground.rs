@@ -91,6 +91,18 @@ const PATHS: &[(&str, &str)] = &[
     ("shortcut-row-held", "Window/General/Shortcut/Held"),
     ("shortcut-row-rejected", "Window/General/Shortcut/Rejected"),
     ("shortcut-row-saved", "Window/General/Shortcut/Saved"),
+    (
+        "mac-settings-reset",
+        "Window/General/Shortcut/Paste last changed · Reset",
+    ),
+    (
+        "mac-settings-reset-off",
+        "Window/General/Shortcut/Paste last off · Reset",
+    ),
+    (
+        "mac-settings-recording-optional",
+        "Window/General/Shortcut/Recording Paste last · ⌫ turns off",
+    ),
     ("mac-update-checking", "Window/General/Updates/Checking"),
     (
         "mac-update-downloading",
@@ -149,6 +161,7 @@ const PATHS: &[(&str, &str)] = &[
     ("modes", "Window/Modes/Modes"),
     ("modes-global", "Window/Modes/Global mode"),
     ("modes-picker", "Window/Modes/App picker"),
+    ("modes-speech", "Window/Modes/Speech model"),
     (
         "modes-transformation-menu",
         "Window/Modes/Transformation menu",
@@ -163,6 +176,7 @@ const PATHS: &[(&str, &str)] = &[
     ),
     ("meetings", "Window/Meetings/Meetings"),
     ("meetings-recording", "Window/Meetings/Recording"),
+    ("meetings-snapshots", "Window/Meetings/Snapshots"),
     ("meetings-shared-room", "Window/Meetings/Shared room"),
     ("meetings-chapters", "Window/Meetings/Chapters"),
     ("meetings-actions", "Window/Meetings/Actions menu"),
@@ -170,10 +184,13 @@ const PATHS: &[(&str, &str)] = &[
     ("meetings-delete", "Window/Meetings/Delete"),
     ("meetings-failed", "Window/Meetings/Failed"),
     ("meetings-empty", "Window/Meetings/Empty"),
-    ("meetings-platform-icons", "Window/Meetings/Platform icons"),
-    ("meetings-snapshots", "Window/Meetings/Snapshots"),
     ("meetings-off", "Window/Meetings/Off"),
     ("meetings-settings", "Window/Meetings/Settings"),
+    ("meetings-summaries", "Window/Meetings/Summaries"),
+    (
+        "meetings-summaries-unavailable",
+        "Window/Meetings/Summaries without Apple Intelligence",
+    ),
     ("meetings-summary-model", "Window/Meetings/Summary model"),
     (
         "meetings-summary-model-not-running",
@@ -186,7 +203,18 @@ const PATHS: &[(&str, &str)] = &[
         "Window/Meetings/Calendar denied",
     ),
     ("history", "Window/History/History"),
+    ("history-menu", "Window/History/Retention menu"),
+    ("history-clear", "Window/History/Clear all asks first"),
+    ("history-stats", "Window/History/Stats dialog"),
+    (
+        "history-selection",
+        "Window/History/Select multiple dictations",
+    ),
     ("history-empty", "Window/History/Empty"),
+    #[cfg(hex_capture)]
+    ("captures", "Window/Captures/Captures"),
+    #[cfg(hex_capture)]
+    ("captures-empty", "Window/Captures/Empty"),
     #[cfg(hex_capture)]
     ("mac-scrawl", "Window/Annotate/On"),
     #[cfg(hex_capture)]
@@ -212,7 +240,16 @@ const PATHS: &[(&str, &str)] = &[
     ("mac-hud-lab", "Window/HUD Lab/HUD Lab"),
     ("mac-labs", "Window/General/Labs"),
     ("mac-labs-link", "Window/General/Labs link"),
+    ("mac-labs-on", "Window/General/Labs turned on"),
     ("mac-labs-screenshots", "Window/General/Labs screenshots"),
+    ("mac-labs-category", "Window/General/Labs category"),
+    ("mac-labs-search", "Window/General/Labs search"),
+    ("mac-labs-settings", "Window/General/Labs settings"),
+    ("mac-labs-yolo-mode", "Window/General/Labs YOLO mode"),
+    (
+        "mac-labs-yolo-mode-picker",
+        "Window/General/Labs YOLO mode picker",
+    ),
     ("mac-production", "Window/General/Production build"),
     ("mac-activity", "Window/Activity/Activity"),
     ("mac-onboarding", "Window/Onboarding/Setting up Hex"),
@@ -232,16 +269,27 @@ const PATHS: &[(&str, &str)] = &[
         "mac-onboarding-restart",
         "Window/Onboarding/Permissions · restart",
     ),
+    ("mac-onboarding-waiting", "Window/Onboarding/Almost ready"),
+    (
+        "mac-onboarding-sketch",
+        "Window/Onboarding/Almost ready · watch another one",
+    ),
     ("mac-onboarding-try", "Window/Onboarding/Your turn"),
     (
         "mac-onboarding-reopen",
         "Window/Onboarding/Your turn · reopen",
     ),
     ("mac-onboarding-ready", "Window/Onboarding/Hex is ready"),
+    (
+        "mac-onboarding-ready-tap",
+        "Window/Onboarding/Hex is ready · tap to start",
+    ),
     ("portal", "Linux & Windows/Settings · portal shortcuts"),
     ("commands", "Linux & Windows/Settings · hex commands"),
     ("portal-mouse", "Linux & Windows/Settings · mouse button"),
     ("windows-settings", "Linux & Windows/Settings · Windows"),
+    ("windows-labs", "Linux & Windows/Labs · Windows"),
+    ("linux-labs", "Linux & Windows/Labs · Linux"),
     ("disabled", "Linux & Windows/Disabled"),
     ("capturing", "Linux & Windows/Recording a shortcut"),
     ("menus", "Linux & Windows/Microphone menu"),
@@ -280,6 +328,10 @@ const PATHS: &[(&str, &str)] = &[
     (
         "onboarding-waiting",
         "Linux & Windows/Onboarding · almost ready",
+    ),
+    (
+        "onboarding-sketch",
+        "Linux & Windows/Onboarding · watch another one",
     ),
     (
         "onboarding-paste",

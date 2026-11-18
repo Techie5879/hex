@@ -15,7 +15,7 @@
 
 use std::sync::OnceLock;
 
-use crate::app_settings::AppSettings;
+use crate::app_settings::{AppSettings, MeetingSummaries};
 
 /// One managed lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +85,13 @@ pub struct Policy(u8);
 impl Policy {
     /// This process's policy, read once.
     pub fn current() -> Self {
+        // A UI test can force a policy on its own thread, so a locked row is
+        // exercised without a managed Mac. Only Linux renders the panes
+        // tests, so only there does the override exist.
+        #[cfg(all(test, target_os = "linux"))]
+        if let Some(forced) = FORCED_FOR_TEST.with(|slot| *slot.borrow()) {
+            return forced;
+        }
         static CURRENT: OnceLock<Policy> = OnceLock::new();
         *CURRENT.get_or_init(|| {
             let policy = Self::from_forced(platform::forced);
@@ -122,14 +129,25 @@ impl Policy {
         self.0 != 0
     }
 
-    /// The lock on a Labs feature: Labs, Meetings for Meetings, or Annotate
-    /// for Annotate replay.
+    /// Forces `policy` on this thread until the guard drops, so a pane test
+    /// can see what an organization's lock does to a row.
+    #[cfg(all(test, target_os = "linux"))]
+    pub fn forced_for_test(policy: Policy) -> ForcedPolicy {
+        FORCED_FOR_TEST.with(|slot| *slot.borrow_mut() = Some(policy));
+        ForcedPolicy
+    }
+
+    /// The lock on a Labs feature: Labs, Meetings for Meetings, Annotate for
+    /// Annotate replay, or OpenCode processing for a voice prompt.
     pub fn labs_lock(self, feature: crate::labs::Feature) -> Option<Lock> {
         if feature == crate::labs::Feature::Meetings && self.locks(Lock::Meetings) {
             return Some(Lock::Meetings);
         }
         if feature == crate::labs::Feature::AnnotateReplay && self.locks(Lock::Annotate) {
             return Some(Lock::Annotate);
+        }
+        if feature == crate::labs::Feature::VoicePrompt && self.locks(Lock::OpenCodeProcessing) {
+            return Some(Lock::OpenCodeProcessing);
         }
         self.locks(Lock::Labs).then_some(Lock::Labs)
     }
@@ -141,7 +159,6 @@ impl Policy {
         }
         let lock = match name {
             "capture.enabled" => Lock::Annotate,
-            "meetings.summarize_with_opencode" => Lock::OpenCodeProcessing,
             _ => return None,
         };
         self.locks(lock).then_some(lock)
@@ -158,7 +175,9 @@ impl Policy {
             ],
             #[cfg(not(hex_capture))]
             Lock::Annotate => Vec::new(),
-            Lock::OpenCodeProcessing => vec![&mut settings.meetings.summarize_with_opencode],
+            // `meetings.summaries` is a choice, not a switch; see `enforce`.
+            // A voice prompt is one of the OpenCode requests the lock stops.
+            Lock::OpenCodeProcessing => vec![&mut settings.labs.voice_prompt],
             Lock::Transforms | Lock::LoopbackTransforms => Vec::new(),
             Lock::Labs => crate::labs::Feature::switches(settings),
         }
@@ -170,6 +189,11 @@ impl Policy {
             for switch in Self::switches(settings, lock) {
                 *switch = false;
             }
+        }
+        if self.locks(Lock::OpenCodeProcessing)
+            && settings.meetings.summaries == MeetingSummaries::OpenCode
+        {
+            settings.meetings.summaries = MeetingSummaries::Off;
         }
     }
 
@@ -185,6 +209,31 @@ impl Policy {
                 *switch = *value;
             }
         }
+        if self.locks(Lock::OpenCodeProcessing)
+            && settings.meetings.summaries == MeetingSummaries::Off
+            && saved.meetings.summaries == MeetingSummaries::OpenCode
+        {
+            settings.meetings.summaries = MeetingSummaries::OpenCode;
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    /// The policy a test forced on this thread ([`Policy::forced_for_test`]),
+    /// read ahead of the process's own so a locked row needs no managed Mac.
+    static FORCED_FOR_TEST: std::cell::RefCell<Option<Policy>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Clears a test's forced policy when it drops ([`Policy::forced_for_test`]).
+#[cfg(all(test, target_os = "linux"))]
+pub struct ForcedPolicy;
+
+#[cfg(all(test, target_os = "linux"))]
+impl Drop for ForcedPolicy {
+    fn drop(&mut self) {
+        FORCED_FOR_TEST.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
@@ -244,11 +293,54 @@ mod tests {
     }
 
     #[test]
+    fn a_voice_prompt_is_locked_by_opencode_processing() {
+        let feature = crate::labs::Feature::VoicePrompt;
+        assert_eq!(Policy::default().labs_lock(feature), None);
+        let opencode = Policy::default().with(Lock::OpenCodeProcessing);
+        assert_eq!(
+            opencode.labs_lock(feature),
+            Some(Lock::OpenCodeProcessing),
+            "the card shows it managed"
+        );
+        assert_eq!(
+            opencode.setting_lock("labs.voice_prompt"),
+            Some(Lock::OpenCodeProcessing)
+        );
+        assert_eq!(
+            opencode.setting_lock("labs.voice_prompt_phrase"),
+            Some(Lock::OpenCodeProcessing)
+        );
+        let labs = Policy::default().with(Lock::Labs);
+        assert_eq!(labs.labs_lock(feature), Some(Lock::Labs));
+    }
+
+    #[test]
+    fn the_opencode_lock_turns_only_the_voice_prompt_off_and_keeps_it_saved() {
+        let mut saved = AppSettings::default();
+        saved.labs.voice_prompt = true;
+        saved.labs.live_text = true;
+        let policy = Policy::default().with(Lock::OpenCodeProcessing);
+        let mut loaded = saved.clone();
+        policy.enforce(&mut loaded);
+        assert!(!loaded.labs.voice_prompt, "the locked lab reads off");
+        assert!(loaded.labs.live_text, "another lab is untouched");
+
+        let mut written = loaded.clone();
+        policy.keep_saved(&mut written, &saved);
+        assert!(
+            written.labs.voice_prompt,
+            "the saved switch is written back"
+        );
+        assert!(written.labs.live_text);
+    }
+
+    #[test]
     fn locked_switches_read_off_and_save_as_they_were() {
         let mut saved = AppSettings::default();
         saved.meetings.enabled = true;
-        saved.meetings.summarize_with_opencode = true;
+        saved.meetings.summaries = MeetingSummaries::OpenCode;
         saved.labs.live_text = true;
+        saved.labs.voice_prompt = true;
         saved.pause_browser_media = true;
         let policy = Policy::default()
             .with(Lock::Meetings)
@@ -257,8 +349,9 @@ mod tests {
         let mut loaded = saved.clone();
         policy.enforce(&mut loaded);
         assert!(!loaded.meetings.enabled);
-        assert!(!loaded.meetings.summarize_with_opencode);
+        assert_eq!(loaded.meetings.summaries, MeetingSummaries::Off);
         assert!(!loaded.labs.live_text);
+        assert!(!loaded.labs.voice_prompt);
         assert!(!loaded.pause_browser_media);
         for feature in crate::labs::Feature::ALL {
             assert!(!feature.on(&loaded), "{} reads on", feature.name());
@@ -269,10 +362,25 @@ mod tests {
         let mut written = loaded.clone();
         policy.keep_saved(&mut written, &saved);
         assert!(written.meetings.enabled);
-        assert!(written.meetings.summarize_with_opencode);
+        assert_eq!(written.meetings.summaries, MeetingSummaries::OpenCode);
         assert!(written.labs.live_text);
+        assert!(written.labs.voice_prompt);
         assert!(written.pause_browser_media);
         assert_eq!(written.sound_effects, loaded.sound_effects);
+    }
+
+    #[test]
+    fn the_opencode_lock_leaves_other_summary_choices_alone() {
+        let policy = Policy::default().with(Lock::OpenCodeProcessing);
+        let mut saved = AppSettings::default();
+        saved.meetings.summaries = MeetingSummaries::OpenCode;
+        let mut loaded = saved.clone();
+        policy.enforce(&mut loaded);
+        // Choosing On this Mac while locked is the user's own change.
+        loaded.meetings.summaries = MeetingSummaries::Mac;
+        let mut written = loaded.clone();
+        policy.keep_saved(&mut written, &saved);
+        assert_eq!(written.meetings.summaries, MeetingSummaries::Mac);
     }
 
     #[test]
@@ -299,11 +407,10 @@ mod tests {
         assert_eq!(labs.setting_lock("meetings.enabled"), Some(Lock::Labs));
         assert_eq!(labs.setting_lock("pause_browser_media"), Some(Lock::Labs));
         assert_eq!(labs.setting_lock("sound_effects"), None);
+        // A choice that is only partly locked: `hex settings` refuses
+        // `opencode` itself.
         let opencode = Policy::default().with(Lock::OpenCodeProcessing);
-        assert_eq!(
-            opencode.setting_lock("meetings.summarize_with_opencode"),
-            Some(Lock::OpenCodeProcessing)
-        );
+        assert_eq!(opencode.setting_lock("meetings.summaries"), None);
         let annotate = Policy::default().with(Lock::Annotate);
         assert_eq!(
             annotate.setting_lock("capture.enabled"),

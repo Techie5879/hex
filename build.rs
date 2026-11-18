@@ -5,6 +5,14 @@ fn main() {
     check_windows_split();
     build_version();
     test_build_commit();
+    // `hex_dev_onboarding`: the first run's replay strip and its swearing
+    // jokes, in debug and `HEX_TEST_BUILD=1` builds only.
+    println!("cargo::rustc-check-cfg=cfg(hex_dev_onboarding)");
+    if std::env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_some()
+        || std::env::var("HEX_TEST_BUILD").as_deref() == Ok("1")
+    {
+        println!("cargo::rustc-cfg=hex_dev_onboarding");
+    }
     // `hex_capture`: the `capture` experiment's code, in every macOS, Linux,
     // and Windows build (`scrawl-capture` is their dependency).
     println!("cargo::rustc-check-cfg=cfg(hex_capture)");
@@ -53,6 +61,9 @@ fn main() {
     compile_swift_bridge("apple_speech", "HEXAppleSpeechBridge", &[]);
     println!("cargo:rustc-link-lib=framework=AVFAudio");
     println!("cargo:rustc-link-lib=framework=Speech");
+    // AVFoundation decodes an imported meeting's audio into a 16 kHz WAV.
+    compile_swift_bridge("meeting_import", "HEXMeetingImportBridge", &[]);
+    println!("cargo:rustc-link-lib=framework=AudioToolbox");
     // FoundationModels exists only on macOS 26 and later. Weak-link it, and
     // drop the object's strong autolink entry, so Hex still launches on older
     // systems and reports Apple Intelligence as unavailable.

@@ -1,5 +1,19 @@
-//! OpenCode generation, with typed, bounded provider failover.
-use super::*;
+//! The wire side of one OpenCode generation: the request, its route fallback,
+//! the startup retry, and the shared deadline. The parent module decides which
+//! model, if any, a request names.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use color_eyre::eyre::{Result, WrapErr, eyre};
+use serde::{Deserialize, Serialize};
+
+use super::Model;
+use crate::desktop::opencode_service::Service;
+
+/// Newest one-shot generation route first; older OpenCode V2 builds only serve the later name.
+const GENERATE_ENDPOINTS: [&str; 2] = ["/api/experimental/generate", "/api/generate"];
 
 #[derive(Serialize)]
 pub(super) struct Request<'a> {
@@ -20,116 +34,6 @@ pub(super) struct ResponseData {
     pub(super) text: String,
 }
 
-#[cfg(test)]
-pub(super) fn generate(prompt: &str, model: Option<&Model>, deadline: Duration) -> Result<String> {
-    generate_cancellable(prompt, model, deadline, &AtomicBool::new(false))
-}
-
-pub(super) fn generate_reported(
-    prompt: &str,
-    model: Option<&Model>,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-) -> Result<Generated> {
-    let started = Instant::now();
-    let lock = crate::policy::Lock::OpenCodeProcessing;
-    if crate::policy::Policy::current().locks(lock) {
-        return Err(eyre!(lock.refusal()));
-    }
-    let service =
-        crate::desktop::opencode_service::find().map_err(|missing| eyre!(missing.message()))?;
-    generate_with_candidates(
-        prompt,
-        model,
-        || ranked_candidates_for(&service),
-        forget_ranked_candidates,
-        started,
-        deadline,
-        cancelled,
-        |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
-    )
-}
-
-#[cfg(test)]
-pub(super) fn generate_cancellable(
-    prompt: &str,
-    model: Option<&Model>,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-) -> Result<String> {
-    generate_cancellable_with_fallback(prompt, model, None, deadline, cancelled)
-}
-
-pub(super) fn generate_cancellable_with_fallback(
-    prompt: &str,
-    model: Option<&Model>,
-    fallback_provider: Option<&str>,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-) -> Result<String> {
-    let started = Instant::now();
-    let lock = crate::policy::Lock::OpenCodeProcessing;
-    if crate::policy::Policy::current().locks(lock) {
-        return Err(eyre!(lock.refusal()));
-    }
-    let service =
-        crate::desktop::opencode_service::find().map_err(|missing| eyre!(missing.message()))?;
-    if let (Some(model), Some(provider)) = (model, fallback_provider) {
-        return generate_with_quota_fallback(
-            prompt,
-            model,
-            provider,
-            started,
-            deadline,
-            cancelled,
-            |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
-        );
-    }
-    generate_with_candidates(
-        prompt,
-        model,
-        || ranked_candidates_for(&service),
-        forget_ranked_candidates,
-        started,
-        deadline,
-        cancelled,
-        |data, remaining, cancelled| post_generation(&service, data, remaining, cancelled),
-    )
-    .map(|generated| generated.text)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(super) fn generate_with_candidates(
-    prompt: &str,
-    model: Option<&Model>,
-    candidates: impl FnOnce() -> Vec<Model>,
-    forget_candidates: impl FnMut(),
-    started: Instant,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-    post: impl FnMut(&str, Duration, &AtomicBool) -> Result<Response>,
-) -> Result<Generated> {
-    if model.is_none() {
-        let candidates = candidates();
-        if !candidates.is_empty() {
-            return generate_with_ranked_candidates(
-                prompt,
-                &candidates,
-                forget_candidates,
-                started,
-                deadline,
-                cancelled,
-                post,
-            );
-        }
-    }
-    let text = generate_single_model(prompt, model, started, deadline, cancelled, post)?;
-    Ok(Generated {
-        text,
-        model: model.cloned(),
-    })
-}
-
 pub(super) fn remaining_generation_deadline(
     started: Instant,
     deadline: Duration,
@@ -142,61 +46,6 @@ pub(super) fn remaining_generation_deadline(
         ))
     } else {
         Ok(remaining)
-    }
-}
-
-pub(super) fn generate_with_ranked_candidates(
-    prompt: &str,
-    candidates: &[Model],
-    mut forget_candidates: impl FnMut(),
-    started: Instant,
-    deadline: Duration,
-    cancelled: &AtomicBool,
-    mut post: impl FnMut(&str, Duration, &AtomicBool) -> Result<Response>,
-) -> Result<Generated> {
-    let mut last_error = None;
-    for candidate in candidates {
-        let remaining = remaining_generation_deadline(started, deadline)?;
-        let data = serde_json::to_string(&Request {
-            prompt,
-            model: Some(candidate),
-        })?;
-        let response = match post(&data, remaining, cancelled) {
-            Ok(response) => response,
-            Err(error) => {
-                forget_candidates();
-                return Err(error);
-            }
-        };
-        match response {
-            Response::Success { data } => {
-                return Ok(Generated {
-                    text: data.text,
-                    model: Some(candidate.clone()),
-                });
-            }
-            Response::Error(error) => {
-                let message = error.message;
-                forget_candidates();
-                tracing::warn!(
-                    provider = %candidate.provider,
-                    model = %candidate.id,
-                    %message,
-                    "ranked OpenCode model failed; trying the next one"
-                );
-                last_error = Some(message);
-            }
-        }
-    }
-    tracing::warn!("every ranked OpenCode model failed; asking OpenCode's default model");
-    match generate_single_model(prompt, None, started, deadline, cancelled, &mut post) {
-        Ok(text) => Ok(Generated { text, model: None }),
-        Err(error) => Err(match last_error {
-            Some(message) => eyre!(
-                "OpenCode generation failed: {message}; OpenCode's default model also failed: {error:#}"
-            ),
-            None => error,
-        }),
     }
 }
 
@@ -214,12 +63,17 @@ pub(super) fn generate_single_model(
         let remaining = remaining_generation_deadline(started, deadline)?;
         match post(&data, remaining, cancelled)? {
             Response::Success { data } => return Ok(data.text),
-            Response::Error(error) if attempt == 0 && error.model_unavailable() => {
+            Response::Error(error)
+                if attempt == 0
+                    && (error.model_unavailable()
+                        || retryable_generation_error(&error.message)) =>
+            {
                 tracing::warn!(message = %error.message, "OpenCode model unavailable during startup; retrying");
                 wait_for_generation_retry(started, deadline, cancelled)?;
             }
             Response::Error(error) => {
-                return Err(eyre!("OpenCode generation failed: {}", error.message));
+                let message = error.message;
+                return Err(eyre!("OpenCode generation failed: {message}"));
             }
         }
     }
@@ -227,7 +81,8 @@ pub(super) fn generate_single_model(
 }
 
 /// Posts to the newest generation route and falls back to the older name only
-/// when the server reports that route missing. Every attempt shares one deadline.
+/// when the server reports that route missing (a 404 that isn't OpenCode's
+/// own error). Every attempt shares one deadline.
 pub(super) fn post_generation(
     service: &Service,
     data: &str,
@@ -257,6 +112,22 @@ pub(super) fn post_generation(
     }
     serde_json::from_slice(&response.body)
         .wrap_err("OpenCode returned an invalid generation response")
+}
+
+/// A 404 means the route is missing only when it isn't OpenCode's own tagged
+/// error (such as "Model not found"), which the route answered.
+fn route_missing(response: &crate::desktop::opencode_service::Response) -> bool {
+    response.status == 404
+        && !serde_json::from_slice::<serde_json::Value>(&response.body).is_ok_and(|value| {
+            value.get("_tag").is_some()
+                && value
+                    .get("message")
+                    .is_some_and(serde_json::Value::is_string)
+        })
+}
+
+pub(super) fn retryable_generation_error(message: &str) -> bool {
+    message.starts_with("Model unavailable:")
 }
 
 pub(super) fn wait_for_generation_retry(
@@ -312,7 +183,7 @@ impl GenerationFailure {
 /// variant, cancellation flag, and remaining deadline. No retry on transport
 /// errors, timeouts, authentication failures, or untyped legacy errors.
 #[allow(clippy::too_many_arguments)]
-fn generate_with_quota_fallback(
+pub(super) fn generate_with_quota_fallback(
     prompt: &str,
     model: &Model,
     provider: &str,
@@ -598,12 +469,26 @@ mod live_tests {
     }
 }
 
-fn route_missing(response: &crate::desktop::opencode_service::Response) -> bool {
-    response.status == 404
-        && !serde_json::from_slice::<serde_json::Value>(&response.body).is_ok_and(|value| {
-            value.get("_tag").is_some()
-                && value
-                    .get("message")
-                    .is_some_and(serde_json::Value::is_string)
-        })
+/// Finds the running OpenCode service, or why it can't answer. Service
+/// discovery spends the generation's own remaining budget, so a stalled
+/// OpenCode falls back by the deadline instead of adding its fixed lookup
+/// timeouts on top.
+pub(super) fn generation_service(
+    started: Instant,
+    deadline: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Service> {
+    let lock = crate::policy::Lock::OpenCodeProcessing;
+    if crate::policy::Policy::current().locks(lock) {
+        return Err(eyre!(lock.refusal()));
+    }
+    let service = crate::desktop::opencode_service::find_cancellable(
+        remaining_generation_deadline(started, deadline)?,
+        cancelled,
+    );
+    if cancelled.load(Ordering::Acquire) {
+        return Err(eyre!("OpenCode generation was cancelled"));
+    }
+    remaining_generation_deadline(started, deadline)?;
+    service.map_err(|missing| eyre!(missing.message()))
 }

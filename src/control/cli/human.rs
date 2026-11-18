@@ -6,6 +6,7 @@ use super::{
 };
 use crate::control::{ModelInfo, StatusReport, settings::SettingValue};
 use crate::dictation::vocabulary::VocabularyEntry;
+use scrawl_capture::model::format_length;
 
 /// Prints `reply` and returns its exit code.
 pub(crate) fn print(reply: ControlReply, output: Output) -> u8 {
@@ -74,8 +75,11 @@ pub(super) fn human_scrawl_capture(report: &crate::control::ScrawlCaptureReport)
             .missing_transcript
             .as_ref()
             .map_or_else(String::new, |why| format!(", no transcript ({why})"));
+        let stopped = last.audio_stopped_at_ms.map_or_else(String::new, |at| {
+            format!(", audio stopped at {}", format_length(at))
+        });
         out.push_str(&format!(
-            "Last: {} {}{words}{gaps}{missing}\n",
+            "Last: {} {}{words}{gaps}{stopped}{missing}\n",
             last.stage,
             last.bundle.display()
         ));
@@ -144,6 +148,12 @@ pub(super) fn human_capture_detail(detail: &crate::control::ScrawlCaptureDetail)
     }
     if let Some(note) = &detail.note {
         out.push_str(&format!("\nNote: {note}\n"));
+    }
+    if let Some(at) = detail.audio_stopped_at_ms {
+        out.push_str(&format!(
+            "\nAudio stopped at {}; the rest of this capture has no audio.\n",
+            format_length(at)
+        ));
     }
     match (&detail.missing_transcript, detail.transcript.trim()) {
         (Some(why), _) => out.push_str(&format!("\nNo transcript: {why}\n")),
@@ -318,6 +328,18 @@ pub(super) fn human_status(report: &StatusReport) -> String {
             ", not installed"
         }
     );
+    if let Some(fallback) = &model.fallback {
+        use crate::transcription::custom_models::FallbackReason;
+        let reason = match fallback.reason {
+            FallbackReason::Missing => "it is missing",
+            FallbackReason::Changed => "it changed since it was added",
+            FallbackReason::LabsOff => "its Labs toggle is off",
+        };
+        model_line.push_str(&format!(
+            "; using {} ({}) because {reason}",
+            fallback.name, fallback.language
+        ));
+    }
     if let Some(preparing) = &model.preparing {
         model_line.push_str(&format!(
             "; preparing {preparing} ({} MB)",

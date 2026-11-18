@@ -5,6 +5,7 @@
 //! card's corner.
 
 use rune::{Align, El, Icon, col, el, icon, row, text};
+use rune_kit::ScrollBar;
 
 use super::Ui;
 use super::controls::{DESCRIPTION, METRICS, Paint, raised};
@@ -18,6 +19,11 @@ const LIST_W: f32 = 316.0;
 const LIST_FADE: (f32, f32) = (18.0, 28.0);
 /// Room the card's text leaves for its scroll bar.
 const SCROLL_BAR: f32 = 12.0;
+
+/// The pane bar's thumb: 8 pt at rest and 10 under the pointer, so it stays
+/// inside the card's 12 pt scroll-bar room.
+const PANE_THUMB: f32 = 8.0;
+const PANE_THUMB_HOVER: f32 = 10.0;
 
 pub(super) static COPY_ICON: &Icon = &rune_theme_opencode::icons::OUTLINE_COPY;
 pub(super) static TRASH_ICON: &Icon = &rune_theme_opencode::icons::TRASH;
@@ -84,80 +90,17 @@ pub(super) fn group(p: Paint, key: &str, label: &str, first: bool) -> El {
 }
 
 /// A folded section's chevron, pointing at its label.
-static FOLDED: Icon = Icon {
+pub(super) static FOLDED: Icon = Icon {
     name: "hex-fold-closed",
     view: 16.0,
     body: r#"<path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 /// An open section's chevron, pointing down at its content.
-static UNFOLDED: Icon = Icon {
+pub(super) static UNFOLDED: Icon = Icon {
     name: "hex-fold-open",
     view: 16.0,
     body: r#"<path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
-
-/// A label that folds what follows it (Labs › Collapsible meeting
-/// sections): a button with a chevron after its text, read as `label` with
-/// its expanded state. The label stays while its content is folded.
-pub(super) fn fold_label(
-    p: Paint,
-    key: &str,
-    label: &str,
-    ink: rune::Color,
-    expanded: bool,
-    toggle: impl Fn(&mut Ui) + 'static,
-) -> El {
-    let c = &p.k.c;
-    row()
-        .key(key)
-        .role("button")
-        .label(label)
-        .expanded(expanded)
-        .focusable(true)
-        .focus_ring(2.0, 0.0, c.border_focus)
-        .gap(2.0)
-        .center_y()
-        .radius(p.k.radius.sm)
-        .hover(c.hover)
-        .press(c.pressed)
-        .on_press(toggle)
-        .child(
-            text(label)
-                .key("label")
-                .font(p.k.ty.small_medium)
-                .color(ink)
-                .a11y_hidden(),
-        )
-        .child(
-            icon(if expanded { &UNFOLDED } else { &FOLDED }, 14.0)
-                .key("chevron")
-                .color(c.icon_faint)
-                .a11y_hidden(),
-        )
-}
-
-/// A [`group`] heading that folds its rows away ([`fold_label`]), on the
-/// same text edge and spacing as [`group`].
-pub(super) fn foldable_group(
-    p: Paint,
-    key: &str,
-    label: &str,
-    first: bool,
-    expanded: bool,
-    toggle: impl Fn(&mut Ui) + 'static,
-) -> El {
-    row()
-        .key(format!("{key}-slot"))
-        .role("none")
-        .px(METRICS.row_px - 4.0)
-        .pt(if first { 0.0 } else { 15.0 })
-        .pb(3.0)
-        .child(
-            fold_label(p, key, label, p.faint(), expanded, toggle)
-                .px(4.0)
-                .py(3.0),
-        )
-}
 
 /// One list row's words: the title over its meta line, and the time (or
 /// another short value) on the right, aligned down the list. `hover` takes
@@ -173,24 +116,35 @@ pub(super) struct Item {
     pub(super) selected: bool,
 }
 
-/// A selectable list row hung past the gutter: a hover fill (and the row's
-/// action in the time's place), a quiet fill when selected. Nothing on it
-/// animates.
-pub(super) fn item(p: Paint, item: Item, select: impl Fn(&mut Ui) + 'static) -> El {
-    item_with_icon(p, item, None, select)
-}
-
 /// The size of a row's leading icon, about the meta line's height.
 const LEADING_ICON: f32 = 14.0;
 
-/// [`item`] with a small faint icon before its title when `leading` is
-/// set; assistive technology hears the title alone.
+/// One selectable list row with a small faint icon before its title when
+/// `leading` is set; assistive technology hears the title alone.
 pub(super) fn item_with_icon(
     p: Paint,
     item: Item,
     leading: Option<&'static Icon>,
     select: impl Fn(&mut Ui) + 'static,
 ) -> El {
+    let selected = item.selected;
+    let row = item_body(p, item, leading);
+    super::lists::source_item(
+        super::lists::select_at_once(row, selected, select),
+        selected,
+    )
+}
+
+/// [`item_with_icon`] whose press its pane wires itself, for a list that
+/// selects several (History's Shift-, Command-, and drag-selection): `press`
+/// gets the finished row, which it draws and gives its gesture.
+pub(super) fn item_with_press(p: Paint, item: Item, press: impl Fn(El) -> El) -> El {
+    let selected = item.selected;
+    super::lists::source_item(press(item_body(p, item, None)), selected)
+}
+
+/// One row's box, words, and selected fill, before any press handling.
+fn item_body(p: Paint, item: Item, leading: Option<&'static Icon>) -> El {
     let c = &p.k.c;
     // A row of the list: its title names it and its meta and time describe
     // it, so their texts stay out of the tree.
@@ -264,8 +218,7 @@ pub(super) fn item_with_icon(
     if item.selected {
         row_el = row_el.fill(c.layer_02);
     }
-    let row_el = super::lists::select_at_once(row_el, item.selected, select);
-    super::lists::source_item(row_el, item.selected)
+    row_el
 }
 
 /// The card's title block: the title over its meta line, actions at the
@@ -313,6 +266,17 @@ pub(super) fn meta_text(p: Paint, meta: &str) -> El {
         .truncate()
 }
 
+/// A meta line of its own under the card header, wrapping rather than
+/// truncating, for text too long to share the header's meta row.
+pub(super) fn meta_note(p: Paint, key: &str, note: &str) -> El {
+    text(note)
+        .key(key)
+        .font(DESCRIPTION)
+        .color(p.muted())
+        .wrap()
+        .mt(3.0)
+}
+
 /// The card's scrolling content under its header, clear of the scroll bar.
 pub(super) fn card_scroll(p: Paint, key: &str, content: El) -> El {
     card_scroll_sticky(p, key, content, false)
@@ -326,7 +290,7 @@ pub(super) fn card_scroll_sticky(p: Paint, key: &str, content: El, stick_bottom:
 
 /// The window's faded scroll body (`super::faded_body`); with
 /// `stick_bottom` it keeps its newest content in view while scrolled to the
-/// bottom (Labs › Follow live transcript).
+/// bottom (a recording meeting's transcript).
 pub(super) fn faded_body_sticky(
     k: &rune_kit::Kit,
     key: &str,
@@ -335,13 +299,18 @@ pub(super) fn faded_body_sticky(
     stick_bottom: bool,
 ) -> El {
     // Both shrink below their content in a fixed-height parent (#906).
-    let viewport = col().grow(1.0).shrink().min_h(0.0);
+    let viewport = col().key(key).grow(1.0).shrink().min_h(0.0);
     let viewport = viewport
         .clip_fade(0.0, top, 0.0, bottom)
         .scroll(super::ScrollSpec { stick_bottom })
         .child(col().key("inset").pt(top).pb(bottom).child(content));
-    let area = format!("{key}-area");
-    rune_kit::scroll_bar(k, &area, key, viewport)
+    let style = rune_kit::ScrollBarStyle::from_kit(k)
+        .thumb(k.c.text_faint)
+        .thumb_hover(k.c.text_muted)
+        .width(PANE_THUMB)
+        .hover_width(PANE_THUMB_HOVER);
+    viewport
+        .scroll_bar_styled(style)
         .grow(1.0)
         .shrink()
         .min_h(0.0)

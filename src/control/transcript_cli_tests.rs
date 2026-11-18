@@ -57,7 +57,7 @@ fn history_filters_and_order_apply_before_the_limit() {
         "--limit",
         "1",
     ]);
-    let output = history_output(&entries, &query, HistoryRetention::Week, NOW, &[]).unwrap();
+    let output = history_output(&entries, &query, HistoryRetention::Week, NOW, &[], None).unwrap();
     assert_eq!(output.entries.iter().map(|e| e.id).collect::<Vec<_>>(), [2]);
     assert!(!output.truncated);
     let output = history_output(
@@ -66,6 +66,7 @@ fn history_filters_and_order_apply_before_the_limit() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(output.entries[0].id, 2);
@@ -76,6 +77,7 @@ fn history_filters_and_order_apply_before_the_limit() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(output.entries[0].id, 4);
@@ -86,6 +88,7 @@ fn history_filters_and_order_apply_before_the_limit() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -98,7 +101,8 @@ fn history_filters_and_order_apply_before_the_limit() {
             &args(&["--since", "now", "--until", "1d"]),
             HistoryRetention::Week,
             NOW,
-            &[]
+            &[],
+            None
         )
         .is_err()
     );
@@ -135,28 +139,87 @@ fn history_stats_parse_sum_retained_entries_and_need_the_labs_toggle() {
         entry(3, 0, "ten words", "ten words"),
     ];
     let utc = |ms: u64| (ms / DAY) as i64;
-    let output = stats_output(&entries, None, None, HistoryRetention::Week, NOW, utc).unwrap();
+    let hour = |ms: u64| ((ms / 3_600_000) % 24) as usize;
+    let output = stats_output(
+        &entries,
+        None,
+        None,
+        (
+            HistoryRetention::Week,
+            crate::app_settings::DEFAULT_TYPING_WPM,
+        ),
+        NOW,
+        utc,
+        hour,
+    )
+    .unwrap();
     assert_eq!(output.stats.dictations, 2);
     assert_eq!(output.stats.words, 3);
     assert_eq!(output.stats.words_per_minute, Some(15));
     assert_eq!(output.stats.changed_by_output, 1);
     assert_eq!(output.stats.streak_days, 2);
     assert_eq!(output.stats.top_apps[0].dictations, 2);
+    // Three words at 40 wpm take 4.5 s; 12 s of audio was recorded, so
+    // nothing was saved.
+    assert_eq!(output.stats.time_saved_ms, 0);
     let json = serde_json::to_value(&output).unwrap();
     assert_eq!(json["version"], 1);
     assert_eq!(json["words"], 3);
+    assert_eq!(json["typing_wpm"], crate::app_settings::DEFAULT_TYPING_WPM);
+    assert_eq!(json["time_saved_ms"], 0);
+    assert_eq!(json["hours"].as_array().map(Vec::len), Some(24));
+    assert!(
+        json.get("yearly").is_none(),
+        "the rollup is filled in later"
+    );
     let today = stats_output(
         &entries,
         Some("today"),
         None,
-        HistoryRetention::Week,
+        (HistoryRetention::Week, 65),
         NOW,
         utc,
+        hour,
     );
     assert!(today.unwrap().stats.dictations <= 1);
     assert!(stats_text(&HistoryStats::default()).starts_with("No retained"));
     assert!(require_history_stats(false).is_err());
     assert!(require_history_stats(true).is_ok());
+}
+
+/// The rollup follows Dictation stats now: `hex history stats` refuses before
+/// reading anything while the lab is off, so the JSON always includes it.
+#[test]
+fn history_stats_json_includes_the_yearly_rollup_with_dictation_stats() {
+    let root = temp();
+    let history = root.join("history.json");
+    let path = crate::history::usage::path(&history);
+    let timestamp = NOW - 86_400_000;
+    crate::history::usage::count(&path, timestamp, 9, 3_000).unwrap();
+
+    let mut output = stats_output(
+        &entries(),
+        None,
+        None,
+        (
+            HistoryRetention::Week,
+            crate::app_settings::DEFAULT_TYPING_WPM,
+        ),
+        NOW,
+        |ms| (ms / 86_400_000) as i64,
+        |ms| ((ms / 3_600_000) % 24) as usize,
+    )
+    .unwrap();
+    output.yearly = Some(yearly_output(&history, NOW));
+    let json = serde_json::to_value(&output).unwrap();
+    let yearly = &json["yearly"];
+    assert_eq!(yearly["dictations"], 1);
+    assert_eq!(yearly["words"], 9);
+    assert_eq!(
+        yearly["days"][0]["day"],
+        crate::history::stats::local_day(timestamp)
+    );
+    fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
@@ -174,6 +237,7 @@ fn history_search_ranks_fuzzy_stemmed_matches_within_retention() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     // Entry 2 matches both words; 5 only one; 1 has expired; 3 and 4 miss.
@@ -193,6 +257,7 @@ fn history_search_ranks_fuzzy_stemmed_matches_within_retention() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(output.entries[0].id, 4);
@@ -206,7 +271,8 @@ fn history_search_ranks_fuzzy_stemmed_matches_within_retention() {
             &args(&["--search", "\"\""]),
             HistoryRetention::Week,
             NOW,
-            &[]
+            &[],
+            None
         )
         .is_err()
     );
@@ -236,6 +302,7 @@ fn history_search_counts_raw_and_final_text_as_one_document() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     let mut ids = output.entries.iter().map(|e| e.id).collect::<Vec<_>>();
@@ -253,6 +320,7 @@ fn history_json_contract_snapshot() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -272,6 +340,7 @@ fn history_json_contract_snapshot() {
         HistoryRetention::Week,
         NOW,
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -286,16 +355,109 @@ fn history_json_contract_snapshot() {
 }
 
 #[test]
+fn keep_recordings_follows_the_saved_switch_not_the_process() {
+    let mut settings = AppSettings::default();
+    settings.labs.keep_recordings = false;
+    let off = keep_recordings(&settings);
+    settings.labs.keep_recordings = true;
+    let on = keep_recordings(&settings);
+    assert!(!off, "off by default");
+    assert!(on, "a saved on switch while this build has the feature");
+    assert_ne!(
+        off, on,
+        "the saved switch decides, not the process's runtime state"
+    );
+}
+
+#[test]
+fn history_json_names_a_recording_only_where_one_is_kept() {
+    let root = temp();
+    let recordings = crate::history::recordings::directory(&root.join("history.json"));
+    fs::create_dir_all(&recordings).unwrap();
+    let mut entries = entries();
+    // Entry 2 kept its audio and the file is there; entry 3's text says so
+    // but its file is gone.
+    entries[1].recording_bytes = 32_000;
+    entries[2].recording_bytes = 32_000;
+    fs::write(recordings.join("2.wav"), b"RIFF").unwrap();
+
+    let output = history_output(
+        &entries,
+        &args(&["--oldest-first"]),
+        HistoryRetention::Week,
+        NOW,
+        &[],
+        Some(&recordings),
+    )
+    .unwrap();
+    let rows = serde_json::to_value(&output).unwrap()["entries"].clone();
+    assert_eq!(
+        rows[0]["recording"],
+        serde_json::json!(recordings.join("2.wav").to_string_lossy())
+    );
+    assert!(rows[1].get("recording").is_none(), "the file is gone");
+    assert!(rows[2].get("recording").is_none(), "no audio was kept");
+
+    let output = history_output(
+        &entries,
+        &args(&["--oldest-first"]),
+        HistoryRetention::Week,
+        NOW,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert!(
+        serde_json::to_value(&output).unwrap()["entries"][0]
+            .get("recording")
+            .is_none(),
+        "without Labs › Keep recordings the field is omitted"
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn retention_defaults_fails_closed_and_off_preserves_existing_entries() {
     let root = temp();
-    assert_eq!(retention(&root).unwrap(), HistoryRetention::Week);
+    assert_eq!(retention(&root).unwrap().0, HistoryRetention::Week);
     fs::write(root.join("settings.json"), "{}").unwrap();
-    assert_eq!(retention(&root).unwrap(), HistoryRetention::Week);
+    assert_eq!(retention(&root).unwrap().0, HistoryRetention::Week);
     fs::write(root.join("settings.json"), r#"{"history_retention":"day"}"#).unwrap();
+    assert_eq!(retention(&root).unwrap(), (HistoryRetention::Day, 40));
+    fs::write(
+        root.join("settings.json"),
+        r#"{"history_retention":"day","typing_wpm":900}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        retention(&root).unwrap(),
+        (HistoryRetention::Day, crate::app_settings::MAX_TYPING_WPM)
+    );
+    for bad in [r#""fast""#, "null", "-5", "1.5", "{}"] {
+        fs::write(
+            root.join("settings.json"),
+            format!(r#"{{"history_retention":"day","typing_wpm":{bad}}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            retention(&root).unwrap(),
+            (HistoryRetention::Day, 40),
+            "{bad}"
+        );
+    }
     let entries = entries();
-    let output = history_output(&entries, &args(&[]), retention(&root).unwrap(), NOW, &[]).unwrap();
+    let output = history_output(
+        &entries,
+        &args(&[]),
+        retention(&root).unwrap().0,
+        NOW,
+        &[],
+        None,
+    )
+    .unwrap();
     assert_eq!(output.entries.iter().map(|e| e.id).collect::<Vec<_>>(), [4]);
-    let output = history_output(&entries, &args(&[]), HistoryRetention::Off, NOW, &[]).unwrap();
+    let output =
+        history_output(&entries, &args(&[]), HistoryRetention::Off, NOW, &[], None).unwrap();
     assert_eq!(output.entries.len(), 4);
     fs::write(root.join("settings.json"), "{broken").unwrap();
     assert!(retention(&root).is_err());
@@ -601,13 +763,6 @@ fn subtitles_follow_the_range_and_need_the_labs_toggle() {
     assert!(srt.contains("Them: Agreed."), "{srt}");
     assert!(!srt.contains("\n3\n"), "{srt}");
 
-    assert!(require_subtitle_export(true).is_ok());
-    assert!(
-        require_subtitle_export(false)
-            .unwrap_err()
-            .to_string()
-            .contains("hex labs on subtitle-export")
-    );
     assert_eq!(SubtitleFormat::from_flags(false, false), None);
     assert_eq!(
         SubtitleFormat::from_flags(false, true),

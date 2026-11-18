@@ -23,7 +23,7 @@ use crate::desktop::activity::DesktopActivity;
 use crate::desktop::events::EventReader;
 use crate::desktop::host::{
     DesktopAction, DesktopListenerSnapshot, DesktopShortcut, DesktopSnapshot,
-    DesktopTranscriptionSnapshot,
+    DesktopTranscriptionSnapshot, ListenerStatus,
 };
 use crate::linux::dictation::ListenerUpdate;
 use crate::linux::input::{LinuxHotkey, ListenerCommand};
@@ -58,6 +58,14 @@ pub(crate) enum ShortcutTarget {
     PasteLast,
     Capture,
     RawDictation,
+    /// Labs › Transform typed text.
+    TypedText,
+    /// Labs › Terminal paste shortcut: dictates like the dictation shortcut
+    /// and always pastes with Ctrl+Shift+V.
+    TerminalPaste,
+    /// Labs › Second dictation shortcut: another key that dictates exactly
+    /// like the dictation shortcut.
+    SecondDictation,
     /// Toggle mode's cancel shortcut.
     Cancel,
 }
@@ -132,7 +140,7 @@ struct LinuxDesktopHost {
     activity: DesktopActivity,
     listener: Option<Listener>,
     listen_when_ready: bool,
-    status: String,
+    status: ListenerStatus,
     error: Option<String>,
     dismissed_failure_at: Option<u64>,
     /// What Hex's GNOME custom shortcuts were last written for (#781).
@@ -148,7 +156,7 @@ struct LinuxDesktopHost {
     updater: crate::updater::Updater,
     output: crate::linux::dictation::DictationOutput,
     /// The local API's `/dictations` controls, for whichever listener runs.
-    dictations: crate::linux::dictation::DictationQueue,
+    dictations: crate::dictation::service::DictationQueue,
     /// Hosts the personal transformations workspace while a mode uses one.
     personal_commands: Option<crate::personal_commands::PersonalCommands>,
     personal_commands_checked_at: Instant,
@@ -178,6 +186,7 @@ pub(crate) struct HostSnapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum HostRequest {
     Desktop(DesktopAction),
+    ReloadSettings,
     /// Stops listening while the window records a shortcut.
     CaptureShortcutFor(ShortcutTarget),
     CancelShortcut,
@@ -250,6 +259,10 @@ impl HostHandle {
             let mut host = self.lock();
             match request {
                 HostRequest::Desktop(action) => host.dispatch(action),
+                HostRequest::ReloadSettings => {
+                    host.reload_changed_settings();
+                    Ok(())
+                }
                 HostRequest::CaptureShortcutFor(target) => {
                     host.begin_shortcut_edit(target, None);
                     Ok(())
@@ -276,12 +289,16 @@ impl HostHandle {
 
     /// Saves the window's settings, then adopts them. A failed save leaves
     /// the host's settings alone.
-    pub(crate) fn save_settings(&self, settings: AppSettings) -> Result<()> {
-        settings.save()?;
-        self.lock().adopt_settings(settings);
+    pub(crate) fn save_settings(
+        &self,
+        base: &AppSettings,
+        settings: &AppSettings,
+    ) -> Result<AppSettings> {
+        let settings = base.update(settings)?;
+        self.lock().adopt_settings(settings.clone());
         self.wake();
         self.notify();
-        Ok(())
+        Ok(settings)
     }
 
     /// The host's retained-history store; one store per process.
@@ -439,14 +456,24 @@ pub(crate) fn run(
     crate::transcription::local_transcriber::initialize_backends();
     let (control_calls, control_receiver) = mpsc::sync_channel(8);
     let (dictation_controls, dictations) = mpsc::sync_channel(8);
+    let processing = crate::dictation::modes::ProcessingState::from_settings(&launch.settings);
     let local_api = crate::local_api::LocalApi::start_for_app(
         &event_path,
         control_calls,
         Some(dictation_controls),
+        Some(crate::local_api::Processing::installed(
+            crate::local_api::processing::dictation_processor(processing.clone()),
+        )),
     );
     let enable_on_launch = launch.settings.enable_on_launch;
-    let mut host = LinuxDesktopHost::new(event_path, launch, crate::updater::Updater::start());
-    host.dictations = dictations.into();
+    let mut host = LinuxDesktopHost::new(
+        event_path,
+        launch,
+        crate::updater::Updater::start(),
+        processing,
+    );
+    let dictations = crate::dictation::service::DictationQueue::from(dictations);
+    host.dictations = dictations.clone();
     if enable_on_launch {
         host.start();
     }
@@ -458,6 +485,7 @@ pub(crate) fn run(
     crate::control::host::serve(
         control_receiver,
         Arc::new(control::LinuxControl {
+            dictations,
             host: host.clone(),
             published: Arc::downgrade(&published),
             window: control.clone(),
@@ -521,17 +549,19 @@ fn run_window(
     shutdown: &'static AtomicBool,
 ) {
     let app = host.clone();
-    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let failed = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::rune_ui::run_app(app, requests, first, shutdown)
     })) {
-        let reason = panic_reason(panic.as_ref());
-        tracing::error!(%reason, "the Hex window failed; Hex keeps running without it");
-        // `hex window show` and `hex status` say so instead of reporting
-        // a window that can no longer open (#979).
-        host.window_failed(reason);
-        while !shutdown.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        Ok(Ok(())) => return,
+        Ok(Err(error)) => error,
+        Err(panic) => panic_reason(panic.as_ref()),
+    };
+    tracing::error!(%failed, "the Hex window failed; Hex keeps running without it");
+    // `hex window show` and `hex status` say so instead of reporting
+    // a window that can no longer open (#979).
+    host.window_failed(failed);
+    while !shutdown.load(Ordering::Acquire) {
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -579,6 +609,7 @@ impl LinuxDesktopHost {
         event_path: PathBuf,
         launch: crate::app_settings::LaunchLoad,
         updater: crate::updater::Updater,
+        processing: crate::dictation::modes::ProcessingState,
     ) -> Self {
         let crate::app_settings::LaunchLoad { settings, note } = launch;
         let failed = matches!(note, Some(crate::app_settings::LaunchNote::Failed(_)));
@@ -594,7 +625,8 @@ impl LinuxDesktopHost {
                 .inspect_err(|error| tracing::warn!(%error, "could not open retained history"))
                 .ok()
         };
-        let output = crate::linux::dictation::DictationOutput::from_settings(&settings, history);
+        let output = crate::linux::dictation::DictationOutput::from_settings(&settings, history)
+            .sharing(processing);
         // Known before the first poll, so launching keeps the saved model
         // instead of applying the current layout's mapping.
         let keyboard_switcher = crate::transcription::keyboard_model_switching::Switcher::new(
@@ -611,7 +643,7 @@ impl LinuxDesktopHost {
             activity,
             listener: None,
             listen_when_ready: false,
-            status: "Disabled".into(),
+            status: ListenerStatus::Disabled,
             error: None,
             dismissed_failure_at: None,
             gnome_shortcuts: None,
@@ -626,7 +658,7 @@ impl LinuxDesktopHost {
             transcription_error: None,
             updater,
             output,
-            dictations: crate::linux::dictation::DictationQueue::default(),
+            dictations: crate::dictation::service::DictationQueue::default(),
             personal_commands: None,
             personal_commands_checked_at: Instant::now(),
             settings_modified: settings_modified(),
@@ -682,9 +714,7 @@ impl LinuxDesktopHost {
                 self.settings_error = Some(issue.reload_error());
             }
             Ok((settings, None)) => {
-                // Adopting a fixed or removed file also clears this process's
-                // stale-defaults refusal; nowhere else does.
-                AppSettings::forget_unparseable(&path);
+                // Only the adopted snapshot gains permission to save.
                 if settings != self.settings {
                     tracing::info!("settings.json changed outside Hex; applying it");
                 }
@@ -698,9 +728,11 @@ impl LinuxDesktopHost {
         if cfg!(test) {
             return;
         }
-        let enabled =
-            crate::app_settings::transformations_used(&self.settings.dictation_processing)
-                || crate::personal_commands::workspace_configured();
+        let enabled = crate::personal_commands::host_needed(
+            crate::personal_commands::custom_transformations_selected(
+                &self.settings.dictation_processing,
+            ),
+        );
         match (enabled, self.personal_commands.is_some()) {
             (true, false) => {
                 self.personal_commands = crate::personal_commands::PersonalCommands::start(
@@ -723,13 +755,11 @@ impl LinuxDesktopHost {
         // Defaults are only an editable recovery projection after a failed load.
         // They must never become a recording configuration until saved successfully.
         if !self.settings_valid {
-            self.status = "Couldn't enable".into();
+            self.status = ListenerStatus::CouldNotEnable;
             return;
         }
-        let model = crate::transcription::models::definition(self.settings.transcription.model);
-        if !crate::transcription::models::is_installed(model, &self.settings.transcription.language)
-        {
-            self.status = "Model required".into();
+        if !crate::desktop::onboarding::model_ready(&self.settings.transcription) {
+            self.status = ListenerStatus::ModelRequired;
             return;
         }
         let stop = Arc::new(AtomicBool::new(false));
@@ -770,7 +800,7 @@ impl LinuxDesktopHost {
             commands,
             updates,
         });
-        self.status = "Enabling…".into();
+        self.status = ListenerStatus::Enabling;
     }
 
     /// Enable and Disable also decide whether Hex listens at its next launch,
@@ -799,12 +829,7 @@ impl LinuxDesktopHost {
         let Some(wanted) = crate::linux::gnome_shortcuts::wanted(requested, shortcuts) else {
             return;
         };
-        let key = format!(
-            "{wanted} {:?} {:?} {:?}",
-            self.settings.dictation_hotkey,
-            self.settings.paste_last_hotkey,
-            capture_shortcut(&self.settings)
-        );
+        let key = gnome_shortcuts_key(&self.settings, wanted);
         if self.gnome_shortcuts.as_deref() == Some(key.as_str()) {
             return;
         }
@@ -837,15 +862,19 @@ impl LinuxDesktopHost {
         }
         if let Some(listener) = &self.listener {
             listener.stop();
-            self.status = "Disabling…".into();
+            self.status = ListenerStatus::Disabling;
         }
     }
 
     fn refresh(&mut self) {
         self.switch_with_keyboard();
         // Restart to update asks systemd to restart Hex after the updater's
-        // final check; only a failure needs showing.
+        // final check; only a failure needs showing, and a restart that never
+        // happened must not reopen the window on the next launch.
         if let Some(Err(error)) = self.updater.take_restart() {
+            if let Some(marker) = reopen_marker() {
+                let _ = std::fs::remove_file(marker);
+            }
             self.error = Some(format!("Could not restart Hex: {error:#}"));
         }
         // Settings may set up the transformations workspace at any time.
@@ -915,9 +944,9 @@ impl LinuxDesktopHost {
             .take_if(|listener| listener.worker.is_finished())
         {
             match listener.finish() {
-                Ok(()) => self.status = "Disabled".into(),
+                Ok(()) => self.status = ListenerStatus::Disabled,
                 Err(error) => {
-                    self.status = "Couldn't enable".into();
+                    self.status = ListenerStatus::CouldNotEnable;
                     self.error = Some(error);
                 }
             }
@@ -937,7 +966,7 @@ impl LinuxDesktopHost {
             && self.listen_when_ready
             && let Some(status) = self.activity.state_label()
         {
-            self.status = status.into();
+            self.status = status;
         }
     }
 
@@ -994,10 +1023,15 @@ impl LinuxDesktopHost {
     /// Adopts settings the window saved. A running listener applies them in
     /// place, so listening never stops for a settings change.
     fn adopt_settings(&mut self, settings: AppSettings) {
+        if settings.source.revision != 0 && settings.source.revision < self.settings.source.revision
+        {
+            return;
+        }
         // A valid file clears the parse error even when it loads the settings
         // already running (a fixed file equal to what Hex had in memory).
         self.settings_error = None;
         if self.settings_valid && settings == self.settings {
+            self.settings.source = settings.source;
             return;
         }
         if self
@@ -1097,6 +1131,13 @@ impl LinuxDesktopHost {
                         ShortcutTarget::Capture => settings.capture.hotkey = binding,
                         ShortcutTarget::RawDictation => {
                             settings.raw_dictation_hotkey = Some(binding)
+                        }
+                        ShortcutTarget::TypedText => settings.typed_text_hotkey = Some(binding),
+                        ShortcutTarget::TerminalPaste => {
+                            settings.terminal_paste_hotkey = Some(binding)
+                        }
+                        ShortcutTarget::SecondDictation => {
+                            settings.second_dictation_hotkey = Some(binding)
                         }
                         ShortcutTarget::Cancel => settings.cancel_hotkey = binding,
                     }
@@ -1282,6 +1323,19 @@ fn capture_shortcut(settings: &AppSettings) -> Option<&crate::app_settings::Hotk
     None
 }
 
+/// What the GNOME custom shortcuts were last synced for: a new key means an
+/// entry was added, removed, or rebound. Typed text is included while its
+/// lab is on and its shortcut is bound, so toggling either resyncs.
+fn gnome_shortcuts_key(settings: &AppSettings, wanted: bool) -> String {
+    format!(
+        "{wanted} {:?} {:?} {:?} {:?}",
+        settings.dictation_hotkey,
+        settings.paste_last_hotkey,
+        capture_shortcut(settings),
+        settings.active_typed_text_hotkey()
+    )
+}
+
 fn settings_modified() -> Option<std::time::SystemTime> {
     let path = crate::app_settings::path().ok()?;
     std::fs::metadata(path)
@@ -1291,9 +1345,9 @@ fn settings_modified() -> Option<std::time::SystemTime> {
 
 fn save_with(change: impl FnOnce(&mut AppSettings)) -> Result<AppSettings> {
     let mut settings = AppSettings::load()?;
+    let base = settings.clone();
     change(&mut settings);
-    settings.save()?;
-    Ok(settings)
+    base.update(&settings)
 }
 
 #[cfg(not(test))]
@@ -1332,8 +1386,10 @@ impl LinuxDesktopHost {
             activity: self.activity.clone(),
             listener: DesktopListenerSnapshot {
                 running: self.is_running(),
-                status: self.status.clone(),
-                warning: None,
+                warming: self.listener.as_ref().is_some_and(|listener| {
+                    matches!(listener.startup, ListenerStartup::Awaiting { .. })
+                }),
+                status: self.status,
                 notice: crate::linux::paste::listener_warning(self.is_running()),
                 shortcuts: self
                     .listener
@@ -1344,6 +1400,7 @@ impl LinuxDesktopHost {
                     .listener
                     .as_ref()
                     .is_some_and(|listener| listener.hotkey_status.configurable()),
+                ..DesktopListenerSnapshot::default()
             },
             operation_error: self
                 .error
@@ -1401,14 +1458,16 @@ impl LinuxDesktopHost {
             | DesktopAction::RestartIntoUpdate
             | DesktopAction::ConfirmUpdateSwitch
             | DesktopAction::WindowFocused => {
+                if let Err(error) = self.updater.act(&action) {
+                    self.error = Some(format!("Could not restart Hex: {error:#}"));
+                    return Err(error);
+                }
+                // Only an accepted restart relaunches with the window open;
+                // a refused one leaves the next launch as it was.
                 if matches!(action, DesktopAction::RestartIntoUpdate)
                     && let Some(marker) = reopen_marker()
                 {
                     let _ = std::fs::write(marker, b"");
-                }
-                if let Err(error) = self.updater.act(&action) {
-                    self.error = Some(format!("Could not restart Hex: {error:#}"));
-                    return Err(error);
                 }
             }
             DesktopAction::SetDictationShortcut(shortcut) => {
@@ -1444,6 +1503,16 @@ mod tests {
         ModelPreparationStage, TranscriptionModelId, TranscriptionSelection,
     };
 
+    fn test_host(launch: crate::app_settings::LaunchLoad) -> LinuxDesktopHost {
+        let processing = crate::dictation::modes::ProcessingState::from_settings(&launch.settings);
+        LinuxDesktopHost::new(
+            PathBuf::new(),
+            launch,
+            crate::updater::Updater::idle(),
+            processing,
+        )
+    }
+
     fn host_for_edit(running: bool) -> LinuxDesktopHost {
         let settings = AppSettings {
             transcription: TranscriptionSelection {
@@ -1453,14 +1522,10 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut host = LinuxDesktopHost::new(
-            PathBuf::new(),
-            crate::app_settings::LaunchLoad {
-                settings,
-                note: None,
-            },
-            crate::updater::Updater::idle(),
-        );
+        let mut host = test_host(crate::app_settings::LaunchLoad {
+            settings,
+            note: None,
+        });
         if running {
             host.listener = Some(Listener {
                 worker: std::thread::spawn(|| Ok(())),
@@ -1526,10 +1591,52 @@ mod tests {
         assert_eq!(*published.lock().unwrap(), Some(2));
     }
 
+    /// The GNOME sync cache key must move when the typed-text lab or its
+    /// binding changes, or stale `hex-typed-text` entries stay behind.
+    #[test]
+    fn the_gnome_shortcut_key_tracks_typed_text() {
+        use crate::app_settings::{HotkeyKey, HotkeyModifiers};
+
+        let binding = HotkeyBinding {
+            modifiers: HotkeyModifiers::control_option(),
+            key: Some(HotkeyKey::named("t")),
+        };
+        let mut settings = AppSettings {
+            typed_text_hotkey: Some(binding.clone()),
+            ..AppSettings::default()
+        };
+        let lab_off = gnome_shortcuts_key(&settings, true);
+
+        settings.labs.typed_text = true;
+        let bound = gnome_shortcuts_key(&settings, true);
+        assert_ne!(lab_off, bound, "turning the lab on adds an entry");
+
+        settings.typed_text_hotkey = Some(HotkeyBinding {
+            modifiers: HotkeyModifiers::control(),
+            ..binding
+        });
+        let rebound = gnome_shortcuts_key(&settings, true);
+        assert_ne!(bound, rebound, "changing the binding rewrites it");
+
+        settings.typed_text_hotkey = None;
+        let unbound = gnome_shortcuts_key(&settings, true);
+        assert_ne!(rebound, unbound, "unbinding removes it");
+        assert_eq!(
+            lab_off, unbound,
+            "no bound typed-text shortcut means no entry either way"
+        );
+
+        settings.labs.typed_text = false;
+        assert_eq!(
+            gnome_shortcuts_key(&settings, true),
+            lab_off,
+            "turning the lab off returns to the lab-off key"
+        );
+    }
+
     #[test]
     fn a_settings_parse_note_does_not_block_capture() {
-        let mut host = LinuxDesktopHost::new(
-            PathBuf::new(),
+        let mut host = test_host(
             // A model never installed on Linux keeps `start` from opening a
             // real microphone while still proving the validity gate passed.
             crate::app_settings::LaunchLoad {
@@ -1538,20 +1645,18 @@ mod tests {
                     "Hex couldn't read settings.json and started with defaults.".into(),
                 )),
             },
-            crate::updater::Updater::idle(),
         );
         assert!(host.settings_valid);
         assert!(host.settings_error.is_some());
         host.start();
         assert!(host.listen_when_ready);
-        assert_eq!(host.status, "Model required");
+        assert_eq!(host.status, ListenerStatus::ModelRequired);
         assert!(!host.is_running());
     }
 
     #[test]
     fn malformed_settings_cannot_start_even_after_dismissing_the_error() {
-        let mut host = LinuxDesktopHost::new(
-            PathBuf::new(),
+        let mut host = test_host(
             // A model never installed on Linux, so the resumed start below
             // cannot open the microphone where the real model is installed.
             crate::app_settings::LaunchLoad {
@@ -1560,15 +1665,14 @@ mod tests {
                     "Could not load Linux settings: invalid JSON".into(),
                 )),
             },
-            crate::updater::Updater::idle(),
         );
         host.start();
         assert!(!host.is_running());
-        assert_eq!(host.status, "Couldn't enable");
+        assert_eq!(host.status, ListenerStatus::CouldNotEnable);
         host.dispatch(DesktopAction::ClearError).unwrap();
         host.start();
         assert!(!host.is_running());
-        assert_eq!(host.status, "Couldn't enable");
+        assert_eq!(host.status, ListenerStatus::CouldNotEnable);
         assert!(!host.settings_valid);
 
         let mut recovered = host.settings.clone();
@@ -1577,7 +1681,7 @@ mod tests {
         assert!(host.settings_valid);
         assert_eq!(host.settings, recovered);
         assert!(!host.is_running());
-        assert_eq!(host.status, "Model required");
+        assert_eq!(host.status, ListenerStatus::ModelRequired);
     }
 
     #[test]
@@ -1601,6 +1705,18 @@ mod tests {
             assert!(listener.stop.load(Ordering::Relaxed));
             listener.finish().unwrap();
         }
+    }
+
+    #[test]
+    fn a_listener_still_starting_is_warming_until_its_session_begins() {
+        let mut host = host_for_edit(true);
+        assert!(!host.snapshot().listener.warming);
+        host.listener.as_mut().unwrap().startup = ListenerStartup::Awaiting {
+            previous_session: None,
+        };
+        assert!(host.snapshot().listener.warming);
+        host.listener.as_mut().unwrap().startup = ListenerStartup::Observed;
+        assert!(!host.snapshot().listener.warming);
     }
 
     #[test]
@@ -1630,9 +1746,9 @@ mod tests {
             assert_eq!(
                 host.status,
                 if expected.is_some() {
-                    "Couldn't enable"
+                    ListenerStatus::CouldNotEnable
                 } else {
-                    "Disabled"
+                    ListenerStatus::Disabled
                 }
             );
         }
@@ -1701,7 +1817,7 @@ mod tests {
             }
             Ok(())
         });
-        host.status = "Enabled".into();
+        host.status = ListenerStatus::Enabled;
         (host, received)
     }
 
@@ -1734,7 +1850,7 @@ mod tests {
         host.cancel_shortcut_edit();
         host.refresh_shortcut_edit();
         assert!(host.shortcut_edit.is_none());
-        assert_eq!(host.status, "Enabled");
+        assert_eq!(host.status, ListenerStatus::Enabled);
         let updates = received.try_iter().collect::<Vec<_>>();
         assert!(matches!(
             updates.as_slice(),
@@ -1900,14 +2016,10 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut host = LinuxDesktopHost::new(
-            PathBuf::new(),
-            crate::app_settings::LaunchLoad {
-                settings,
-                note: None,
-            },
-            crate::updater::Updater::idle(),
-        );
+        let mut host = test_host(crate::app_settings::LaunchLoad {
+            settings,
+            note: None,
+        });
         host.transcription_preparation = Some(TranscriptionPreparation {
             canceled: Arc::new(AtomicBool::new(false)),
             model: TranscriptionModelId::default(),
@@ -1920,7 +2032,7 @@ mod tests {
         host.dispatch(DesktopAction::StartListening).unwrap();
 
         assert!(host.listen_when_ready);
-        assert_eq!(host.status, "Disabled");
+        assert_eq!(host.status, ListenerStatus::Disabled);
         assert!(!host.is_running());
         assert!(host.listener.is_none());
         assert!(host.transcription_preparation.is_some());

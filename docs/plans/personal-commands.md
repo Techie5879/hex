@@ -66,6 +66,10 @@ Transformations section to run them in displayed order after that mode's
 corrections and optional OpenCode rewrite. This pipeline applies to Paste and
 Send, not Voice Action or meetings. If the transformation stage fails, Hex
 keeps the text from before that stage, not partially transformed output.
+Each transformation receives the focused app's context and `source`:
+`"dictation"` for spoken dictation, or `"typed-text"` for Labs › Transform
+typed text, which runs the same mode steps on text already in the field.
+`source` is absent from command-handler context.
 
 ```ts
 import { defineHexConfig } from "@hex/commands"
@@ -148,12 +152,12 @@ avoids Effect and npm packages; their `package.json`, `bun.lock`,
 `node_modules`, `.hex-sdk`, and `.agents` can be deleted.
 
 Hex reloads the config about a third of a second after any `.ts`, `.js`,
-`.mjs`, or `.json` file in the folder changes (not `.d.ts`, dot folders,
-`node_modules`, or symlink targets), activates valid changes, and reports the
-last load error with its file, line, and column in Modes' Transformations
-section. `hex commands check` (macOS) loads the config as Hex would and prints
-what it registers or why it fails. Type checking is optional:
-`npx -y -p typescript tsc` in the folder.
+`.mjs`, `.mts`, or `.json` file in the folder changes, in any case, but not
+declaration files (`.d.ts`, `.d.mts`), `node_modules`, `.git`, or symlink
+targets. It activates valid changes and reports the last load error with its
+file, line, and column in Modes' Transformations section. `hex commands check`
+(macOS) loads the config as Hex would and prints what it registers or why it
+fails. Type checking is optional: `npx -y -p typescript tsc` in the folder.
 
 ## Runtime Boundary
 

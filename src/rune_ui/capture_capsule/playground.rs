@@ -20,7 +20,7 @@ use super::flow::{Action, Cue, Delivered, Dest, Failure, Grant, Input, Route, Un
 use super::surface::{Id, PANEL_H, PANEL_W};
 use super::tuning::{self, CapsuleFlow, ListFooter, TopLine, Tuning, flow_label};
 use super::{CapsuleState, Mode, capsule, tone};
-use crate::capture_host::CaptureNeed;
+use crate::capture_host::{AskedBy, CaptureNeed};
 use crate::rune_ui::controls::{DESCRIPTION, Paint};
 use crate::rune_ui::lists::slider_in;
 
@@ -300,7 +300,10 @@ fn lone_rule() -> Route {
 
 /// A capture refused for Screen Recording: the permission helper.
 fn needs_screen() -> Step {
-    Step::Input(Input::NeedsPermission(CaptureNeed::ScreenRecording))
+    Step::Input(Input::NeedsPermission(
+        CaptureNeed::ScreenRecording,
+        AskedBy::Capture,
+    ))
 }
 
 /// A saved rule's answer, which the router sends at once.
@@ -358,7 +361,10 @@ fn stop() -> Input {
 }
 
 fn done() -> Step {
-    Step::Input(Input::Stage(scrawl_capture::capture::Stage::Done))
+    Step::Input(Input::Written {
+        bundle: "example.scrawl".into(),
+        routing: false,
+    })
 }
 
 fn routed(route: Route) -> Step {
@@ -380,12 +386,12 @@ fn recent() -> Vec<Dest> {
 
 /// A saved rule names no runner-up: its own session is all it suggests.
 fn rule() -> Route {
-    let to = Dest::new("SEER", "rule: problems.kitlangton.com");
+    let to = Dest::new("SEER", "rule: example.com");
     Route::Rule {
         to: to.clone(),
         suggested: vec![to],
         recent: recent(),
-        site: Some("problems.kitlangton.com".into()),
+        site: Some("example.com".into()),
     }
 }
 
@@ -397,7 +403,7 @@ fn guess() -> Route {
             dest("HOME", "mentioned", "home"),
         ],
         recent: recent(),
-        site: Some("problems.kitlangton.com".into()),
+        site: Some("example.com".into()),
     }
 }
 
@@ -445,8 +451,9 @@ impl Playground {
             }
             Action::Cancel
             | Action::Discard
+            | Action::OpenScreenshots { .. }
             | Action::Send { .. }
-            | Action::Paste
+            | Action::Paste(_)
             | Action::Pen
             | Action::Hold(_)
             | Action::Inspect => {}
@@ -465,7 +472,7 @@ impl Playground {
         self.at(4.6, Step::Click(Id::Finish));
         let routed_at = 4.6 + 1.8;
         let gone = if self.rule {
-            routed_at + self.tuning.undo_s + 2.5
+            routed_at + super::flow::send_hold_s() + 2.5
         } else {
             let picked = routed_at + 1.8;
             self.at(picked, Step::Input(Input::SendRow(0)));
@@ -577,8 +584,8 @@ fn on_key(s: &mut CapsuleState, key: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Enter if list => Input::Send {
             always: key.mods.shift,
         },
-        Key::Enter if cycle && !key.mods.shift => Input::Send { always: false },
-        Key::Tab if cycle => Input::Cycle(if key.mods.shift { -1 } else { 1 }),
+        Key::Enter if cycle && search && !key.mods.shift => Input::Send { always: false },
+        Key::Tab if cycle && search => Input::Cycle(if key.mods.shift { -1 } else { 1 }),
         Key::Backspace if list => Input::Backspace,
         Key::Text(t) if list => Input::Type(t.clone()),
         Key::Text(t)

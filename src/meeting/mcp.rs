@@ -23,8 +23,8 @@ use crate::meeting::query::{Library, ListQuery, OffsetRange, SearchQuery, Transc
 
 const RESOURCE_SCHEME: &str = "hex-meeting://";
 
-const INSTRUCTIONS: &str = "Kit's locally recorded Hex meetings (calls captured on his Mac). \
-Speakers are `You` (Kit, his microphone) and `Them` (everyone else, system audio). With Labs › \
+const INSTRUCTIONS: &str = "Locally recorded Hex meetings (calls captured on this Mac). \
+Speakers are `You` (this Mac's microphone) and `Them` (everyone else, system audio). With Labs › \
 Meeting speaker names on, call audio from Teams or a Slack huddle is labelled with the \
 participant the call app showed speaking, when Hex could tell; everything else stays `Them`. \
 A meeting with Shared room selected while recording (its listing shows `participants: Room mic, \

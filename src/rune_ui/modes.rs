@@ -12,8 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rune::{
-    Align, Drag, El, Phase, ScrollSpec, Side, TextEdit, Tx, Waker, col, edit_access, el, row,
-    spacer, text,
+    Align, Drag, El, Phase, ScrollSpec, Side, TextEdit, Tx, Waker, col, edit_access, el, row, text,
 };
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Switch, TextArea, TextInput};
 
@@ -23,7 +22,7 @@ use super::controls::{
 };
 use super::lists::{LIST_COLUMN_PL, list_row, remove_button, source_list};
 use super::models::{self, Target};
-use super::{Menu, Ui};
+use super::{Menu, Ui, speech_model};
 use crate::app_settings::{AppSettings, DictationMode};
 use crate::application_catalog::InstalledApplication;
 use crate::desktop::file_dialog::{Choice, Dialog, Filter, Pending, Target as DialogTarget};
@@ -61,23 +60,27 @@ pub(super) enum Selection {
     Custom(usize),
 }
 
-pub(super) fn mode(settings: &AppSettings, selection: Selection) -> &DictationMode {
+pub(super) fn mode(settings: &AppSettings, selection: Selection) -> Option<&DictationMode> {
     match selection {
-        Selection::Default => &settings.dictation_processing.default_mode,
-        Selection::Custom(index) => &settings.dictation_processing.modes[index],
+        Selection::Default => Some(&settings.dictation_processing.default_mode),
+        Selection::Custom(index) => settings.dictation_processing.modes.get(index),
     }
 }
 
-pub(super) fn mode_mut(settings: &mut AppSettings, selection: Selection) -> &mut DictationMode {
+pub(super) fn mode_mut(
+    settings: &mut AppSettings,
+    selection: Selection,
+) -> Option<&mut DictationMode> {
     match selection {
-        Selection::Default => &mut settings.dictation_processing.default_mode,
-        Selection::Custom(index) => &mut settings.dictation_processing.modes[index],
+        Selection::Default => Some(&mut settings.dictation_processing.default_mode),
+        Selection::Custom(index) => settings.dictation_processing.modes.get_mut(index),
     }
 }
 
 /// The selected mode's text fields.
 #[derive(Default)]
 struct Editor {
+    base: DictationMode,
     name: TextEdit,
     prompt: TextEdit,
     deadline: TextEdit,
@@ -85,8 +88,34 @@ struct Editor {
 }
 
 impl Editor {
+    fn rebase(&mut self, current: &DictationMode, keep_drafts: bool) {
+        let old = Self::of(&self.base);
+        let next = Self::of(current);
+        for (field, before, after) in [
+            (&mut self.name, old.name, next.name),
+            (&mut self.prompt, old.prompt, next.prompt),
+            (&mut self.deadline, old.deadline, next.deadline),
+        ] {
+            if (!keep_drafts || field.text == before.text) && field.text != after.text {
+                *field = after;
+            }
+        }
+        let values = |rows: &[(TextEdit, TextEdit)]| {
+            rows.iter()
+                .map(|(a, b)| (a.text.clone(), b.text.clone()))
+                .collect::<Vec<_>>()
+        };
+        if (!keep_drafts || values(&self.replacements) == values(&old.replacements))
+            && values(&self.replacements) != values(&next.replacements)
+        {
+            self.replacements = next.replacements;
+        }
+        self.base = current.clone();
+    }
+
     fn of(mode: &DictationMode) -> Self {
         Self {
+            base: mode.clone(),
             name: TextEdit::new(mode.name.clone()),
             prompt: TextEdit::new(mode.post_processing.prompt.clone()),
             deadline: TextEdit::new(mode.post_processing.deadline_seconds.to_string()),
@@ -115,6 +144,15 @@ struct TransformationDrag {
 
 pub(super) type ChosenApplication = Result<Option<InstalledApplication>, String>;
 
+/// Where the application picker adds what it picks: the selected mode, or
+/// Labs › YOLO mode's Only in list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum PickerTarget {
+    #[default]
+    Mode,
+    YoloMode,
+}
+
 enum Applications {
     NotLoaded,
     Loading(Receiver<Vec<InstalledApplication>>),
@@ -124,8 +162,9 @@ enum Applications {
 pub(super) struct ModesPane {
     pub(super) selected: Selection,
     editor: Editor,
-    pub(super) delete_armed: bool,
+    pub(super) delete_armed: Option<String>,
     pub(super) application_picker_open: bool,
+    pub(super) picker_target: PickerTarget,
     application_search: TextEdit,
     application_highlight: Highlight,
     pub(super) application_error: Option<String>,
@@ -159,8 +198,9 @@ impl ModesPane {
         Self {
             selected: Selection::Default,
             editor: Editor::of(&settings.dictation_processing.default_mode),
-            delete_armed: false,
+            delete_armed: None,
             application_picker_open: false,
+            picker_target: PickerTarget::Mode,
             application_search: TextEdit::default(),
             application_highlight: Highlight::default(),
             application_error: None,
@@ -216,13 +256,10 @@ impl ModesPane {
     /// The selected mode's drafts applied to `settings`.
     pub(super) fn project(&self, settings: &mut AppSettings) {
         let selection = self.selected;
-        if let Selection::Custom(index) = selection
-            && index >= settings.dictation_processing.modes.len()
-        {
+        let Some(mode) = mode_mut(settings, selection) else {
             return;
-        }
+        };
         let editor = &self.editor;
-        let mode = mode_mut(settings, selection);
         if selection != Selection::Default {
             mode.name = editor.name.text.trim().to_string();
         }
@@ -244,19 +281,39 @@ impl ModesPane {
             .max(1);
     }
 
-    /// Rebuilds the drafts from settings another client saved.
-    pub(super) fn reload(&mut self, settings: &AppSettings) {
-        if let Selection::Custom(index) = self.selected
-            && index >= settings.dictation_processing.modes.len()
-        {
-            self.selected = Selection::Default;
+    /// Saved names identify modes across external reordering. A removed,
+    /// renamed, or ambiguous name drops its draft rather than editing a sibling.
+    pub(super) fn adopt(&mut self, settings: &AppSettings, dirty: bool) {
+        if self.selected != Selection::Default {
+            let mut matches = settings
+                .dictation_processing
+                .modes
+                .iter()
+                .enumerate()
+                .filter(|(_, mode)| mode.name == self.editor.base.name);
+            let found = matches.next();
+            if let Some((index, _)) = found
+                && matches.next().is_none()
+            {
+                self.selected = Selection::Custom(index);
+            } else {
+                self.select_in(settings, Selection::Default);
+                return;
+            }
         }
-        self.editor = Editor::of(mode(settings, self.selected));
+        if let Some(current) = mode(settings, self.selected) {
+            self.editor.rebase(current, dirty);
+        }
+    }
+
+    pub(super) fn committed(&mut self, settings: &AppSettings) {
+        self.editor.base.name = self.editor.name.text.trim().to_owned();
+        self.adopt(settings, false);
     }
 
     pub(super) fn select(&mut self, selection: Selection) {
         self.selected = selection;
-        self.delete_armed = false;
+        self.delete_armed = None;
         self.application_picker_open = false;
         self.application_error = None;
         self.drag = None;
@@ -264,7 +321,12 @@ impl ModesPane {
 
     fn select_in(&mut self, settings: &AppSettings, selection: Selection) {
         self.select(selection);
-        self.editor = Editor::of(mode(settings, selection));
+        if let Some(current) = mode(settings, selection) {
+            self.editor = Editor::of(current);
+        } else {
+            self.select(Selection::Default);
+            self.editor = Editor::of(&settings.dictation_processing.default_mode);
+        }
     }
 
     fn application_query(&self) -> String {
@@ -382,7 +444,14 @@ fn select_mode(ui: &mut Ui, selection: Selection) {
 /// Saves one change to the selected mode.
 fn update_mode(ui: &mut Ui, change: impl FnOnce(&mut DictationMode)) -> bool {
     let selection = ui.modes.selected;
-    ui.update(|settings| change(mode_mut(settings, selection)))
+    if mode(&ui.settings, selection).is_none() {
+        return false;
+    }
+    ui.update(|settings| {
+        if let Some(mode) = mode_mut(settings, selection) {
+            change(mode);
+        }
+    })
 }
 
 fn add_mode(ui: &mut Ui) {
@@ -404,12 +473,15 @@ fn delete_mode(ui: &mut Ui) {
     let Selection::Custom(index) = ui.modes.selected else {
         return;
     };
-    if !ui.modes.delete_armed {
-        ui.modes.delete_armed = true;
+    let Some(current) = mode(&ui.settings, ui.modes.selected) else {
+        return;
+    };
+    if ui.modes.delete_armed.as_deref() != Some(&current.name) {
+        ui.modes.delete_armed = Some(current.name.clone());
         return;
     }
     // The drafts belong to the mode going away.
-    ui.modes.editor = Editor::of(mode(&ui.settings, ui.modes.selected));
+    ui.modes.editor = Editor::of(current);
     if ui.update(|settings| {
         settings.dictation_processing.modes.remove(index);
     }) {
@@ -420,13 +492,9 @@ fn delete_mode(ui: &mut Ui) {
 fn add_replacement(ui: &mut Ui) {
     if update_mode(ui, |mode| {
         mode.replacements.push(TextReplacement::default())
-    }) {
-        let mut phrase = TextEdit::default();
+    }) && let Some((phrase, _)) = ui.modes.editor.replacements.last_mut()
+    {
         phrase.focused = true;
-        ui.modes
-            .editor
-            .replacements
-            .push((phrase, TextEdit::default()));
     }
 }
 
@@ -437,7 +505,41 @@ fn remove_replacement(ui: &mut Ui, index: usize) {
     }
 }
 
+/// The applications the picker's target already has.
+fn picked(ui: &Ui) -> Vec<String> {
+    match ui.modes.picker_target {
+        PickerTarget::Mode => mode(&ui.settings, ui.modes.selected)
+            .map(|mode| mode.applications.clone())
+            .unwrap_or_default(),
+        PickerTarget::YoloMode => ui.settings.labs.yolo_mode_apps.clone(),
+    }
+}
+
+/// Opens or closes the application picker for `target`; opening it for
+/// another target moves it there.
+pub(super) fn toggle_picker(ui: &mut Ui, target: PickerTarget) {
+    let modes = &mut ui.modes;
+    modes.application_picker_open =
+        !(modes.application_picker_open && modes.picker_target == target);
+    modes.picker_target = target;
+    modes.application_error = None;
+    modes.ensure_applications();
+    modes.application_search = TextEdit::default();
+    modes.application_search.focused = modes.application_picker_open;
+}
+
 fn add_application(ui: &mut Ui, name: String) {
+    if ui.modes.picker_target == PickerTarget::YoloMode {
+        if !ui.settings.labs.yolo_mode_apps.contains(&name) {
+            ui.update(|settings| {
+                let apps = &mut settings.labs.yolo_mode_apps;
+                apps.push(name);
+                apps.sort_by_key(|name| name.to_lowercase());
+            });
+        }
+        close_picker(ui);
+        return;
+    }
     let selection = ui.modes.selected;
     let conflict = ui
         .settings
@@ -456,26 +558,30 @@ fn add_application(ui: &mut Ui, name: String) {
         ));
         return;
     }
-    if !mode(&ui.settings, selection).applications.contains(&name)
+    if mode(&ui.settings, selection).is_some_and(|mode| !mode.applications.contains(&name))
         && update_mode(ui, |mode| {
             mode.applications.push(name);
             mode.applications.sort_by_key(|name| name.to_lowercase());
         })
     {
-        ui.modes.application_search = TextEdit::default();
-        ui.modes.application_highlight = Highlight::default();
-        ui.modes.application_search.focused = true;
         ui.modes.application_error = None;
+        close_picker(ui);
     }
+}
+
+/// Closes the application picker, clearing its search.
+pub(super) fn close_picker(ui: &mut Ui) {
+    let modes = &mut ui.modes;
+    modes.application_picker_open = false;
+    modes.application_search = TextEdit::default();
+    modes.application_highlight = Highlight::default();
 }
 
 /// Up and Down move the application search's highlight.
 fn move_application_highlight(ui: &mut Ui, event: &rune::KeyEvent) -> bool {
+    let selected = picked(ui);
     let query = ui.modes.application_query();
-    let count = ui
-        .modes
-        .application_choices(&mode(&ui.settings, ui.modes.selected).applications)
-        .len();
+    let count = ui.modes.application_choices(&selected).len();
     ui.modes
         .application_highlight
         .key(&event.key, &query, count)
@@ -566,9 +672,10 @@ pub(super) fn chosen_application(ui: &mut Ui, result: ChosenApplication) {
 fn drag_transformation(ui: &mut Ui, id: &str, start: usize, pitch: f32, d: &Drag) {
     match d.phase {
         Phase::Down => {
-            let committed = mode(&ui.settings, ui.modes.selected)
-                .transformations
-                .clone();
+            let Some(current) = mode(&ui.settings, ui.modes.selected) else {
+                return;
+            };
+            let committed = current.transformations.clone();
             ui.modes.drag = Some(TransformationDrag {
                 id: id.to_string(),
                 start,
@@ -709,14 +816,16 @@ fn mode_row(
 
 fn detail(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
     let selection = ui.modes.selected;
-    let current = mode(&ui.settings, selection);
+    let Some(current) = mode(&ui.settings, selection) else {
+        return el();
+    };
     let mut content = page("mode-detail-content");
-    content = content.child(basics(ui, p, selection, current));
+    content = content.child(basics(ui, p, selection, current, layer));
     content = content.child(corrections(ui, p));
     content = content.child(processing(ui, p, selection, current, layer));
     content = content.child(transformations(ui, p, current, layer));
     if selection != Selection::Default {
-        let action = if ui.modes.delete_armed {
+        let action = if ui.modes.delete_armed.as_deref() == Some(&current.name) {
             row()
                 .key("delete-actions")
                 .gap(8.0)
@@ -725,7 +834,7 @@ fn detail(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
                     "cancel-delete-mode",
                     tr("Cancel"),
                     ButtonKind::Secondary,
-                    |ui: &mut Ui, _| ui.modes.delete_armed = false,
+                    |ui: &mut Ui, _| ui.modes.delete_armed = None,
                 ))
                 .child(button(
                     p,
@@ -752,19 +861,25 @@ fn detail(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
         .child(super::scroll_body(p.k, "mode-detail-scroll", content))
 }
 
-fn basics(ui: &Ui, p: Paint, selection: Selection, current: &DictationMode) -> El {
+fn basics(
+    ui: &Ui,
+    p: Paint,
+    selection: Selection,
+    current: &DictationMode,
+    layer: &mut Vec<El>,
+) -> El {
     if selection == Selection::Default {
-        return card(
+        let mut rows = vec![setting_row(
             p,
-            "basics-card",
-            vec![setting_row(
-                p,
-                "global",
-                tr("Global"),
-                Some(tr("Used unless a more specific mode matches.")),
-                el().key("none"),
-            )],
-        );
+            "global",
+            tr("Global"),
+            Some(tr("Used unless a more specific mode matches.")),
+            el().key("none"),
+        )];
+        if let Some(speech) = speech_row(ui, p, selection, current, layer) {
+            rows.push(speech);
+        }
+        return card(p, "basics-card", rows);
     }
     let name = TextInput::new(&ui.modes.editor.name)
         .placeholder(tr("Mode name"))
@@ -780,44 +895,20 @@ fn basics(ui: &Ui, p: Paint, selection: Selection, current: &DictationMode) -> E
         .max_w(FIELD_WIDTH);
     for (index, name) in current.applications.iter().enumerate() {
         let remove = name.clone();
-        let icon = ui.modes.named_icon(name);
-        chips = chips.child(
-            row()
-                .key(format!("application{index}"))
-                .h(24.0)
-                .pl(if icon.is_some() { 4.0 } else { 8.0 })
-                .gap(if icon.is_some() { 4.0 } else { 2.0 })
-                .center_y()
-                .radius(p.k.radius.sm)
-                .fill(p.k.c.layer_02)
-                .children(icon.map(|icon| application_icon("icon", &icon, 16.0)))
-                .child(
-                    text(name.clone())
-                        .key("name")
-                        .font(p.k.ty.small_medium)
-                        .color(p.text()),
-                )
-                .child(remove_button(p, ControlSize::Small, move |ui: &mut Ui| {
-                    let remove = remove.clone();
-                    update_mode(ui, |mode| {
-                        mode.applications
-                            .retain(|application| *application != remove)
-                    });
-                })),
-        );
+        chips = chips.child(application_chip(ui, p, index, name, move |ui: &mut Ui| {
+            let remove = remove.clone();
+            update_mode(ui, |mode| {
+                mode.applications
+                    .retain(|application| *application != remove)
+            });
+        }));
     }
     chips = chips.child(
         IconButton::new(PLUS)
             .variant(IconButtonVariant::Neutral)
             .control_size(ControlSize::Small)
             .label(tr("Add application"))
-            .on_press(|ui: &mut Ui| {
-                ui.modes.application_picker_open = !ui.modes.application_picker_open;
-                ui.modes.application_error = None;
-                ui.modes.ensure_applications();
-                ui.modes.application_search = TextEdit::default();
-                ui.modes.application_search.focused = ui.modes.application_picker_open;
-            })
+            .on_press(|ui: &mut Ui| toggle_picker(ui, PickerTarget::Mode))
             .build(p.k)
             .key("open-application-picker"),
     );
@@ -835,16 +926,106 @@ fn basics(ui: &Ui, p: Paint, selection: Selection, current: &DictationMode) -> E
             chips,
         ),
     ];
-    if let Some(error) = &ui.modes.application_error {
+    if let Some(speech) = speech_row(ui, p, selection, current, layer) {
+        rows.push(speech);
+    }
+    let picking = ui.modes.application_picker_open && ui.modes.picker_target == PickerTarget::Mode;
+    if let Some(error) = ui.modes.application_error.as_ref().filter(|_| !picking) {
         rows.push(note("application-error", error, p.danger()));
     }
-    if ui.modes.application_picker_open {
-        rows.push(application_picker(ui, p, current));
+    if picking {
+        application_picker(
+            ui,
+            p,
+            &current.applications,
+            "open-application-picker",
+            layer,
+        );
     }
     card(p, "basics-card", rows)
 }
 
-fn application_picker(ui: &Ui, p: Paint, current: &DictationMode) -> El {
+/// The selected mode's speech model and language, while Labs › Switch model
+/// with app is on; None leaves the Modes pane exactly as it was.
+fn speech_row(
+    ui: &Ui,
+    p: Paint,
+    selection: Selection,
+    current: &DictationMode,
+    layer: &mut Vec<El>,
+) -> Option<El> {
+    if !speech_model::enabled(ui) {
+        return None;
+    }
+    let suffix = match selection {
+        Selection::Default => "global".to_string(),
+        Selection::Custom(index) => index.to_string(),
+    };
+    let key = format!("mode-speech-{suffix}");
+    let model_key = format!("mode-speech-model-{suffix}");
+    let language_key = format!("mode-speech-language-{suffix}");
+    Some(speech_model::setting(
+        ui,
+        p,
+        speech_model::SpeechRow {
+            key: &key,
+            model_key: &model_key,
+            language_key: &language_key,
+            title: tr("Speech model"),
+            description: None,
+            choice: current.speech.clone(),
+            model_menu: Menu::ModeSpeechModel(selection),
+            language_menu: Menu::ModeSpeechLanguage(selection),
+        },
+        // A new choice starts on the model's last-used language, or the
+        // saved one when that model has no recent choice.
+        |_, fallback| fallback.to_owned(),
+        move |ui, choice| {
+            update_mode(ui, |mode| mode.speech = choice);
+        },
+        layer,
+    ))
+}
+
+/// One chosen application: its icon once the catalog lists it, its name,
+/// and a remove button.
+pub(super) fn application_chip(
+    ui: &Ui,
+    p: Paint,
+    index: usize,
+    name: &str,
+    remove: impl Fn(&mut Ui) + 'static,
+) -> El {
+    let icon = ui.modes.named_icon(name);
+    row()
+        .key(format!("application{index}"))
+        .h(24.0)
+        .pl(if icon.is_some() { 4.0 } else { 8.0 })
+        .gap(if icon.is_some() { 4.0 } else { 2.0 })
+        .center_y()
+        .radius(p.k.radius.sm)
+        .fill(p.k.c.layer_02)
+        .children(icon.map(|icon| application_icon("icon", &icon, 16.0)))
+        .child(
+            text(name.to_owned())
+                .key("name")
+                .font(p.k.ty.small_medium)
+                .color(p.text()),
+        )
+        .child(remove_button(p, ControlSize::Small, remove))
+}
+
+/// The catalog search, results, and Choose a file…, floating under the
+/// element keyed `anchor` (the + that opened it), adding to the picker's
+/// target; `selected` is what the target already has. Picking an app, a
+/// click outside, or Escape closes it.
+pub(super) fn application_picker(
+    ui: &Ui,
+    p: Paint,
+    selected: &[String],
+    anchor: &'static str,
+    layer: &mut Vec<El>,
+) {
     let c = &p.k.c;
     let search = TextInput::new(&ui.modes.application_search)
         .placeholder(tr("Search applications"))
@@ -856,9 +1037,9 @@ fn application_picker(ui: &Ui, p: Paint, current: &DictationMode) -> El {
         })
         .on_submit(|ui: &mut Ui, _: &mut Tx| {
             let picked = {
-                let selected = &mode(&ui.settings, ui.modes.selected).applications;
+                let selected = picked(ui);
                 let query = ui.modes.application_query();
-                let choices = ui.modes.application_choices(selected);
+                let choices = ui.modes.application_choices(&selected);
                 ui.modes
                     .application_highlight
                     .index(&query, choices.len())
@@ -870,7 +1051,7 @@ fn application_picker(ui: &Ui, p: Paint, current: &DictationMode) -> El {
         })
         .build(p.k)
         .key("application-search");
-    let choices = ui.modes.application_choices(&current.applications);
+    let choices = ui.modes.application_choices(selected);
     let query = ui.modes.application_query();
     let highlighted = ui.modes.application_highlight.index(&query, choices.len());
     let status = match &ui.modes.applications {
@@ -937,16 +1118,28 @@ fn application_picker(ui: &Ui, p: Paint, current: &DictationMode) -> El {
                 ),
         );
     }
-    col()
+    let mut picker = col()
         .key("application-picker")
-        .ml(METRICS.row_px)
-        .mr(METRICS.row_px)
-        .mb(8.0)
+        .role("dialog")
+        .label(tr("Add application"))
+        .focus_return(anchor)
+        .modal(true, close_picker)
+        .w(PICKER_WIDTH)
+        .shrink()
+        .min_h(0.0)
         .padding(8.0)
         .gap(6.0)
         .radius(p.k.radius.md)
         .fill(c.layer_01)
         .child(search)
+        .children(ui.modes.application_error.as_ref().map(|error| {
+            text(error.clone())
+                .key("application-error")
+                .font(DESCRIPTION)
+                .color(p.danger())
+                .px(8.0)
+                .wrap()
+        }))
         .children(status.map(|status| {
             text(status)
                 .key("status")
@@ -955,25 +1148,35 @@ fn application_picker(ui: &Ui, p: Paint, current: &DictationMode) -> El {
                 .px(8.0)
                 .py(6.0)
         }))
-        .child(results)
         .child(
-            row()
-                .key("picker-actions")
-                .justify_between()
-                .child(choose_file_button(p))
-                .child(spacer())
-                .child(button(
-                    p,
-                    "close-application-picker",
-                    tr("Done"),
-                    ButtonKind::Secondary,
-                    |ui: &mut Ui, _| {
-                        ui.modes.application_picker_open = false;
-                        ui.modes.application_search = TextEdit::default();
-                    },
-                )),
+            col()
+                .key("viewport")
+                .shrink()
+                .min_h(0.0)
+                .max_h(PICKER_RESULTS_HEIGHT)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(results),
         )
+        .child(row().key("picker-actions").child(choose_file_button(p)))
+        .anchored_fit(anchor, Side::Bottom, Align::Start, 4.0);
+    for shadow in &p.k.elevation.floating {
+        picker = picker.box_shadow(*shadow);
+    }
+    layer.push(
+        el().key("application-picker-scrim")
+            .role("none")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .on_press(close_picker),
+    );
+    layer.push(picker);
 }
+
+const PICKER_WIDTH: f32 = 340.0;
+const PICKER_RESULTS_HEIGHT: f32 = 320.0;
 
 /// "Choose a file…" opens the native file dialog.
 fn choose_file_button(p: Paint) -> El {
@@ -1093,9 +1296,10 @@ fn processing(
     let toggle = Switch::new(enabled)
         .disabled(!can_toggle)
         .on_toggle(|ui: &mut Ui| {
-            let enabled = !mode(&ui.settings, ui.modes.selected)
-                .post_processing
-                .enabled;
+            let Some(current) = mode(&ui.settings, ui.modes.selected) else {
+                return;
+            };
+            let enabled = !current.post_processing.enabled;
             update_mode(ui, |mode| mode.post_processing.enabled = enabled);
         })
         .build(p.k)
@@ -1202,6 +1406,12 @@ pub(super) fn fixture(ui: &mut Ui) {
             description: None,
         },
     ];
+    fixture_catalog(ui);
+    ui.modes.select_in(&ui.settings, Selection::Custom(0));
+}
+
+/// The fixture's installed applications and their stand-in icons.
+pub(super) fn fixture_catalog(ui: &mut Ui) {
     let app = |name: &str, path: &str| InstalledApplication {
         name: name.into(),
         bundle_id: None,
@@ -1238,7 +1448,6 @@ pub(super) fn fixture(ui: &mut Ui) {
         )
     });
     ui.modes.icons.get_mut().extend(icons);
-    ui.modes.select_in(&ui.settings, Selection::Custom(0));
 }
 
 const FIXTURE_ICON: u32 = 48;
@@ -1265,7 +1474,120 @@ fn fixture_icon(rgb: [u8; 3]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::reorder_transformation;
+    use super::*;
+
+    fn settings() -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.dictation_processing.modes = ["First", "Second"]
+            .map(|name| DictationMode {
+                name: name.into(),
+                ..Default::default()
+            })
+            .to_vec();
+        settings
+    }
+
+    #[test]
+    fn dirty_name_keeps_only_that_field_when_other_fields_change() {
+        let mut settings = settings();
+        let mut pane = ModesPane::new(&settings);
+        pane.select_in(&settings, Selection::Custom(1));
+        pane.editor.name.text = "Draft".into();
+        settings.dictation_processing.modes[1]
+            .post_processing
+            .prompt = "From CLI".into();
+        settings.dictation_processing.modes[1]
+            .post_processing
+            .deadline_seconds = 17;
+        pane.adopt(&settings, true);
+        pane.project(&mut settings);
+        let saved = &settings.dictation_processing.modes[1];
+        assert_eq!(saved.name, "Draft");
+        assert_eq!(saved.post_processing.prompt, "From CLI");
+        assert_eq!(saved.post_processing.deadline_seconds, 17);
+    }
+
+    #[test]
+    fn adding_a_correction_focuses_the_one_row_the_save_adopted() {
+        let mut ui = Ui::with(settings(), super::super::Service::Fixture(Vec::new()));
+        ui.modes.select_in(&ui.settings, Selection::Custom(1));
+        let before = ui.modes.editor.replacements.len();
+        add_replacement(&mut ui);
+        assert_eq!(ui.modes.editor.replacements.len(), before + 1);
+        let phrase = &mut ui.modes.editor.replacements.last_mut().unwrap().0;
+        assert!(phrase.focused);
+        phrase.text = "example".into();
+        // Adding again also commits the first row's pending text.
+        add_replacement(&mut ui);
+        assert_eq!(ui.modes.editor.replacements.len(), before + 2);
+        assert!(ui.modes.editor.replacements.last().unwrap().0.focused);
+        ui.flush_drafts();
+        assert_eq!(
+            ui.settings.dictation_processing.modes[1].replacements[before].matched_phrase,
+            "example"
+        );
+    }
+
+    #[test]
+    fn older_revisions_cannot_undo_a_save_and_newer_reverts_are_adopted() {
+        let mut settings = settings();
+        settings.source.revision = 1;
+        let mut ui = Ui::with(settings.clone(), super::super::Service::Fixture(Vec::new()));
+        ui.service_settings = Some(settings.clone());
+        ui.settings.sound_effect_volume = 0.37;
+        ui.settings.source.revision = 3;
+        assert!(!ui.adopt(settings.clone()));
+        assert_eq!(ui.settings.sound_effect_volume, 0.37);
+        settings.source.revision = 4;
+        assert!(ui.adopt(settings.clone()));
+        assert_eq!(
+            ui.settings.sound_effect_volume,
+            settings.sound_effect_volume
+        );
+    }
+
+    #[test]
+    fn removed_mode_discards_its_dirty_editor_and_confirmation() {
+        let mut settings = settings();
+        let mut pane = ModesPane::new(&settings);
+        pane.select_in(&settings, Selection::Custom(1));
+        pane.editor.name.text = "Draft".into();
+        pane.delete_armed = Some("Second".into());
+        settings.dictation_processing.modes.pop();
+        pane.adopt(&settings, true);
+        assert_eq!(pane.selected, Selection::Default);
+        assert!(pane.delete_armed.is_none());
+        pane.project(&mut settings);
+        assert_eq!(settings.dictation_processing.modes[0].name, "First");
+        assert!(mode(&settings, Selection::Custom(1)).is_none());
+        assert!(mode_mut(&mut settings, Selection::Custom(1)).is_none());
+    }
+
+    #[test]
+    fn reordered_modes_keep_drafts_and_confirmation_on_the_saved_name() {
+        let mut settings = settings();
+        let mut pane = ModesPane::new(&settings);
+        pane.select_in(&settings, Selection::Custom(1));
+        pane.editor.name.text = "Draft".into();
+        pane.delete_armed = Some("Second".into());
+        settings.dictation_processing.modes.swap(0, 1);
+        pane.adopt(&settings, true);
+        assert_eq!(pane.selected, Selection::Custom(0));
+        assert_eq!(pane.delete_armed.as_deref(), Some("Second"));
+        pane.project(&mut settings);
+        assert_eq!(settings.dictation_processing.modes[0].name, "Draft");
+        assert_eq!(settings.dictation_processing.modes[1].name, "First");
+    }
+
+    #[test]
+    fn ambiguous_names_never_retarget_a_draft() {
+        let mut settings = settings();
+        let mut pane = ModesPane::new(&settings);
+        pane.select_in(&settings, Selection::Custom(1));
+        settings.dictation_processing.modes[0].name = "Second".into();
+        pane.adopt(&settings, true);
+        assert_eq!(pane.selected, Selection::Default);
+    }
 
     #[test]
     fn transformations_reorder_in_both_directions() {
