@@ -897,6 +897,7 @@ impl Ui {
     }
 
     fn commit(&mut self, mut candidate: AppSettings) -> bool {
+        let drafted = candidate.clone(); // what the editors hold, before any rebase
         if let Err(error) = self.rebase_profile_candidate(&mut candidate) {
             self.error = Some(error);
             return false;
@@ -914,9 +915,6 @@ impl Ui {
             Service::Pending(_) => {}
         }
         self.error = None;
-        if candidate.vocabulary != submitted.vocabulary {
-            self.vocabulary.reload(&candidate.vocabulary);
-        }
         self.lab_store.rebase_phrase(
             &submitted.labs.voice_prompt_phrase,
             &candidate.labs.voice_prompt_phrase,
@@ -929,7 +927,7 @@ impl Ui {
             &submitted.labs.api_browser_origins,
             &candidate.labs.api_browser_origins,
         );
-        self.sync_rebased_editors(&submitted, &candidate);
+        self.sync_rebased_editors(&drafted, &candidate);
         self.settings = candidate;
         self.modes.committed(&self.settings);
         self.draft_since = None;

@@ -47,8 +47,10 @@ strip = true
 # shaders Hex's models use (see `CMAKE_ARGS` in .cargo/config.toml),
 # Parakeet's vocabulary rescoring (branch hex/parakeet-vocabulary), and a Metal
 # residency heartbeat that sleeps once its keep-alive runs out (branch
-# hex/metal-idle-residency), plus per-run Metal command-buffer scheduling
-# for live previews. Drop these patches once a transcribe.cpp release carries them.
+# hex/metal-idle-residency), per-run Metal command-buffer scheduling for live
+# previews, and upstream's vocabulary sounds-like fixes (hex/vocabulary-sounds-like),
+# combined on branch hex-combined-20261118. Drop these patches once a
+# transcribe.cpp release carries them.
 [patch.crates-io]
 transcribe-cpp = { git = "https://github.com/Techie5879/transcribe.cpp", rev = "c76002365904bfab993bb3e2f589d7a49632719e" }
 transcribe-cpp-sys = { git = "https://github.com/Techie5879/transcribe.cpp", rev = "c76002365904bfab993bb3e2f589d7a49632719e" }
@@ -153,8 +155,6 @@ anyhow = "1.0.104"
 rune-motion = { git = "https://github.com/anomalyco/rune.git", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
 scrawl-capture = { path = "crates/capture", default-features = false, features = ["screen", "helper"] }
 pollster = "1.0.1"
-# Screenshot PNGs and the screenshot editor's export.
-png = "0.18"
 # The local API's `/profile/vitals`; it reports nothing off macOS.
 procwatch = { git = "https://github.com/anomalyco/rune.git", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90" }
 rune = { git = "https://github.com/anomalyco/rune.git", rev = "eb5ae6c9f77b1a0051d8e1e5ee936ebea086bb90", features = ["native-file-dialog", "macos-background-cursor"] }

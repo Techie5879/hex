@@ -3711,10 +3711,10 @@ Meeting speaker names join Meetings. All six keep their saved keys and remain
 off by default. The compressed archive's `audio_retention` still defaults to
 Forever, independently of text History and the upstream Keep recordings lab.
 
-Stop when the call ends now appears in Meetings settings, as upstream does.
-The fork also applies it to accepted call offers. Its old
-`labs.stop_when_call_ends` key remains a writable alias for
-`meetings.stop_when_call_ends`, and saved values are carried forward.
+Stop when the call ends is upstream's Meetings setting
+(`meetings.stop_when_call_ends`); the fork also applies it to accepted call
+offers. A saved `labs.stop_when_call_ends: true` carries over once through
+upstream's `meeting-labs-settings` migration.
 
 Shared room remains a switch on the active meeting. Its manifest key is
 `mode`, and every new recording starts in Standard mode. The retired global

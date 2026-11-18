@@ -84,11 +84,6 @@ const MODEL_CHANGE: &str = "change the transcription model with `hex model use`"
 
 pub(super) const KEYS: &[Key] = &[
     key(
-        "labs.stop_when_call_ends",
-        Kind::Bool,
-        "Compatibility key for Meetings: stop a detected call's recording when its call ends",
-    ),
-    key(
         "audio_retention",
         Kind::Choice(&["off", "day", "week", "month", "forever"]),
         "How long compressed dictation recordings are kept; independent of text history",
@@ -991,7 +986,6 @@ pub(super) const NEEDS: &[(&str, &str)] = &[
     ("meetings.calendar.", "calendar"),
     ("meetings.", "meetings"),
     ("labs.live_chapters", "meetings"),
-    ("labs.stop_when_call_ends", "meetings"),
     ("experimental.hex_microphone", "fun"),
     ("typed_text_hotkey", "typed_text"),
     ("show_dock_icon", "dock_icon"),

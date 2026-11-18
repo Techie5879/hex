@@ -212,13 +212,8 @@ fn unknown(name: &str) -> ControlError {
 }
 
 fn value_of(key: &Key, json: &Value) -> SettingValue {
-    let source_key = if key.key == "labs.stop_when_call_ends" {
-        "meetings.stop_when_call_ends"
-    } else {
-        key.key
-    };
     let raw = json
-        .pointer(&pointer(source_key))
+        .pointer(&pointer(key.key))
         .cloned()
         .unwrap_or(Value::Null);
     let value = match key.kind {
@@ -260,13 +255,6 @@ pub fn apply(
     raw: &str,
     shortcuts: &ShortcutRules,
 ) -> Result<Change, ControlError> {
-    if name == "labs.stop_when_call_ends" {
-        let mut change = apply(settings, "meetings.stop_when_call_ends", raw, shortcuts)?;
-        change.settings.labs.stop_when_call_ends =
-            Some(change.settings.meetings.stop_when_call_ends);
-        change.message = format!("Set {name}");
-        return Ok(change);
-    }
     if name == RECOGNITION_HINTS {
         let mut candidate = settings.clone();
         crate::dictation::vocabulary::fold_hints(&mut candidate.vocabulary, raw);
@@ -1792,27 +1780,5 @@ mod tests {
         ] {
             assert!(apply_all(&settings, &values(refused), &rules()).is_err());
         }
-    }
-    #[test]
-    fn the_fork_call_stop_key_and_meeting_setting_share_one_choice() {
-        let settings = AppSettings::default();
-        assert_eq!(
-            get(&settings, "labs.stop_when_call_ends").unwrap()[0].value,
-            false
-        );
-        let enabled = apply(&settings, "labs.stop_when_call_ends", "true", &rules()).unwrap();
-        assert!(enabled.settings.meetings.stop_when_call_ends);
-        assert_eq!(enabled.settings.labs.stop_when_call_ends, Some(true));
-        let disabled = apply(
-            &enabled.settings,
-            "meetings.stop_when_call_ends",
-            "false",
-            &rules(),
-        )
-        .unwrap();
-        assert_eq!(
-            get(&disabled.settings, "labs.stop_when_call_ends").unwrap()[0].value,
-            false
-        );
     }
 }

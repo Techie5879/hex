@@ -34,7 +34,7 @@ secret. `.github/workflows/` (Release, Deploy) and
   nothing swapped in between jobs is signed or published.
 
 ```ts
-Release (workflow_dispatch: ref + channel check | dev | stable (from production))
+Release (workflow_dispatch on dev: channel check | dev | stable; this fork has no push trigger)
 ├─ plan                     .github/release/plan.sh: version, channel, tag, notes
 ├─ build                    build-desktop.yml: Linux x64 + ARM64 (Ubuntu 24.04) executables, .deb,  [build]
 │                           .rpm (installed and run on Ubuntu and Fedora); Windows x64 + ARM64
@@ -114,7 +114,7 @@ production site.
 
 | Environment | Branches | Reviewers | Used by | AWS role |
 | --- | --- | --- | --- | --- |
-| `release` | `dev`, `production` | none | Release sign and publish jobs, aur-check | `role/github/hex-release` |
+| `release` | `dev` | none | Release sign and publish jobs, aur-check | `role/github/hex-release` |
 | `dev` | `dev` | none | Deploy, from `dev` | `role/github/hex-dev` |
 | `production` | `production` | none | Deploy, from `production` | `role/github/hex-production` |
 
@@ -186,8 +186,8 @@ secrets; the `homebrew` job pushes that verified file with the tap deploy key
   the Dev channel check every 10 minutes and when the window opens or gains
   focus (at most once a minute), so a push reaches them within minutes of its
   run finishing.
-- `stable`, dispatched from `production` (`gh workflow run release.yml
-  --ref production -f channel=stable`), publishes the crate
+- `stable`, dispatched from `dev` (`gh workflow run release.yml
+  --ref dev -f channel=stable`), publishes the crate
   version from `Cargo.toml` to `https://anoma.ly/release`, the AUR, and
   Homebrew. It needs every platform signed and `docs/releases/<version>.md`,
   and refuses a version already tagged `v<version>` or `app-v<version>`.
@@ -405,8 +405,7 @@ the release service compile `https://anoma.ly/release`.
 
 Release secrets live in AWS Secrets Manager (account `anomaly-secrets`), managed from
 [anomalyco/secrets](https://github.com/anomalyco/secrets). Jobs in the `release` environment
-(limited to `dev` and `production`; `dev` is allowed because dev-channel builds run from it,
-and no reviewer is required) assume `role/github/hex-release` with
+(limited to the `dev` branch, with no required reviewer) assume `role/github/hex-release` with
 GitHub OIDC and fetch only what they use. That role can read `hex/release/*` and the shared Apple, AUR and Homebrew
 secrets. Set a value with `bun set hex release <NAME>` in that repo.
 

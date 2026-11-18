@@ -277,10 +277,12 @@ pub struct LabsSettings {
     /// id; a group not here is open while it holds a lab that's on.
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub groups: std::collections::BTreeMap<String, bool>,
-    /// The fork's original call-stop key, kept in sync with Meetings settings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Retired switches the `meeting-labs-settings` migration reads into
+    /// `meetings.*` once: `meetings.stop_when_call_ends`,
+    /// `meetings.export.descriptive_filenames`, `meetings.export.notes_file`,
+    /// and whether `meetings.audio_retention` stays. Never written.
+    #[serde(skip_serializing)]
     pub stop_when_call_ends: Option<bool>,
-    /// Other retired meeting switches are migrated once and never written.
     #[serde(skip_serializing)]
     pub meeting_descriptive_filenames: Option<bool>,
     #[serde(skip_serializing)]
@@ -457,7 +459,7 @@ impl Default for LabsSettings {
             copy_capture_zip: false,
             meeting_import: false,
             groups: std::collections::BTreeMap::new(),
-            stop_when_call_ends: Some(false),
+            stop_when_call_ends: None,
             meeting_descriptive_filenames: None,
             meeting_notes_file: None,
             expire_meeting_audio: None,

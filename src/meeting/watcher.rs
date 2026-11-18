@@ -1117,13 +1117,6 @@ fn withdraw_stop(
     true
 }
 
-/// Whether a recording stops on its own once its call ends: only one Hex
-/// started automatically (Always record), and only with Stop when
-/// the call ends on. Manual and offered recordings never do.
-fn stops_when_call_ends(automatic: bool, lab_on: bool) -> bool {
-    automatic && lab_on
-}
-
 /// Whether the call app still plays audio; a failed read counts as playing,
 /// so it never stops a recording.
 fn call_app_playing(application: &str) -> bool {
@@ -1534,16 +1527,6 @@ mod tests {
                 .poll(std::slice::from_ref(&meeting), 100 * MINUTE, MINUTE),
             None
         );
-    }
-
-    #[test]
-    fn only_automatic_recordings_stop_when_the_call_ends_and_only_with_the_lab_on() {
-        assert!(stops_when_call_ends(true, true));
-        // Manual, offered, and calendar recordings never stop on their own.
-        assert!(!stops_when_call_ends(false, true));
-        // The toggle off leaves every recording running until Stop.
-        assert!(!stops_when_call_ends(true, false));
-        assert!(!stops_when_call_ends(false, false));
     }
 
     #[test]

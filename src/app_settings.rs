@@ -1609,7 +1609,7 @@ mod tests {
             Off
         );
 
-        // The fork's original key stays writable even after migration.
+        // Later choices stick.
         let mut settings: AppSettings = serde_json::from_str(
             r#"{"meetings":{"summaries":"off","summarize_with_opencode":true},"migrations":["meeting-summaries-choice"]}"#,
         )
@@ -1629,6 +1629,7 @@ mod tests {
             assert!(settings.has_migration(MEETING_LABS_SETTINGS_MIGRATION));
             let written = serde_json::to_value(&settings).unwrap();
             for retired in [
+                "stop_when_call_ends",
                 "meeting_descriptive_filenames",
                 "meeting_notes_file",
                 "expire_meeting_audio",
@@ -1653,13 +1654,13 @@ mod tests {
         assert!(!lab_off.export.notes_file);
         assert_eq!(lab_off.audio_retention, None);
 
-        // The fork's original key stays writable even after migration.
+        // Later choices stick.
         let mut settings: AppSettings = serde_json::from_str(
             r#"{"labs":{"stop_when_call_ends":true},"meetings":{"audio_retention":"day"},"migrations":["meeting-labs-settings"]}"#,
         )
         .unwrap();
         settings.apply_one_time_migrations_with(|_| true);
-        assert!(settings.meetings.stop_when_call_ends);
+        assert!(!settings.meetings.stop_when_call_ends);
         assert_eq!(
             settings.meetings.audio_retention,
             Some(MeetingRetention::Day)

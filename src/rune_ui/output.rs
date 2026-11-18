@@ -775,7 +775,9 @@ fn agent_prompt(fix: Option<(&str, &str)>) -> String {
          \"<provider/model>\", \"deadline_seconds\": 30}}. Leave `model` out and Hex \
          picks a fast one you have connected; set it only if I ask for a particular \
          model (`opencode2 models` lists them). \
-         If the rewrite fails or runs past the deadline, Hex pastes the text without it.\n\
+         If the rewrite fails or runs past the deadline, Hex pastes the text without it. \
+         With `labs.local_polish` on, local SpeakoFlow cleanup runs first with basic \
+         cleanup instructions; the custom prompt goes only to OpenCode.\n\
          \n\
          Built-in transformations: {builtins}. Others are functions in ~/.config/hex/hex.config.ts \
          (run `hex commands init` for its typings; the API, including fetch and \
@@ -852,6 +854,40 @@ pub(super) fn trust_fixture(ui: &mut Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_lists_local_then_opencode_then_transformations() {
+        let mut ui = Ui::fixture_base();
+        ui.settings.labs.local_polish = true;
+        let mode = DictationMode {
+            transformations: vec!["lowercase".into()],
+            post_processing: crate::app_settings::DictationPostProcessing {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let titles = |mode: &DictationMode| {
+            steps(&ui, mode)
+                .into_iter()
+                .map(|step| step.title)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            titles(&mode),
+            [
+                "Clean up locally with SpeakoFlow",
+                "Rewrite with OpenCode",
+                "Lowercase"
+            ]
+        );
+        let mut local_only = mode;
+        local_only.post_processing.enabled = false;
+        assert_eq!(
+            titles(&local_only),
+            ["Clean up locally with SpeakoFlow", "Lowercase"]
+        );
+    }
 
     #[test]
     fn every_built_in_transformation_has_a_step_name() {

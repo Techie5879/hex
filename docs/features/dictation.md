@@ -2935,7 +2935,7 @@ save or application restart. These pending files can temporarily use more disk.
 Files live in `~/Library/Application Support/hex/dictation-audio/`, named with
 capture completion time, a random suffix and `completed` or `cancelled`.
 The folder is owner-only and audio files are mode 0600. No upload occurs.
-History's separate Audio menu sets `audio_retention` to Off, 24 hours, 7 days,
+The Save dictation audio card in Labs, while it's on, sets `audio_retention` to Off, 24 hours, 7 days,
 30 days or Forever. The default is Forever. Choosing a timed period expires
 older recordings at their capture completion time, checked after encoding and
 every minute. Off stops new audio saves but keeps existing files, as does
@@ -2947,7 +2947,7 @@ Implementation: [audio_archive.rs](../../src/dictation/audio_archive.rs) and
 capture completion/cancellation in [dictation.rs](../../src/dictation.rs),
 [audio.rs](../../src/dictation/audio.rs), and [parakeet.rs](../../src/parakeet.rs).
 The Linux headless UI check `audio_retention_menu_defaults_to_forever_and_does_not_change_text_retention`
-exercises the macOS menu from fixture data. Tests cover expiry boundaries, leaving unrelated files alone, unique private
+exercises that card's menu from fixture data. Tests cover expiry boundaries, leaving unrelated files alone, unique private
 staging, frame counts and preserving recoverable
 WAVs after encoder failure. The ignored `installed_encoder_round_trip` test
 encodes synthetic audio with the installed ffmpeg and decodes it to verify

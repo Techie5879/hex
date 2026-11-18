@@ -560,11 +560,6 @@ impl AppSettings {
     /// their switches over once; a separate audio retention stays only if
     /// its lab was on, since it applied only then.
     pub(super) fn migrate_meeting_labs(&mut self) {
-        // Older fork builds still write this key. A present value remains
-        // authoritative; the new Settings/CLI paths write both names.
-        if let Some(on) = self.labs.stop_when_call_ends {
-            self.meetings.stop_when_call_ends = on;
-        }
         if !self.has_migration(MEETING_LABS_SETTINGS_MIGRATION) {
             let labs = &self.labs;
             self.meetings.stop_when_call_ends |= labs.stop_when_call_ends == Some(true);
@@ -576,7 +571,7 @@ impl AppSettings {
             }
             self.migrations.push(MEETING_LABS_SETTINGS_MIGRATION.into());
         }
-        self.labs.stop_when_call_ends = Some(self.meetings.stop_when_call_ends);
+        self.labs.stop_when_call_ends = None;
         self.labs.meeting_descriptive_filenames = None;
         self.labs.meeting_notes_file = None;
         self.labs.expire_meeting_audio = None;

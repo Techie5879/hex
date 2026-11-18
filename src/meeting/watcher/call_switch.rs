@@ -7,7 +7,7 @@ use std::sync::mpsc::SyncSender;
 
 use crate::meeting::detection::{AutoStop, CallSwitch, MeetingDetector};
 
-use super::{ActiveRecording, ControllerEvent, stops_when_call_ends, withdraw_stop};
+use super::{ActiveRecording, ControllerEvent, withdraw_stop};
 
 /// The page names the recorded call again (or one the user kept): whatever
 /// change was counting is over, so its stop never fires and its notice goes.
@@ -58,6 +58,7 @@ pub(super) fn watching_call_switch(recording: Option<&ActiveRecording>, lab_on: 
             && active.application.as_deref().is_some_and(|application| {
                 crate::microphone_activity::is_browser_id(Some(application))
             })
-            && stops_when_call_ends(active.origin.stops_when_call_ends(), lab_on)
+            && lab_on
+            && active.origin.stops_when_call_ends()
     })
 }

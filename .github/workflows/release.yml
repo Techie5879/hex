@@ -26,12 +26,14 @@ name: Release
 # a ruleset lets only Dax change .github/ (docs/releasing.md).
 #
 # There is one environment, release, like OpenCode's: no approval, deployment
-# policy dev and production. Stable publishes only from production.
-# The service authorizes publish jobs by their OIDC token and environment.
+# policy dev only. The service authorizes publish jobs by their OIDC token:
+# anomalyco/hex, this file, refs/heads/dev, environment release
+# (anomalyco/release registry/hex.json).
 # Hex never uses the service's dev stage.
 #
 # Channels (.github/release/plan.sh):
-# - dev: an explicit dispatch from dev publishes
+# - dev: an explicit dispatch from dev publishes (this fork runs Release only
+#   when dispatched; see AGENTS.md "Fork automation policy")
 #   0.0.0-dev-<run number> on the dev channel, as OpenCode numbers dev builds;
 #   a running release finishes and only the newest push waits behind it
 #   (the ones between are skipped). Only signed platforms are
@@ -40,20 +42,20 @@ name: Release
 # - check: a dispatch from dev builds, signs, and verifies the same and
 #   publishes nothing; its last job pushes and deletes a throwaway
 #   v0.0.0-test-<run> tag to prove it can tag.
-# - stable: a dispatch from production publishes the crate version with every
+# - stable: a dispatch from dev publishes the crate version with every
 #   platform signed, the AUR, and Homebrew. Tags trigger nothing: only after
 #   everything published does the last job tag v<version> on the released
-#   commit and create the GitHub release, so a failed run leaves no tag. Deploy the production site afterwards with Deploy.
+#   commit and create the GitHub release. Site deployment is separate.
 #
 # A run always releases the commit it runs on (github.sha): there is no ref
 # input, every job checks out github.sha, and plan.sh fails unless the commit
 # it checked out is github.sha. So the scripts the release-environment jobs
-# run are always this workflow's own commit of dev or production.
+# run are always this workflow's own commit of dev.
 on:
   workflow_dispatch:
     inputs:
       channel:
-        description: Run check or dev from dev; run stable from production.
+        description: Run from dev. Select check (build, sign, and verify), dev (dev channel), or stable (public release).
         type: choice
         options: [check, dev, stable]
         default: check
@@ -75,7 +77,7 @@ env:
 
 jobs:
   plan:
-    if: github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/production'
+    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.plan.outputs.version }}
@@ -114,8 +116,8 @@ jobs:
       channel: ${{ needs.plan.outputs.release-channel }}
 
   # ---- Full test suites: check and stable only; repository code, no secrets ---
-  # This fork starts compile checks and releases only by explicit dispatch.
-  # The candidate's full suites run here. A stable run publishes nothing
+  # Pull requests only compile and dev pushes run no checks (CI is minimal),
+  # so the candidate's full suites run here. A stable run publishes nothing
   # until all three pass.
 
   check-linux:
@@ -194,7 +196,7 @@ jobs:
   # signs it with the Developer ID.
   build-macos:
     needs: plan
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-26
     timeout-minutes: 120
     env:
       HEX_VERSION: ${{ needs.plan.outputs.release-version }}
@@ -481,7 +483,7 @@ jobs:
   verify-macos:
     needs: [plan, sign-macos]
     if: ${{ !cancelled() && needs.sign-macos.result == 'success' && needs.sign-macos.outputs.signed == 'true' }}
-    runs-on: blacksmith-6vcpu-macos-26
+    runs-on: macos-26
     timeout-minutes: 30
     env:
       HEX_VERSION: ${{ needs.plan.outputs.release-version }}
@@ -741,7 +743,7 @@ jobs:
     name: Homebrew cask
     needs: [plan, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.channel == 'stable' }}
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-15
     env:
       RELEASE: ${{ needs.plan.outputs.service }}
       HEX_VERSION: ${{ needs.plan.outputs.release-version }}

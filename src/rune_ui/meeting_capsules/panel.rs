@@ -40,9 +40,17 @@ pub(super) fn recording_notice(shown: &Recording) -> Option<Notice> {
     } else if shown.automatic && shown.started.elapsed() < AUTOMATIC_LABEL {
         Some(Notice::Automatic)
     } else {
+        // Only snapshot states that need the person: the rest pill stays
+        // compact while snapshots run normally.
+        use meeting::snapshots::Status;
         shown
             .snapshots
-            .filter(|status| *status != meeting::snapshots::Status::Off)
+            .filter(|status| {
+                matches!(
+                    status,
+                    Status::PermissionRequired | Status::LimitReached | Status::Failed
+                )
+            })
             .map(Notice::Snapshot)
     }
 }

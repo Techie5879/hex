@@ -311,15 +311,6 @@ impl AppSettings {
         let mut merged = json(&current)?;
         merge(&mut merged, &json(self)?, &json(candidate)?);
         let mut merged: Self = serde_json::from_value(merged)?;
-        // The fork's original stop key remains a writable compatibility alias.
-        // Both the Meetings row and old clients persist the same choice.
-        if candidate.labs.stop_when_call_ends != self.labs.stop_when_call_ends
-            && candidate.meetings.stop_when_call_ends == self.meetings.stop_when_call_ends
-        {
-            merged.meetings.stop_when_call_ends =
-                candidate.labs.stop_when_call_ends.unwrap_or(false);
-        }
-        merged.labs.stop_when_call_ends = Some(merged.meetings.stop_when_call_ends);
         // The merge can land the dictation shortcut on a shortcut the file
         // already had, so both are held to the same rule a load repairs.
         merged.clear_shortcuts_sharing_dictation();
