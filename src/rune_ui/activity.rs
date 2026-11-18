@@ -80,6 +80,7 @@ impl ActivityPane {
                 processing: Some(DictationProcessing {
                     profile: "Chat".into(),
                     latency_ms: 910,
+                    model: Some("anthropic/claude-haiku-4-5".into()),
                     fallback: None,
                 }),
                 reason: None,
@@ -144,7 +145,7 @@ pub(super) fn pane(ui: &Ui, p: Paint) -> (Vec<El>, El) {
                 .center_y()
                 .child(status_dot(if active { p.success() } else { p.muted() }))
                 .child(
-                    text(tr(state))
+                    text(tr(state.name()))
                         .key("state")
                         .font(DESCRIPTION)
                         .color(p.text()),

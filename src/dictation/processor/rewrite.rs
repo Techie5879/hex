@@ -41,6 +41,7 @@ impl Profile {
                 _ => self.name.clone(),
             },
             latency_ms: started.elapsed().as_millis() as u64,
+            model: None,
             fallback: (!failures.is_empty()).then(|| failures.join("; ")),
         });
         if let Some(observation) = &observation {
@@ -52,6 +53,7 @@ impl Profile {
             );
         }
         Processed {
+            nothing: false,
             text,
             observation,
             transformations: self.transformations.clone(),
@@ -65,6 +67,59 @@ fn apply(text: &mut String, result: Result<String>, stage: &str, failures: &mut 
         Ok(_) => failures.push(format!("{stage}: processor returned empty text")),
         Err(error) => failures.push(format!("{stage}: {error}")),
     }
+}
+
+pub(super) fn generate_with_provider_fallback(
+    prompt: &str,
+    model: Option<&Model>,
+    provider: Option<&str>,
+    deadline: Duration,
+    cancelled: &AtomicBool,
+) -> Result<Generated> {
+    let (Some(model), Some(provider)) = (model, provider) else {
+        return generate_cancellable(prompt, model, deadline, cancelled);
+    };
+    let started = Instant::now();
+    let service = generation_service(started, deadline, cancelled)?;
+    let mut answered = model.clone();
+    let text = generation::generate_with_quota_fallback(
+        prompt,
+        model,
+        provider,
+        started,
+        deadline,
+        cancelled,
+        |data, remaining, cancelled| {
+            let request: serde_json::Value = serde_json::from_str(data)?;
+            if let Some(provider) = request["model"]["providerID"].as_str() {
+                answered.provider = provider.to_owned();
+            }
+            post_generation(&service, data, remaining, cancelled)
+        },
+    )?;
+    Ok(Generated {
+        text,
+        model: Some(answered),
+    })
+}
+
+pub(super) fn vocabulary_lines(vocabulary: &[VocabularyEntry]) -> String {
+    if vocabulary.is_empty() {
+        return String::new();
+    }
+    let terms = vocabulary
+        .iter()
+        .map(|entry| match entry.sounds_like.as_slice() {
+            [] => entry.term.clone(),
+            spellings => format!(
+                "{} (may be transcribed as {})",
+                entry.term,
+                spellings.join(", ")
+            ),
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!("Vocabulary (spell these exactly when the speaker means them): {terms}\n\n")
 }
 
 #[cfg(test)]

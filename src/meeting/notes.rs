@@ -63,14 +63,16 @@ Only labels other than these four identify the participant the call app showed \
 speaking. A long meeting is excerpted, and […] marks skipped parts. Write \
 one short, specific title for the whole meeting and a summary of at most two short sentences \
 on the main topics and outcomes. Use only what the transcript says; never invent names, dates, \
-or numbers.";
+or numbers. You MUST write the title and summary in the language spoken in the transcript, even \
+though these instructions are in English; never translate them.";
 
 const TITLE_INSTRUCTIONS: &str = "You name meetings from the first part of their transcript. \
 Each line starts with a timestamp and a speaker label: You is the person who recorded the \
 meeting, Them is one or more other participants. Room mic and Call audio label capture paths, \
 not individual people. Only labels other than these four name a participant. Write \
 one short, specific title naming \
-the main topic. Use only what the transcript says.";
+the main topic. Use only what the transcript says. You MUST write the title in the language \
+spoken in the transcript, even though these instructions are in English; never translate it.";
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MeetingNotes {
@@ -286,8 +288,8 @@ fn calendar_preamble(calendar: Option<&super::MeetingCalendar>) -> String {
     preamble
 }
 
-/// [`summarize_entries`] with the vocabulary's `terms` (Labs › Vocabulary
-/// in meeting notes; empty leaves them out) and the calendar event as
+/// [`summarize_entries`] with the vocabulary's `terms` (empty leaves them
+/// out) and the calendar event as
 /// context. Both count against the excerpt budget.
 pub(super) fn summarize_with_calendar(
     entries: &[TranscriptEntry],
@@ -448,19 +450,36 @@ pub(super) fn render_notes_block(notes: &MeetingNotes) -> String {
 }
 
 /// The line under the summary, naming the writer that actually wrote it.
-fn notes_footer(writer: Option<&NotesWriter>) -> String {
-    const DETAILS: &str = "the transcript below has the details.";
+pub(super) fn notes_footer(writer: Option<&NotesWriter>) -> String {
+    notes_footer_for(
+        writer,
+        "the transcript below has the details.",
+        "The transcript below has the details.",
+    )
+}
+
+/// The line under the separate notes file's summary: the same writer, but
+/// pointing at the linked transcript rather than the one below.
+pub(super) fn notes_file_footer(writer: Option<&NotesWriter>) -> String {
+    notes_footer_for(
+        writer,
+        "the transcript has the details.",
+        "The transcript has the details.",
+    )
+}
+
+fn notes_footer_for(writer: Option<&NotesWriter>, details: &str, without_a_writer: &str) -> String {
     match writer {
         Some(NotesWriter::AppleIntelligence) => {
-            format!("Written on this Mac by Apple Intelligence; {DETAILS}")
+            format!("Written on this Mac by Apple Intelligence; {details}")
         }
         Some(NotesWriter::OpenCode { model: Some(model) }) => {
-            format!("Written by {model} through OpenCode; {DETAILS}")
+            format!("Written by {model} through OpenCode; {details}")
         }
         Some(NotesWriter::OpenCode { model: None }) => {
-            format!("Written by OpenCode's default model; {DETAILS}")
+            format!("Written by OpenCode's default model; {details}")
         }
-        None => "The transcript below has the details.".into(),
+        None => without_a_writer.into(),
     }
 }
 
@@ -724,7 +743,8 @@ pub(super) fn retitle_markdown_file(
     })
 }
 
-/// Applies the notes to the exported file in place, keeping its name.
+/// Applies the notes to the exported file in place; the caller renames it
+/// to the new title when Descriptive meeting file names is on.
 fn update_markdown_file(
     path: &Path,
     written: &mut Option<String>,
@@ -735,6 +755,33 @@ fn update_markdown_file(
     rewrite_markdown_file(path, written, |markdown| {
         apply_notes(markdown, previous_title, title, block)
     })
+}
+
+/// Applies the notes to the exported file and, with Descriptive meeting file
+/// names on, renames it to the new title. A missing file is left to the
+/// manifest alone. A separate notes file is written beside it while
+/// Separate notes file is on (both in Meetings › Settings › Export).
+fn apply_notes_to_export(
+    manifest: &mut MeetingManifest,
+    previous_title: &str,
+    title: &str,
+    descriptive_filenames: bool,
+    separate_notes: bool,
+) -> Result<()> {
+    let Some(path) = manifest.export_path.clone().filter(|path| path.exists()) else {
+        return Ok(());
+    };
+    let block = render_notes_block(manifest.notes.as_ref().expect("notes were set"));
+    update_markdown_file(
+        &path,
+        &mut manifest.export_sha256,
+        previous_title,
+        title,
+        &block,
+    )?;
+    super::export_name::rename_to_title(manifest, title, descriptive_filenames);
+    super::notes_file::write_after_notes(manifest, separate_notes);
+    Ok(())
 }
 
 /// The file is replaced atomically, and only if nothing changed it meanwhile.
@@ -855,11 +902,7 @@ fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
         super::chapters::refine_meeting(&directory, &entries, &never);
     }
     // Read at each generation, so Regenerate summary uses the current list.
-    let terms = if crate::labs::meeting_notes_vocabulary() {
-        crate::dictation::vocabulary::terms()
-    } else {
-        Vec::new()
-    };
+    let terms = crate::dictation::vocabulary::terms();
     let started = Instant::now();
     let result = summarize_with_calendar(
         &entries,
@@ -888,18 +931,15 @@ fn summarize_claimed(id: &str, _claim: InProgress) -> Result<MeetingManifest> {
             manifest.notes = Some(MeetingNotes::from_summary(summary, started.elapsed()));
             manifest.notes_error = None;
             let title = display_title(&manifest);
-            if let Some(path) = manifest.export_path.clone().filter(|path| path.exists()) {
-                let block = render_notes_block(manifest.notes.as_ref().expect("notes were set"));
-                if let Err(error) = update_markdown_file(
-                    &path,
-                    &mut manifest.export_sha256,
-                    &previous_title,
-                    &title,
-                    &block,
-                ) {
-                    tracing::warn!(%error, meeting = id, "could not add notes to meeting Markdown");
-                    manifest.notes_error = Some(format!("Notes not added to Markdown: {error}"));
-                }
+            if let Err(error) = apply_notes_to_export(
+                &mut manifest,
+                &previous_title,
+                &title,
+                crate::app_settings::meeting_descriptive_filenames(),
+                crate::app_settings::meeting_notes_file(),
+            ) {
+                tracing::warn!(%error, meeting = id, "could not add notes to meeting Markdown");
+                manifest.notes_error = Some(format!("Notes not added to Markdown: {error}"));
             }
             write_manifest(&directory, &manifest)?;
             Ok(manifest)
@@ -1198,6 +1238,24 @@ mod tests {
             chapters.starts_with("Speaker labels: Room mic is"),
             "{chapters}"
         );
+    }
+
+    #[test]
+    fn prompts_keep_the_transcripts_language() {
+        assert!(NOTES_INSTRUCTIONS.contains(
+            "You MUST write the title and summary in the language spoken in the transcript"
+        ));
+        assert!(
+            TITLE_INSTRUCTIONS
+                .contains("You MUST write the title in the language spoken in the transcript")
+        );
+        for instructions in [NOTES_INSTRUCTIONS, TITLE_INSTRUCTIONS] {
+            assert!(
+                instructions.contains("even though these instructions are in English"),
+                "{instructions}"
+            );
+            assert!(instructions.contains("never translate"), "{instructions}");
+        }
     }
 
     #[test]
@@ -1677,6 +1735,63 @@ mod tests {
         assert!(written.starts_with("# Launch plan review\n"));
         assert!(written.contains(NOTES_START));
         assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn notes_rename_the_export_only_with_descriptive_file_names() {
+        let folder = std::env::temp_dir().join(format!(
+            "hex-meeting-notes-name-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&folder).unwrap();
+        let stamp = super::super::transcript::LocalTime::from_ms(1_760_000_000_000).file_stamp();
+
+        let path = folder.join(format!("{stamp} Zoom call — 2-30 PM.md"));
+        fs::write(&path, EXPORT).unwrap();
+        let mut changed = manifest();
+        changed.export_path = Some(path.clone());
+        changed.export_sha256 = Some(super::super::text_sha256(EXPORT.as_bytes()));
+        changed.notes = Some(meeting_notes());
+        apply_notes_to_export(
+            &mut changed,
+            "Zoom call — 2:30 PM",
+            "Launch plan review",
+            true,
+            false,
+        )
+        .unwrap();
+        let renamed = changed.export_path.clone().unwrap();
+        assert_ne!(renamed, path);
+        assert!(!path.exists());
+        assert_eq!(
+            renamed.file_name().unwrap().to_string_lossy(),
+            format!("{stamp} Launch plan review.md")
+        );
+        let written = fs::read_to_string(&renamed).unwrap();
+        assert!(written.starts_with("# Launch plan review\n"));
+        assert!(written.contains(NOTES_START));
+        // The rename keeps the copy claimed for retention at its new path.
+        assert_eq!(super::super::file_sha256(&renamed), changed.export_sha256);
+
+        // Off, the notes rewrite the file in place and its name stays.
+        let kept = folder.join(format!("{stamp} Old name.md"));
+        fs::write(&kept, EXPORT).unwrap();
+        let mut unchanged = manifest();
+        unchanged.export_path = Some(kept.clone());
+        unchanged.notes = Some(meeting_notes());
+        apply_notes_to_export(
+            &mut unchanged,
+            "Zoom call — 2:30 PM",
+            "Launch plan review",
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(unchanged.export_path, Some(kept.clone()));
+        assert!(kept.exists());
+        assert!(fs::read_to_string(&kept).unwrap().contains(NOTES_START));
         fs::remove_dir_all(folder).unwrap();
     }
 }

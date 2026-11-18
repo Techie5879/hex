@@ -4,9 +4,11 @@
 //! History is a product record, deliberately separate from the diagnostic
 //! Activity event stream. Entries hold text and bounded metadata; audio is
 //! kept only while Labs › Keep recordings is on ([`recordings`]), as a file
-//! per entry that follows the entry's retention plus its own byte cap. Every
-//! retention choice remains subject to hard entry and byte caps, writes are
-//! atomic, and files are owner-only.
+//! per entry that follows the entry's retention plus its own byte cap. Labs ›
+//! Dictation stats keeps a separate daily rollup ([`usage`]) with counts but
+//! no text, so it can outlive the retention window. Every retention
+//! choice remains subject to hard entry and byte caps, writes are atomic, and
+//! files are owner-only.
 
 use std::fs;
 use std::io::{self, Write};
@@ -17,8 +19,13 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(hex_capture)]
+pub mod annotations;
+pub mod captures;
+pub mod playback;
 pub mod recordings;
 pub mod stats;
+pub mod usage;
 pub mod versions;
 
 pub use recordings::Recording;
@@ -46,6 +53,10 @@ pub enum HistoryRetention {
 }
 
 impl HistoryRetention {
+    /// Entries exactly at the cutoff remain visible. Off preserves old entries.
+    pub fn cutoff(self, now_ms: u64) -> Option<u64> {
+        self.max_age_ms().map(|age| now_ms.saturating_sub(age))
+    }
     pub const ALL: [Self; 5] = [Self::Off, Self::Day, Self::Week, Self::Month, Self::Forever];
 
     pub const fn label(self) -> &'static str {
@@ -265,6 +276,8 @@ pub struct HistoryStore {
     path: PathBuf,
     /// Labs › Keep recordings' audio, one file per entry.
     recordings: PathBuf,
+    /// Labs › Dictation stats' daily rollup, beside the store.
+    usage: PathBuf,
     recording_cap: u64,
     entries: Vec<HistoryEntry>,
     next_id: u64,
@@ -293,6 +306,7 @@ impl HistoryStore {
     pub fn open(path: PathBuf, retention: HistoryRetention, now_ms: u64) -> Self {
         let mut store = Self {
             recordings: recordings::directory(&path),
+            usage: usage::path(&path),
             recording_cap: recordings::MAX_RECORDING_BYTES,
             path,
             entries: Vec::new(),
@@ -374,11 +388,11 @@ impl HistoryStore {
     /// entry past retention is pruned in memory first, so the revision also
     /// moves when time expires one; the idle worker saves that prune.
     pub fn revision(&mut self, now_ms: u64) -> u64 {
-        if let Some(max_age) = self.retention.max_age_ms()
+        if let Some(cutoff) = self.retention.cutoff(now_ms)
             && self
                 .entries
                 .first()
-                .is_some_and(|entry| entry.timestamp_ms < now_ms.saturating_sub(max_age))
+                .is_some_and(|entry| entry.timestamp_ms < cutoff)
         {
             self.prune(now_ms);
         }
@@ -391,6 +405,13 @@ impl HistoryStore {
         if self.retention.is_off() {
             return Ok(None);
         }
+        let words = draft.final_text.split_whitespace().count() as u64;
+        let audio_ms = draft.audio_ms;
+        // The rollup's first write seeds itself from what History still
+        // retains, so enabling Labs › Dictation stats doesn't make the
+        // dialog's totals drop. The new entry is added after, exactly once.
+        let yearly = crate::labs::history_stats();
+        let seed = (yearly && !self.usage.exists()).then(|| self.usage_seed(now_ms));
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
         let recording_bytes = draft.recording.as_ref().map_or(0, |recording| {
@@ -411,6 +432,9 @@ impl HistoryStore {
             processing: draft.processing.map(|processing| HistoryProcessing {
                 profile: truncated(&processing.profile, MAX_LABEL_BYTES),
                 latency_ms: processing.latency_ms,
+                model: processing
+                    .model
+                    .map(|model| truncated(&model, MAX_LABEL_BYTES)),
                 fallback: processing
                     .fallback
                     .map(|fallback| truncated(&fallback, MAX_FALLBACK_BYTES)),
@@ -426,7 +450,46 @@ impl HistoryStore {
         });
         self.prune(now_ms);
         self.persist()?;
+        // Labs › Dictation stats: a daily rollup that outlives retention. It
+        // holds no text or applications, and never fails a record: capture
+        // and paste never wait on this file.
+        if yearly {
+            self.note_usage(seed, now_ms, words, audio_ms);
+        }
         Ok(Some(id))
+    }
+
+    /// Every retained entry as a fresh rollup, for its first write.
+    fn usage_seed(&self, now_ms: u64) -> usage::Usage {
+        let cutoff = self.retention.cutoff(now_ms);
+        let mut seed = usage::Usage::default();
+        for entry in &self.entries {
+            if cutoff.is_none_or(|cutoff| entry.timestamp_ms >= cutoff) {
+                seed.add(
+                    stats::local_day(entry.timestamp_ms),
+                    stats::local_hour(entry.timestamp_ms),
+                    entry.final_text.split_whitespace().count() as u64,
+                    entry.audio_ms,
+                );
+            }
+        }
+        seed
+    }
+
+    /// Adds this entry to the rollup, seeded when the file was missing. A
+    /// failure is logged and ignored.
+    fn note_usage(&self, seed: Option<usage::Usage>, now_ms: u64, words: u64, audio_ms: u64) {
+        let today = stats::local_day(now_ms);
+        let result = match seed {
+            Some(mut usage) => {
+                usage.add(today, stats::local_hour(now_ms), words, audio_ms);
+                usage.save(&self.usage, today)
+            }
+            None => usage::count(&self.usage, now_ms, words, audio_ms),
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not record the usage rollup");
+        }
     }
 
     /// Delete one entry. Returns whether it existed.
@@ -441,6 +504,34 @@ impl HistoryStore {
             return Err(error);
         }
         Ok(true)
+    }
+
+    /// Delete every entry in `ids` with one save. Returns how many existed;
+    /// unknown ids are ignored. A failed save restores every removed entry
+    /// where it was, so the deletion can be retried.
+    pub fn delete_many(&mut self, ids: &[u64]) -> io::Result<usize> {
+        let mut removed = Vec::new();
+        let mut kept = Vec::with_capacity(self.entries.len());
+        for (index, entry) in std::mem::take(&mut self.entries).into_iter().enumerate() {
+            if ids.contains(&entry.id) {
+                removed.push((index, entry));
+            } else {
+                kept.push(entry);
+            }
+        }
+        self.entries = kept;
+        let count = removed.len();
+        if count == 0 {
+            return Ok(0);
+        }
+        if let Err(error) = self.persist() {
+            for (index, entry) in removed {
+                let at = index.min(self.entries.len());
+                self.entries.insert(at, entry);
+            }
+            return Err(error);
+        }
+        Ok(count)
     }
 
     /// Replace entry `id`'s text with `transcript`, such as a transcription
@@ -492,17 +583,36 @@ impl HistoryStore {
             .map(|_| recordings::path(&self.recordings, id))
     }
 
-    /// Delete every entry. A failed save keeps them, so the clear can be
-    /// retried.
+    /// Entry `id`'s kept recording, when it kept one and the file is still
+    /// there (Labs › Copy dictation audio).
+    pub fn saved_recording(&self, id: u64) -> Option<PathBuf> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| recordings::saved(&self.recordings, entry))
+    }
+
+    /// The newest entry that kept its audio and still has the file within
+    /// `now_ms`'s retention, if any (Labs › Copy dictation audio's menu and
+    /// tray item).
+    pub fn newest_recording(&self, now_ms: u64) -> Option<PathBuf> {
+        let cutoff = self.retention.cutoff(now_ms);
+        self.entries()
+            .filter(|entry| cutoff.is_none_or(|cutoff| entry.timestamp_ms >= cutoff))
+            .find_map(|entry| recordings::saved(&self.recordings, entry))
+    }
+
+    /// Delete every entry, and the Labs › Dictation stats rollup with them. A
+    /// failed save keeps the entries, so the clear can be retried.
     pub fn clear(&mut self) -> io::Result<()> {
-        if self.entries.is_empty() && !self.prune_pending {
-            return Ok(());
+        if !self.entries.is_empty() || self.prune_pending {
+            let entries = std::mem::take(&mut self.entries);
+            if let Err(error) = self.persist() {
+                self.entries = entries;
+                return Err(error);
+            }
         }
-        let entries = std::mem::take(&mut self.entries);
-        if let Err(error) = self.persist() {
-            self.entries = entries;
-            return Err(error);
-        }
+        usage::clear(&self.usage);
         Ok(())
     }
 
@@ -526,6 +636,27 @@ impl HistoryStore {
         self.entries.iter().rev()
     }
 
+    /// Where Labs › Dictation stats keeps its daily rollup.
+    pub fn usage_path(&self) -> &std::path::Path {
+        &self.usage
+    }
+
+    /// Whether a Labs › Dictation stats rollup file exists, even with no
+    /// retained entries: Clear all history must still be able to delete it.
+    pub fn has_usage(&self) -> bool {
+        self.usage.exists()
+    }
+
+    /// The daily rollup, bounded to its most recent days.
+    pub fn usage(&self) -> usage::Usage {
+        self.usage_at(now_ms())
+    }
+
+    /// [`Self::usage`] at an explicit time, whose local day bounds the days.
+    pub fn usage_at(&self, now_ms: u64) -> usage::Usage {
+        usage::Usage::load(self.usage_path(), stats::local_day(now_ms))
+    }
+
     #[cfg(test)]
     pub fn entry(&self, id: u64) -> Option<&HistoryEntry> {
         self.entries.iter().find(|entry| entry.id == id)
@@ -540,10 +671,7 @@ impl HistoryStore {
     /// processing profile. Newest first and bounded.
     pub fn search(&self, query: &str, now_ms: u64) -> Vec<&HistoryEntry> {
         let needle = query.trim().to_lowercase();
-        let cutoff = self
-            .retention
-            .max_age_ms()
-            .map(|max_age| now_ms.saturating_sub(max_age));
+        let cutoff = self.retention.cutoff(now_ms);
         let mut scratch = String::new();
         self.entries()
             .filter(|entry| cutoff.is_none_or(|cutoff| entry.timestamp_ms >= cutoff))
@@ -559,10 +687,7 @@ impl HistoryStore {
         if self.retention.is_off() {
             return Vec::new();
         }
-        let cutoff = self
-            .retention
-            .max_age_ms()
-            .map(|max_age| now_ms.saturating_sub(max_age));
+        let cutoff = self.retention.cutoff(now_ms);
         self.entries()
             .filter(|entry| cutoff.is_none_or(|cutoff| entry.timestamp_ms >= cutoff))
             .filter(|entry| entry.kind != HistoryKind::Printed)
@@ -592,8 +717,7 @@ impl HistoryStore {
 
     fn prune(&mut self, now_ms: u64) -> bool {
         let mut changed = false;
-        if let Some(max_age) = self.retention.max_age_ms() {
-            let cutoff = now_ms.saturating_sub(max_age);
+        if let Some(cutoff) = self.retention.cutoff(now_ms) {
             let before = self.entries.len();
             self.entries.retain(|entry| entry.timestamp_ms >= cutoff);
             changed |= self.entries.len() != before;
@@ -728,6 +852,11 @@ impl History {
         self.synced().delete(id)
     }
 
+    /// Delete every entry in `ids` with one save ([`HistoryStore::delete_many`]).
+    pub fn delete_many(&self, ids: &[u64]) -> io::Result<usize> {
+        self.synced().delete_many(ids)
+    }
+
     pub fn clear(&self) -> io::Result<()> {
         self.synced().clear()
     }
@@ -742,6 +871,30 @@ impl History {
 
     pub fn recording_path(&self, id: u64) -> Option<PathBuf> {
         self.synced().recording_path(id)
+    }
+
+    /// Labs › Dictation stats' daily rollup, read from disk (the caller
+    /// gates it on the lab).
+    pub fn usage(&self) -> usage::Usage {
+        self.synced().usage()
+    }
+
+    /// Whether a Labs › Dictation stats rollup file exists, even with no
+    /// retained entries.
+    pub fn has_usage(&self) -> bool {
+        self.synced().has_usage()
+    }
+
+    /// Entry `id`'s kept recording, when the file is still there
+    /// ([`HistoryStore::saved_recording`]).
+    pub fn saved_recording(&self, id: u64) -> Option<PathBuf> {
+        self.synced().saved_recording(id)
+    }
+
+    /// The newest entry's kept recording within `now_ms`'s retention, when
+    /// the file is still there ([`HistoryStore::newest_recording`]).
+    pub fn newest_recording(&self, now_ms: u64) -> Option<PathBuf> {
+        self.synced().newest_recording(now_ms)
     }
 
     pub fn set_retention(&self, retention: HistoryRetention) -> io::Result<()> {
@@ -836,6 +989,7 @@ mod tests {
             processing: Some(HistoryProcessing {
                 profile: "Messages".into(),
                 latency_ms: 120,
+                model: Some("anthropic/claude-haiku-4-5".into()),
                 fallback: None,
             }),
             audio_ms: 900,
@@ -918,6 +1072,29 @@ mod tests {
         assert_eq!(ids("same words"), [same]);
         assert_eq!(ids("RAW rewritten"), [rewritten]);
         assert_eq!(ids("no such phrase"), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn the_newest_kept_recording_skips_entries_without_audio_or_without_the_file() {
+        let path = temp_path("newest-recording");
+        let mut store = HistoryStore::open(path, HistoryRetention::Day, 0);
+        assert!(store.newest_recording(0).is_none());
+        let older = store.record(recorded("older"), 1_000).unwrap().unwrap();
+        let plain = store.record(draft("plain"), 2_000).unwrap().unwrap();
+        assert_eq!(store.saved_recording(plain), None);
+        assert_eq!(store.newest_recording(3_000), store.recording_path(older));
+        let newest = store.record(recorded("newest"), 3_000).unwrap().unwrap();
+        assert_eq!(store.newest_recording(4_000), store.recording_path(newest));
+        // A file deleted behind the store's back is skipped, not copied.
+        fs::remove_file(store.recording_path(newest).unwrap()).unwrap();
+        assert_eq!(store.newest_recording(4_000), store.recording_path(older));
+        // Retention applies: exactly at the cutoff remains, past it nothing.
+        let day = HistoryRetention::Day.max_age_ms().unwrap();
+        assert_eq!(
+            store.newest_recording(1_000 + day),
+            store.recording_path(older)
+        );
+        assert_eq!(store.newest_recording(1_000 + day + 1), None);
     }
 
     #[test]
@@ -1482,6 +1659,129 @@ mod tests {
         assert_eq!(reopened.len(), 0);
     }
 
+    /// Turns Labs › Dictation stats on for one test, and back off after.
+    struct DictationStats;
+
+    /// Serializes the tests that turn the global Labs gate on, so one can't
+    /// observe another's switch.
+    static STATS_LABS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl DictationStats {
+        fn on() -> Self {
+            crate::labs::apply(&crate::app_settings::LabsSettings {
+                history_stats: true,
+                ..crate::app_settings::LabsSettings::default()
+            });
+            Self
+        }
+    }
+
+    impl Drop for DictationStats {
+        fn drop(&mut self) {
+            crate::labs::apply(&crate::app_settings::LabsSettings::default());
+        }
+    }
+
+    #[test]
+    fn dictation_stats_rolls_every_recorded_day_up_and_clear_removes_it() {
+        let _lock = STATS_LABS.lock().unwrap_or_else(|error| error.into_inner());
+        let _labs = DictationStats::on();
+        assert!(crate::labs::history_stats(), "the gate is on for the test");
+        let path = temp_path("usage-rollup");
+        let day_ms = HistoryRetention::Day.max_age_ms().unwrap();
+        let mut store = HistoryStore::open(path.clone(), HistoryRetention::Day, 0);
+        store.record(draft("one two"), 1_000).unwrap();
+        // A day later the first entry is pruned from History, while the
+        // rollup still holds both days.
+        store.record(draft("three"), 1_000 + day_ms).unwrap();
+        assert!(
+            store.usage_path().exists(),
+            "the rollup exists at {}",
+            store.usage_path().display()
+        );
+        let usage = store.usage_at(1_000 + day_ms);
+        assert_eq!(usage.dictations(), 2);
+        assert_eq!(usage.words(), 3);
+        assert_eq!(usage.days().len(), 2);
+        assert_eq!(store.len(), 2);
+
+        store.clear().unwrap();
+        assert!(!store.usage_path().exists());
+        assert_eq!(store.usage().dictations(), 0);
+    }
+
+    #[test]
+    fn history_off_records_no_usage_rollup() {
+        let _lock = STATS_LABS.lock().unwrap_or_else(|error| error.into_inner());
+        let _labs = DictationStats::on();
+        let path = temp_path("usage-off");
+        let mut store = HistoryStore::open(path, HistoryRetention::Off, 0);
+        assert_eq!(store.record(draft("one two"), 1_000).unwrap(), None);
+        assert!(
+            !store.usage_path().exists(),
+            "retention Off keeps nothing, rollup included"
+        );
+    }
+
+    #[test]
+    fn the_first_rollup_write_seeds_itself_from_retained_history_once() {
+        let _lock = STATS_LABS.lock().unwrap_or_else(|error| error.into_inner());
+        crate::labs::apply(&crate::app_settings::LabsSettings::default());
+        let path = temp_path("usage-seed");
+        let day_ms = HistoryRetention::Day.max_age_ms().unwrap();
+        let mut store = HistoryStore::open(path, HistoryRetention::Day, 0);
+        // Two entries while the lab is off: History has them, the rollup
+        // does not exist yet.
+        store.record(draft("one two three"), 1_000).unwrap();
+        store.record(draft("four five"), day_ms / 2).unwrap();
+        assert!(!store.usage_path().exists());
+
+        // The lab turns on, and the next record seeds from both retained
+        // entries and adds itself once.
+        let _labs = DictationStats::on();
+        store.record(draft("six seven"), day_ms + 1_000).unwrap();
+        let usage = store.usage_at(day_ms + 1_000);
+        assert_eq!(usage.dictations(), 3);
+        assert_eq!(usage.words(), 7);
+        assert_eq!(usage.audio_ms(), 2_700);
+        assert_eq!(usage.days().len(), 2);
+    }
+
+    #[test]
+    fn clear_removes_a_rollup_even_with_no_entries() {
+        let path = temp_path("usage-clear-empty");
+        let mut store = HistoryStore::open(path.clone(), HistoryRetention::Week, 0);
+        crate::history::usage::count(&crate::history::usage::path(&path), 1_000, 5, 1_000).unwrap();
+        assert!(store.has_usage());
+        store.clear().unwrap();
+        assert!(!store.has_usage());
+    }
+
+    #[test]
+    fn delete_many_removes_only_the_listed_entries() {
+        let path = temp_path("delete-many");
+        let mut store = HistoryStore::open(path.clone(), HistoryRetention::Week, 0);
+        let first = store.record(draft("one"), 1_000).unwrap().unwrap();
+        let second = store.record(draft("two"), 2_000).unwrap().unwrap();
+        let third = store.record(draft("three"), 3_000).unwrap().unwrap();
+
+        assert_eq!(
+            store.delete_many(&[first, third, 9_999]).unwrap(),
+            2,
+            "only the listed entries that exist count"
+        );
+        assert_eq!(store.len(), 1);
+        assert!(store.entry(first).is_none());
+        assert!(store.entry(second).is_some());
+        assert!(store.entry(third).is_none());
+        assert_eq!(store.delete_many(&[9_999]).unwrap(), 0);
+        assert_eq!(store.len(), 1);
+
+        let reopened = HistoryStore::open(path, HistoryRetention::Week, 4_000);
+        assert_eq!(reopened.len(), 1);
+        assert!(reopened.entry(second).is_some());
+    }
+
     #[test]
     fn failed_clear_and_delete_keep_entries_for_a_retry() {
         let path = temp_path("failed-clear");
@@ -1492,8 +1792,17 @@ mod tests {
         fs::create_dir(&temporary).unwrap();
 
         assert!(store.delete(first).is_err());
+        assert!(store.delete_many(&[first]).is_err());
         assert!(store.clear().is_err());
         assert_eq!(store.len(), 2, "a failed save keeps the entries");
+        assert_eq!(
+            store
+                .entries()
+                .map(|entry| entry.final_text.as_str())
+                .collect::<Vec<_>>(),
+            ["two", "one"],
+            "a failed save puts every removed entry back in place"
+        );
 
         fs::remove_dir(temporary).unwrap();
         store.sync();

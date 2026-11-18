@@ -143,6 +143,7 @@ pub(super) fn view(ui: &Ui, p: Paint, meeting: &Meeting) -> Option<El> {
             "snapshots-error",
             tr("Snapshot could not be updated."),
             error,
+            super::lists::Tone::Danger,
         ));
     }
     if snapshots.images.is_empty() {

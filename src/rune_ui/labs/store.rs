@@ -1,0 +1,656 @@
+//! The Labs store: a search and the Discover and Turned on tabs in the
+//! title bar, group chips, the newest labs as featured cards, then every
+//! lab as a card in two columns under its group's header. A header folds
+//! its group; a search or chip shows every match open. A card's switch
+//! turns its lab on or off; a lab with settings of its own shows them on
+//! its card while on.
+
+use rune::{El, Tx, col, el, row, text};
+use rune_kit::{Button, ButtonVariant, ControlSize, Switch, TextInput};
+
+use super::super::Ui;
+use super::super::controls::{DESCRIPTION, METRICS, Paint, PushSize, segmented_tx};
+use super::super::list_detail::{FOLDED, UNFOLDED};
+use super::super::lists::{Tone, tone_tag};
+use super::{Row, Tab, extras, flip, group, row_key, shown};
+use crate::desktop::i18n::{tr, tr_fill};
+use crate::labs::Group;
+use crate::rune_ui::{Menu as OpenMenu, settings::toggle_menu};
+use rune_kit::{Menu, MenuItem, Placement};
+
+/// The search field beside the title.
+pub(in crate::rune_ui) fn search_field(ui: &Ui, p: Paint) -> El {
+    let count = shown(ui).len();
+    let mut field = TextInput::new(&ui.lab_store.search)
+        .placeholder(tr_fill("Search {} labs", &count.to_string()))
+        .width(Some(SEARCH_WIDTH))
+        .leading_icon(p.k.glyph.search)
+        .on_edit(|ui: &mut Ui| &mut ui.lab_store.search);
+    if !ui.lab_store.search.text.is_empty() {
+        field = field.clear_button().on_action(|ui: &mut Ui, tx: &mut Tx| {
+            tx.settle();
+            ui.lab_store.search.clear();
+        });
+    }
+    field.build(p.k).key("labs-search")
+}
+
+const SEARCH_WIDTH: f32 = 220.0;
+/// Between cards, across and down.
+const GAP: f32 = 8.0;
+
+/// Discover and Turned on, at the title bar's end.
+pub(in crate::rune_ui) fn tabs(ui: &Ui, p: Paint) -> El {
+    let on = shown(ui).iter().filter(|row| row.on).count();
+    let turned_on = tr_fill("Turned on · {}", &on.to_string());
+    let labels = [tr("Discover"), turned_on.as_str()];
+    let selected = match ui.lab_store.tab {
+        Tab::Discover => 0,
+        Tab::On => 1,
+    };
+    segmented_tx(
+        p,
+        "labs-tab",
+        &labels,
+        selected,
+        |ui: &mut Ui, index: usize, tx: &mut Tx| {
+            tx.settle();
+            ui.lab_store.tab = if index == 0 { Tab::Discover } else { Tab::On };
+        },
+    )
+}
+
+/// The page under the title bar: the chips, then the scrolling cards.
+pub(in crate::rune_ui) fn page(ui: &Ui, p: Paint, cx: &rune::Cx<Ui>, layer: &mut Vec<El>) -> El {
+    let rows = shown(ui);
+    let store = &ui.lab_store;
+    let query = store.query();
+    let newest = rows.iter().map(|row| row.lab.added()).max().unwrap_or(0);
+    let is_new = |row: &Row| newest > 0 && row.lab.added() == newest;
+    let mut content = col().key("content").px(METRICS.gutter).gap(12.0);
+    let browsing = store.tab == Tab::Discover && store.group.is_none() && query.is_empty();
+    // Labs in New in Labs aren't repeated in the grid below.
+    let mut featured_labs = Vec::new();
+    if browsing {
+        let mut featured: Vec<&Row> = rows.iter().filter(|row| is_new(row)).collect();
+        featured.sort_by_key(|row| std::cmp::Reverse((row.lab.added(), row.lab.index())));
+        featured.truncate(2);
+        featured_labs = featured.iter().map(|row| row.lab).collect();
+        if !featured.is_empty() {
+            content = content
+                .child(heading(p, "new-heading", tr("New in Labs")))
+                .child(pair(
+                    "featured",
+                    featured
+                        .into_iter()
+                        .map(|row| card(ui, p, row, true, true, layer))
+                        .collect(),
+                ));
+        }
+    }
+    let matching: Vec<&Row> = rows
+        .iter()
+        .filter(|row| store.tab == Tab::Discover || row.on)
+        .filter(|row| store.group.is_none_or(|group| row.group == group))
+        .filter(|row| matches(row, &query))
+        .filter(|row| !featured_labs.contains(&row.lab))
+        .collect();
+    if matching.is_empty() {
+        let empty = if store.tab == Tab::On && query.is_empty() {
+            tr("Nothing turned on yet")
+        } else {
+            tr("No labs match")
+        };
+        content = content.child(
+            col().key("empty").py(48.0).center().child(
+                text(empty)
+                    .key("empty-copy")
+                    .font(p.k.ty.ui)
+                    .color(p.muted()),
+            ),
+        );
+    } else {
+        // A search or chip shows every match, whatever its group's fold.
+        let filtering = !query.is_empty() || store.group.is_some();
+        for group in Group::ALL {
+            let members: Vec<&Row> = matching
+                .iter()
+                .copied()
+                .filter(|row| row.group == group)
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            let open = filtering || group::open(ui, group, &rows);
+            content = content.child(group_header(p, group, members.len(), open, filtering));
+            if open {
+                let mut grid = col().key(format!("grid-{}", group.id())).gap(GAP);
+                for (index, pair_rows) in members.chunks(2).enumerate() {
+                    grid = grid.child(pair(
+                        &format!("grid-row{index}"),
+                        pair_rows
+                            .iter()
+                            .map(|row| card(ui, p, row, is_new(row), false, layer))
+                            .collect(),
+                    ));
+                }
+                content = content.child(grid);
+            }
+        }
+    }
+    content = content.child(footer(p));
+    col()
+        .key("labs-store")
+        .grow(1.0)
+        .shrink()
+        .min_h(0.0)
+        .child(chips(
+            ui,
+            p,
+            &rows,
+            cx.layout_with("labs-store/chips", |r| r[2])
+                .unwrap_or_default(),
+            layer,
+        ))
+        .child(super::super::scroll_body(p.k, "scroll", content))
+}
+
+/// Whether `row` matches a lowercase search.
+fn matches(row: &Row, query: &str) -> bool {
+    let note = row.note.as_deref().unwrap_or("");
+    query.is_empty()
+        || [row.title, row.about, note, group::name(row.group)]
+            .iter()
+            .any(|copy| copy.to_lowercase().contains(query))
+}
+
+fn heading(p: Paint, key: &str, title: &str) -> El {
+    p.section_label(title).key(key)
+}
+
+/// Two cards side by side, equally wide; a lone card keeps half the row.
+fn pair(key: &str, cards: Vec<El>) -> El {
+    row()
+        .key(key)
+        .gap(GAP)
+        .equal_columns(2)
+        .items_stretch()
+        .children(cards.into_iter().map(|card| card.min_w(0.0)))
+}
+
+/// A group's header: its name and count. While browsing it is a button
+/// with a chevron that folds the group (remembered); under a search or
+/// chip it is a plain heading.
+fn group_header(p: Paint, group: Group, count: usize, open: bool, filtering: bool) -> El {
+    let c = &p.k.c;
+    let name = group::name(group);
+    let mut header = row()
+        .key(format!("group-{}", group.id()))
+        .gap(6.0)
+        .center_y()
+        .child(heading(p, "label", name).a11y_hidden())
+        .child(
+            text(count.to_string())
+                .key("count")
+                .font(p.k.ty.small)
+                .color(p.faint())
+                .a11y_hidden(),
+        );
+    if filtering {
+        return header.role("heading").level(2).label(name).mt(8.0);
+    }
+    header = header
+        .child(
+            rune::icon(if open { &UNFOLDED } else { &FOLDED }, 14.0)
+                .key("chevron")
+                .color(c.icon_faint)
+                .a11y_hidden(),
+        )
+        .role("button")
+        .label(name)
+        .expanded(open)
+        .focusable(true)
+        .focus_ring(2.0, 0.0, c.border_focus)
+        .radius(p.k.radius.sm)
+        .hover(c.hover)
+        .press(c.pressed)
+        .on_press(move |ui: &mut Ui| group::fold(ui, group));
+    // As wide as its words, with the hover fill just past them.
+    row()
+        .key(format!("group-{}-slot", group.id()))
+        .role("none")
+        .mt(8.0)
+        .ml(-4.0)
+        .child(header.px(4.0).py(2.0))
+}
+
+const CHIP_PX: f32 = 7.0;
+const COUNT_GAP: f32 = 4.0;
+const CHIP_GAP: f32 = 4.0;
+
+/// All and the selected category always stay on the row. Measure the translated
+/// labels and counts with the same fonts and insets the pills use to draw.
+fn chips(ui: &Ui, p: Paint, rows: &[Row], width: f32, layer: &mut Vec<El>) -> El {
+    let selected = ui.lab_store.group;
+    let more = format!("{}…", tr("More"));
+    let frame = 2.0 * (CHIP_PX + p.hair);
+    let label_width = |s: &str| rune::text::measure(s, &[], p.k.ty.ui, None).0;
+    let pill_width = |s: &str, count: usize| {
+        frame
+            + label_width(s)
+            + COUNT_GAP
+            + rune::text::measure(&count.to_string(), &[], p.k.ty.small, None).0
+    };
+    let all = tr("All");
+    let mut bar = row()
+        .key("chips")
+        .px(METRICS.gutter)
+        .pb(8.0)
+        .gap(CHIP_GAP)
+        .child(chip(
+            p,
+            "chip-all",
+            all,
+            rows.len(),
+            selected.is_none(),
+            None,
+        ));
+    let mut groups = Vec::new();
+    for group in Group::ALL {
+        let count = rows.iter().filter(|row| row.group == group).count();
+        if count > 0 || selected == Some(group) {
+            groups.push((
+                group,
+                count,
+                CHIP_GAP + pill_width(group::name(group), count),
+            ));
+        }
+    }
+    let mut room = width - 2.0 * METRICS.gutter - pill_width(all, rows.len());
+    let overflow = groups.iter().map(|g| g.2).sum::<f32>() > room;
+    if overflow {
+        room -= CHIP_GAP + frame + label_width(&more);
+    }
+    if let Some(g) = groups.iter().find(|g| Some(g.0) == selected) {
+        room -= g.2;
+    }
+    let mut hidden = Vec::new();
+    for (group, count, cost) in groups {
+        let chosen = Some(group) == selected;
+        if overflow && !chosen && cost > room {
+            hidden.push((group, count));
+            continue;
+        }
+        if !chosen {
+            room -= cost;
+        }
+        bar = bar.child(chip(
+            p,
+            &format!("chip-{}", group.id()),
+            group::name(group),
+            count,
+            chosen,
+            Some(group),
+        ));
+    }
+    if hidden.is_empty() {
+        return bar;
+    }
+    const MENU: OpenMenu = OpenMenu::Pick("labs-more");
+    let open = ui.open == Some(MENU);
+    let trigger = chip_frame(p, false)
+        .key("chip-more")
+        .role("button")
+        .label(&more)
+        .expanded(open)
+        .child(text(more).key("label").font(p.k.ty.ui).color(p.muted()))
+        .on_press(|ui: &mut Ui| toggle_menu(ui, MENU));
+    let mut menu = Menu::new("labs-more")
+        .trigger(trigger)
+        .placement(Placement::BottomEnd)
+        .gutter(4.0)
+        .open(open)
+        .on_close(|ui: &mut Ui| ui.open = None);
+    for (group, count) in hidden {
+        menu = menu.item(
+            MenuItem::new(group::name(group))
+                .shortcut(count.to_string())
+                .on_select_tx(move |ui: &mut Ui, tx| {
+                    tx.settle();
+                    ui.open = None;
+                    ui.lab_store.group = Some(group);
+                }),
+        );
+    }
+    bar.child(menu.build(p.k, layer))
+}
+
+fn chip(
+    p: Paint,
+    key: &str,
+    label: &str,
+    count: usize,
+    selected: bool,
+    group: Option<Group>,
+) -> El {
+    chip_frame(p, selected)
+        .key(key)
+        .role("radio")
+        .label(label)
+        .checked(selected)
+        .child(text(label).key("label").font(p.k.ty.ui).color(if selected {
+            p.text()
+        } else {
+            p.muted()
+        }))
+        .child(
+            text(count.to_string())
+                .key("count")
+                .font(p.k.ty.small)
+                .color(p.faint()),
+        )
+        .on_press_tx(move |ui: &mut Ui, tx: &mut Tx| {
+            tx.settle();
+            ui.lab_store.group = group;
+        })
+}
+
+fn chip_frame(p: Paint, selected: bool) -> El {
+    let c = &p.k.c;
+    let chip = row()
+        .h(26.0)
+        .px(CHIP_PX)
+        .gap(COUNT_GAP)
+        .center_y()
+        .radius(13.0)
+        .border(
+            p.hair,
+            if selected {
+                c.border_base
+            } else {
+                c.border_weak
+            },
+        )
+        .focusable(true)
+        .focus_ring(2.0, 0.0, c.border_focus)
+        .hover(c.hover)
+        .press(c.pressed);
+    if selected {
+        chip.fill(c.layer_02)
+    } else {
+        chip
+    }
+}
+
+/// One lab as a card: tile, name and tags on one line, up to two lines of
+/// description, its switch, and while on any settings of its own. A note
+/// under the description may run to three lines, so a caveat such as where
+/// the text goes is never cut short. `featured` cards sit under New in Labs,
+/// so they carry no New tag.
+fn card(ui: &Ui, p: Paint, entry: &Row, new: bool, featured: bool, layer: &mut Vec<El>) -> El {
+    let c = &p.k.c;
+    let lab = entry.lab;
+    let mut tags = Vec::new();
+    if new && !featured {
+        tags.push(tone_tag(p, "new-tag", tr("New"), Tone::Accent));
+    }
+    if lab.audience() == crate::labs::Audience::Dev {
+        tags.push(tone_tag(p, "dev-tag", tr("Dev"), Tone::Neutral));
+    }
+    let title = row()
+        .key("title-row")
+        .min_w(0.0)
+        .gap(6.0)
+        .center_y()
+        .child(
+            text(entry.title)
+                .key("title")
+                .font(p.k.ty.ui_medium)
+                .color(p.text())
+                .truncate()
+                .shrink()
+                .min_w(0.0),
+        )
+        .children(tags)
+        .child(el().key("spacer").grow(1.0).min_w(8.0))
+        .child(lab_switch(p, entry).key(row_key(lab)));
+    // The description runs under the switch too.
+    let mut copy = col()
+        .key("copy")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .gap(2.0)
+        .child(title)
+        .child(
+            text(entry.about)
+                .key("description")
+                .font(DESCRIPTION)
+                .color(p.muted())
+                .max_lines(2),
+        );
+    if let Some(note) = &entry.note {
+        copy = copy.child(
+            text(note.clone())
+                .key("note")
+                .font(DESCRIPTION)
+                .color(p.muted())
+                .max_lines(3),
+        );
+    }
+    if let Some(extras) = extras(ui, p, entry, layer) {
+        copy = copy.child(extras.mt(8.0));
+    }
+    let key = if featured {
+        format!("lab-featured-{}", lab.id())
+    } else {
+        format!("lab-card-{}", lab.id())
+    };
+    row()
+        .key(key)
+        .role("group")
+        .label(entry.title)
+        .padding(CARD_PADDING)
+        .gap(10.0)
+        .items_start()
+        .radius(p.k.radius.lg)
+        .child(crate::rune_ui::icons::tile(p, entry.icon, TILE))
+        .child(copy)
+        .fill(c.bg_base)
+        .border(
+            p.hair,
+            if flashing(ui, lab.id()) {
+                c.border_focus
+            } else {
+                c.border_weak
+            },
+        )
+}
+
+/// Whether a Labs link just named this lab.
+fn flashing(ui: &Ui, id: &str) -> bool {
+    ui.lab_store
+        .flash
+        .is_some_and(|(linked, at)| linked == id && at.elapsed() < super::FLASH)
+}
+
+const CARD_PADDING: f32 = 12.0;
+const TILE: f32 = 32.0;
+
+/// A lab's switch: it flips the lab; a locked lab's is disabled.
+fn lab_switch(p: Paint, entry: &Row) -> El {
+    let lab = entry.lab;
+    Switch::new(entry.on)
+        .control_size(ControlSize::Mini)
+        .label(entry.title)
+        .hide_label()
+        .disabled(entry.locked)
+        .on_toggle(move |ui: &mut Ui| flip(ui, lab))
+        .build(p.k)
+        .size(44.0, 20.0)
+        .justify_end()
+}
+
+/// What Labs is, Run setup again, and Send feedback.
+fn footer(p: Paint) -> El {
+    let run = Button::new(tr("Run setup again"))
+        .variant(ButtonVariant::Ghost)
+        .on_press_tx(|ui: &mut Ui, tx: &mut Tx| {
+            if let Err(error) = super::super::onboarding_kit::live::restart(ui, tx) {
+                ui.error = Some(error);
+            }
+        })
+        .build_small_push(p.k)
+        .key("restart-onboarding");
+    row()
+        .key("footer")
+        .mt(12.0)
+        .gap(8.0)
+        .center_y()
+        .child(
+            text(tr("Unfinished features. They may change or break."))
+                .key("lede")
+                .font(DESCRIPTION)
+                .color(p.muted())
+                .wrap()
+                .grow(1.0)
+                .shrink(),
+        )
+        .child(run)
+        .child(feedback_button(p, "send-feedback", ButtonVariant::Neutral))
+}
+
+/// Opens Labs' feedback form.
+fn feedback_button(p: Paint, key: &str, variant: ButtonVariant) -> El {
+    Button::new(tr("Send feedback"))
+        .variant(variant)
+        .on_press(|ui: &mut Ui| {
+            if ui.live()
+                && let Err(error) =
+                    crate::desktop::opencode_catalog::open_url(crate::labs::FEEDBACK_URL)
+            {
+                ui.error = Some(format!("{error:#}"));
+            }
+        })
+        .build_small_push(p.k)
+        .key(key)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::rune_ui::{AppSettings, SCENES, Service, deep_link, offscreen, view};
+    use rune::text::TextSystem;
+    use rune::{Env, Key, KeyEvent, Mods, Runtime};
+
+    #[test]
+    fn a_link_to_an_overflow_category_puts_it_on_the_single_chip_row() {
+        let mut ui = Ui::with(AppSettings::default(), Service::Fixture(Vec::new()));
+        SCENES
+            .iter()
+            .find(|(name, _)| *name == "mac-labs")
+            .unwrap()
+            .1(&mut ui);
+        let text = TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
+        let mut rt = offscreen::runtime(ui, view, (860.0, 560.0), Env::new(true, 2.0), text);
+        settle(&mut rt);
+        assert!(rt.find("chip-more").is_some());
+        assert!(rt.find("chip-models").is_none());
+        let target = deep_link::parse("hex://labs?category=models&tab=on&search=model", "hex")
+            .unwrap()
+            .unwrap();
+        rt.update(|ui, tx| deep_link::open(ui, target, tx));
+        settle(&mut rt);
+        assert_eq!(rt.state.lab_store.group, Some(Group::Models));
+        assert_eq!(rt.state.lab_store.tab, Tab::On);
+        assert_eq!(rt.state.lab_store.search.text, "model");
+        let (_, y) = rt.find("chip-all").unwrap();
+        assert_eq!(rt.find("chip-models").unwrap().1, y);
+        assert_eq!(rt.find("chip-more").unwrap().1, y);
+    }
+
+    #[test]
+    fn labs_search_clears_across_the_titlebar_button_and_keeps_typing() {
+        // Unlike the Linux golden suite, this runs on macOS too, with the
+        // real pane_header's window_drag region. The native band overlaps
+        // the upper half of the search button.
+        for dark in [false, true] {
+            for fraction in [0.05, 0.5, 0.95] {
+                for from_link in [false, true] {
+                    let mut ui = Ui::with(AppSettings::default(), Service::Fixture(Vec::new()));
+                    SCENES
+                        .iter()
+                        .find(|(name, _)| *name == "mac-labs")
+                        .unwrap()
+                        .1(&mut ui);
+                    for group in crate::labs::Group::ALL {
+                        ui.settings.labs.groups.insert(group.id().to_string(), true);
+                    }
+                    let text =
+                        TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
+                    let mut rt =
+                        offscreen::runtime(ui, view, (980.0, 4000.0), Env::new(dark, 2.0), text);
+                    rt.set_native_titlebar_band(28.0);
+                    settle(&mut rt);
+                    if from_link {
+                        let target = deep_link::parse("hex://labs?search=live%20text", "hex")
+                            .unwrap()
+                            .unwrap();
+                        rt.update(|ui, tx| deep_link::open(ui, target, tx));
+                        settle(&mut rt);
+                    }
+                    let (x, y) = rt.find("labs-search/value/input").unwrap();
+                    rt.pointer_down(x, y);
+                    rt.pointer_up(x, y);
+                    if !from_link {
+                        rt.key(KeyEvent {
+                            key: Key::Text("live text".into()),
+                            mods: Mods::default(),
+                        });
+                    }
+                    settle(&mut rt);
+                    assert_eq!(rt.state.lab_store.search.text, "live text");
+                    assert!(rt.find("lab-card-live-text").is_some());
+                    assert!(rt.find("lab-card-mouse-shortcuts").is_none());
+                    let button = rt
+                        .elements()
+                        .into_iter()
+                        .find(|e| e.path.ends_with("labs-search/action"))
+                        .unwrap()
+                        .rect;
+                    assert!(button[1] < 28.0 && button[1] + button[3] > 28.0);
+                    let (x, y) = (
+                        button[0] + button[2] / 2.0,
+                        button[1] + button[3] * fraction,
+                    );
+                    rt.pointer_down(x, y);
+                    assert!(
+                        rt.take_titlebar_action().is_none(),
+                        "clear must not drag at y={y}"
+                    );
+                    rt.pointer_up(x, y);
+                    settle(&mut rt);
+                    assert!(
+                        rt.state.lab_store.search.text.is_empty(),
+                        "clear at y={y}, dark={dark}, link={from_link}"
+                    );
+                    assert!(rt.find("lab-card-mouse-shortcuts").is_some());
+                    assert!(rt.state.lab_store.search.focused);
+                    rt.key(KeyEvent {
+                        key: Key::Text("mouse".into()),
+                        mods: Mods::default(),
+                    });
+                    settle(&mut rt);
+                    assert_eq!(rt.state.lab_store.search.text, "mouse");
+                    assert!(rt.find("lab-card-live-text").is_none());
+                    assert!(rt.find("lab-card-mouse-shortcuts").is_some());
+                }
+            }
+        }
+    }
+
+    fn settle(rt: &mut Runtime<Ui>) {
+        rt.settle_all();
+        rt.frame(0.0);
+    }
+}

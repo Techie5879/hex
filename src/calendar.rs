@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+pub(crate) mod date;
+
 use serde::Deserialize;
 use url::Url;
 
@@ -168,6 +170,7 @@ impl CallProvider {
             Self::Teams => &[
                 "com.microsoft.teams2",
                 "teams.microsoft.com",
+                "teams.cloud.microsoft",
                 "teams.live.com",
             ],
             Self::Slack => &["com.tinyspeck.slackmacgap", "app.slack.com"],
@@ -336,7 +339,9 @@ fn classify(url: &Url) -> Option<CallLink> {
         CallProvider::Zoom
     } else if host == "meet.google.com" && is_meet_path(&path) {
         CallProvider::GoogleMeet
-    } else if (host_is(&host, "teams.microsoft.com") || host_is(&host, "teams.live.com"))
+    } else if (host_is(&host, "teams.microsoft.com")
+        || host_is(&host, "teams.cloud.microsoft")
+        || host_is(&host, "teams.live.com"))
         && (path.starts_with("/l/meetup-join/") || path.starts_with("/meet/"))
     {
         CallProvider::Teams
@@ -439,6 +444,25 @@ impl ReminderScheduler {
             .is_some_and(|(showing, _)| showing.occurrence() == occurrence)
         {
             self.showing = None;
+        }
+    }
+
+    /// The meeting was joined somewhere other than its reminder, such as the
+    /// menu bar. Records the occurrence as already reminded so it never
+    /// pops, and closes the showing reminder when it is this one, returning
+    /// its occurrence so the capsule withdraws.
+    pub fn joined_elsewhere(&mut self, meeting: &CalendarMeeting) -> Option<String> {
+        let occurrence = meeting.occurrence();
+        self.reminded.insert(occurrence.clone(), meeting.end_ms);
+        if self
+            .showing
+            .as_ref()
+            .is_some_and(|(showing, _)| showing.occurrence() == occurrence)
+        {
+            self.showing = None;
+            Some(occurrence)
+        } else {
+            None
         }
     }
 
@@ -786,7 +810,7 @@ mod tests {
             ),
             (
                 "location",
-                "Zoom: https://zoom.us/my/kit.",
+                "Zoom: https://zoom.us/my/alex.",
                 CallProvider::Zoom,
             ),
             (
@@ -810,13 +834,18 @@ mod tests {
                 CallProvider::Teams,
             ),
             (
+                "notes",
+                "https://teams.cloud.microsoft/meet/93123456",
+                CallProvider::Teams,
+            ),
+            (
                 "url",
                 "https://app.slack.com/huddle/T012AB3C4/C012AB3C4",
                 CallProvider::Slack,
             ),
             (
                 "notes",
-                "(https://acme.webex.com/meet/kit)",
+                "(https://acme.webex.com/meet/alex)",
                 CallProvider::Webex,
             ),
             (
@@ -888,6 +917,40 @@ mod tests {
         assert_eq!(scheduler.poll(&meetings, 99 * MINUTE + 500, MINUTE), None);
         scheduler.answered(&meetings[0].occurrence());
         assert_eq!(scheduler.poll(&meetings, 100 * MINUTE, MINUTE), None);
+    }
+
+    #[test]
+    fn joining_elsewhere_before_the_lead_time_never_reminds() {
+        let mut scheduler = ReminderScheduler::default();
+        let meetings = [meeting("sync", 100)];
+        assert_eq!(scheduler.joined_elsewhere(&meetings[0]), None);
+        // The occurrence was joined already: its lead time, start, and late
+        // grace never show a reminder.
+        assert_eq!(scheduler.poll(&meetings, 99 * MINUTE, MINUTE), None);
+        assert_eq!(scheduler.poll(&meetings, 100 * MINUTE, MINUTE), None);
+        assert_eq!(scheduler.poll(&meetings, 104 * MINUTE, MINUTE), None);
+        // A moved meeting is a new occurrence, which may remind again.
+        let moved = [meeting("sync", 110)];
+        assert!(matches!(
+            scheduler.poll(&moved, 109 * MINUTE, MINUTE),
+            Some(ReminderUpdate::Show(_))
+        ));
+    }
+
+    #[test]
+    fn joining_elsewhere_while_showing_withdraws_it_for_good() {
+        let mut scheduler = ReminderScheduler::default();
+        let meetings = [meeting("sync", 100)];
+        assert!(matches!(
+            scheduler.poll(&meetings, 99 * MINUTE, MINUTE),
+            Some(ReminderUpdate::Show(_))
+        ));
+        assert_eq!(
+            scheduler.joined_elsewhere(&meetings[0]),
+            Some(meetings[0].occurrence())
+        );
+        // Nothing shows, and the answered occurrence never comes back.
+        assert_eq!(scheduler.poll(&meetings, 99 * MINUTE + 500, MINUTE), None);
     }
 
     #[test]
@@ -1065,6 +1128,7 @@ mod tests {
             ("www.zoom.us", CallProvider::Zoom),
             ("meet.google.com", CallProvider::GoogleMeet),
             ("teams.microsoft.com", CallProvider::Teams),
+            ("teams.cloud.microsoft", CallProvider::Teams),
             ("app.slack.com", CallProvider::Slack),
             ("acme.webex.com", CallProvider::Webex),
         ] {

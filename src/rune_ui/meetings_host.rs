@@ -1,11 +1,13 @@
 //! The Meetings pane's listing, read from the meetings store on every OS,
 //! and the meeting requests the Linux and Windows windows perform in their
-//! own process (macOS's go through `macos_host`).
+//! own process (macOS's go through `macos_host`), and what the meeting
+//! capsules and controller tell the window.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
+use super::Ui;
 use super::meetings::{Chapter, Meeting, Status, Transcript, Turn};
 #[cfg(not(target_os = "macos"))]
 use super::platform::MeetingRequest;
@@ -39,6 +41,7 @@ impl LocalMeetings {
                 crate::meeting::runtime::request(Controller::Start { title: None })
             }
             MeetingRequest::Stop => crate::meeting::runtime::request(Controller::Stop),
+            MeetingRequest::Import(_) => Err("Importing audio is only available on macOS.".into()),
             MeetingRequest::Summarize(id) => {
                 crate::meeting::runtime::request(Controller::Summarize(id))
             }
@@ -47,14 +50,20 @@ impl LocalMeetings {
                 .map(|_| ())
                 .map_err(failed),
             MeetingRequest::Trash(id) => crate::meeting::trash(&id).map_err(failed),
-            MeetingRequest::Reveal(id) => {
-                crate::meeting::reveal(&crate::meeting::root().map_err(failed)?.join(id));
+            MeetingRequest::Reveal(target) => {
+                // A file is selected in its folder; a recording folder opens
+                // itself.
+                if target.is_markdown() {
+                    crate::meeting::reveal(target.path());
+                } else {
+                    crate::meeting::open_folder(target.path());
+                }
                 Ok(())
             }
             MeetingRequest::RevealFolder => {
                 let folder = crate::app_settings::meeting_output_folder();
                 std::fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
-                crate::meeting::reveal(&folder);
+                crate::meeting::open_folder(&folder);
                 Ok(())
             }
             MeetingRequest::ChooseFolder => {
@@ -183,12 +192,16 @@ fn scan(
     Ok(scan
         .meetings
         .iter()
-        .map(|meeting| pane_meeting(meeting, now_ms))
+        .map(|meeting| pane_meeting(meeting, library.root(), now_ms))
         .collect())
 }
 
 /// A stored meeting as the pane shows it.
-fn pane_meeting(meeting: &crate::meeting::query::Meeting, now_ms: u64) -> Meeting {
+fn pane_meeting(
+    meeting: &crate::meeting::query::Meeting,
+    root: &std::path::Path,
+    now_ms: u64,
+) -> Meeting {
     use crate::meeting::MeetingStatus;
     let manifest = &meeting.manifest;
     let transcript = if meeting.entries.is_empty() && !meeting.warnings.is_empty() {
@@ -196,6 +209,7 @@ fn pane_meeting(meeting: &crate::meeting::query::Meeting, now_ms: u64) -> Meetin
     } else {
         Transcript::Loaded(turns(&meeting.entries))
     };
+    let folder = root.join(&meeting.id);
     Meeting {
         snapshots: crate::meeting::snapshots::read(&meeting.id),
         id: meeting.id.clone(),
@@ -219,15 +233,15 @@ fn pane_meeting(meeting: &crate::meeting::query::Meeting, now_ms: u64) -> Meetin
             .filter(|summary| !summary.is_empty()),
         notes_running: crate::meeting::notes_in_progress(&meeting.id),
         shared_room: manifest.mode == crate::meeting::MeetingMode::SharedRoom,
-        has_markdown: manifest
-            .export_path
-            .as_ref()
-            .is_some_and(|path| path.exists()),
+        reveal: crate::meeting::RevealTarget::for_meeting(manifest, &folder),
+        folder,
         error: manifest.error.clone(),
         export_error: manifest.export_error.clone(),
         notes_error: manifest.notes_error.clone(),
         live_error: manifest.live_transcription_error.clone(),
+        microphone_warning: manifest.microphone.warning,
         transcript,
+        imported: manifest.imported,
         // Sections come from the transcript lines, not the merged turns, as
         // the menu bar and `hex meetings show --chapter` read them.
         kept_for: (!meeting.status.is_active())
@@ -269,6 +283,18 @@ fn turns(entries: &[crate::meeting::TranscriptEntry]) -> Vec<Turn> {
             }
         })
         .collect()
+}
+
+/// The capsule committed a choice; adopt the owner's next revision.
+pub(crate) fn meeting_settings_saved(ui: &mut Ui) {
+    ui.send(super::host::Request::ReloadSettings);
+}
+
+/// A meeting recording could not start or finish; the Meetings pane says why.
+pub(crate) fn meeting_failed(ui: &mut Ui, error: String) {
+    ui.meetings.start_pending = false;
+    ui.meetings.stop_pending = false;
+    ui.meetings.runtime_error = Some(error);
 }
 
 #[cfg(test)]
@@ -382,11 +408,20 @@ mod tests {
             .map(|entry| serde_json::to_string(entry).unwrap() + "\n")
             .collect::<String>();
         std::fs::write(directory.join("transcript.ndjson"), ndjson).unwrap();
+        // A final publication includes both files, even though chapter
+        // queries render their own Markdown from the structured entries.
+        std::fs::write(
+            directory.join("transcript.md"),
+            "# Team sync\n\n**You** · 03:01\nNext, the motion lint.\n\n\
+             **You** · 06:26\nThat settles the lint.\n\n\
+             **You** · 06:30\nLast thing: a name for the chat app.\n",
+        )
+        .unwrap();
 
         let library = crate::meeting::query::Library::new(&root);
         let meeting = library.meeting(id).unwrap();
         let now_ms = crate::desktop::events::now_ms();
-        let pane = pane_meeting(&meeting, now_ms);
+        let pane = pane_meeting(&meeting, &root, now_ms);
         let chapters = &meeting.manifest.chapters;
         for (index, chapter) in pane.chapters.iter().enumerate() {
             // The menu bar's Copy Section (`meeting::section_for_id`).
@@ -469,7 +504,7 @@ mod tests {
         let library = crate::meeting::query::Library::new(&root);
         let meeting = library.meeting(id).unwrap();
         let now_ms = crate::desktop::events::now_ms();
-        let pane = pane_meeting(&meeting, now_ms);
+        let pane = pane_meeting(&meeting, &root, now_ms);
         assert!(pane.shared_room);
         let Transcript::Loaded(turns) = &pane.transcript else {
             panic!("transcript");
@@ -529,7 +564,7 @@ mod tests {
             pasted,
             "Room mic: Can someone dim the lights?\n\nCall audio: The demo is ready."
         );
-        assert_eq!(cursor.pending_turn_count(id, &entries), 0);
+        assert_eq!(cursor.pending(id, &entries).turns, 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

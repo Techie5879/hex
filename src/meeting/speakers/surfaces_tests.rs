@@ -92,7 +92,7 @@ fn a_line_copied_as_them_is_not_copied_again_once_named() {
         them(0, "Shall we start?", Some("Ada Lovelace")),
         them(5_000, "Yes, let's.", Some("Grace Hopper")),
     ];
-    assert_eq!(cursor.pending_turn_count("m", &named), 1);
+    assert_eq!(cursor.pending("m", &named).turns, 1);
     let next = cursor.consume_entries("m", &named, |_| Ok(())).unwrap();
     assert_eq!(next, "Grace Hopper: Yes, let's.");
 }

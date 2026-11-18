@@ -300,6 +300,7 @@ fn a_throwing_or_slow_transformation_pastes_the_text_unchanged() {
     for (id, why) in [("slow", "timed out after 200 ms"), ("broken", "Error: no")] {
         let mut processed = crate::dictation::processor::Processed {
             text: "as heard".into(),
+            nothing: false,
             observation: None,
             transformations: vec![id.into()],
         };
@@ -307,6 +308,7 @@ fn a_throwing_or_slow_transformation_pastes_the_text_unchanged() {
             &client,
             &ContextSnapshot::default(),
             &AtomicBool::new(false),
+            crate::dictation::processor::Source::Dictation,
         );
         assert_eq!(processed.text, "as heard");
         let fallback = processed.observation.unwrap().fallback.unwrap();

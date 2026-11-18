@@ -11,7 +11,10 @@ language:
 - **`rune-theme-opencode`** provides every colour, elevation, radius, type
   style, and motion token (`rune_theme_opencode::kit(dark)`), which is
   `@opencode/ui`'s tokens as data. Hex follows the system appearance, so every
-  view works in light and dark.
+  view works in light and dark; Labs › Appearance can force the main window
+  light or dark. The dictation HUD (including its previews) and the meeting
+  recording pill (including its expanded controls and finished summary) always draw dark. Other
+  overlays follow the OS.
 
 The window follows OpenCode Desktop's layout: a deep-background sidebar and a
 raised, rounded content panel. Hex keeps its own information, sections, and

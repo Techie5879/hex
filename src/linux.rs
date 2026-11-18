@@ -1,3 +1,4 @@
+pub(crate) mod annotate_overlays;
 pub(crate) mod app;
 pub(crate) mod atspi;
 pub(crate) mod audio_control;
@@ -13,21 +14,24 @@ pub(crate) mod icons;
 pub(crate) mod linux_input;
 pub(crate) use linux_input as input;
 pub(crate) mod input_route;
+pub(crate) mod live_typing;
 pub(crate) mod login_item;
 pub(crate) mod meeting_capsules;
 pub(crate) mod output;
 pub(crate) mod paste;
+pub(crate) mod pipewire;
 pub(crate) mod portal;
 pub(crate) mod remote_desktop;
 pub(crate) mod rune_hud;
 pub(crate) mod service;
 pub(crate) mod session;
 pub(crate) mod tray;
+pub(crate) mod typed_text;
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use color_eyre::Result;
 
 use crate::control::cli::ControlCli;
@@ -137,7 +141,9 @@ pub(crate) fn run(shutdown: &'static AtomicBool) -> Result<()> {
     // Control and read commands talk to the running Hex or read files: no
     // log, lock, or Hex of their own.
     let command = match command {
-        Command::Control(command) => crate::control::cli::finish(crate::control::cli::run(command)),
+        Command::Control(command) => {
+            crate::control::cli::finish(crate::control::cli::run(command, Cli::command))
+        }
         Command::Stop => crate::control::cli::finish(crate::control::cli::send(
             crate::control::ControlCommand::Quit { force: false },
             Default::default(),
@@ -242,6 +248,25 @@ mod tests {
     use super::{Cli, Command, ControlCli, SessionAdoption, session_adoption};
 
     #[test]
+    fn the_cli_prints_completion_scripts() {
+        use clap_complete::Shell;
+
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "hex", &mut script);
+            let script = String::from_utf8(script).expect("a completion script is UTF-8");
+            assert!(
+                script.contains("dictation"),
+                "{shell:?} script has no dictation"
+            );
+            assert!(
+                script.contains("service"),
+                "{shell:?} script has no Linux-only service command"
+            );
+        }
+    }
+
+    #[test]
     fn the_service_adopts_any_display_and_launchers_only_xwayland() {
         assert_eq!(
             session_adoption(&Command::Service { embedded: false }),
@@ -291,6 +316,7 @@ mod tests {
             &["hex", "status", "--json"][..],
             &["hex", "dictation", "stop", "--print"],
             &["hex", "paste-last"],
+            &["hex", "typed-text"],
             &["hex", "settings", "set", "sound_effects", "off"],
             &["hex", "model", "use", "parakeet_v3", "--language", "pl"],
             &["hex", "model", "install"],

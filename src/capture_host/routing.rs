@@ -25,6 +25,7 @@ use scrawl_capture::{Router, RouterConfig, RouterDirs, RuleKind, Undone};
 
 use super::{SharedOutcomes, lock};
 
+mod opencode;
 mod preparation;
 mod session_name;
 
@@ -36,8 +37,9 @@ use session_name::{name_answer, session_name};
 const RETRY_EVERY: Duration = Duration::from_secs(15);
 /// How long taking back a send may wait on OpenCode.
 const UNDO_DEADLINE: Duration = Duration::from_secs(10);
-/// How long a rule's send waits for Undo before it goes.
-const SEND_HOLD: Duration = Duration::from_secs(3);
+/// How long a rule's send waits for Undo before it goes. The capsule's
+/// Undo ring drains over this same time, from when the rule shows.
+pub const SEND_HOLD: Duration = Duration::from_secs(3);
 /// A held send resumes with at least this long left, so it never goes the
 /// instant the pointer leaves the capsule.
 const RESUME_LEFT: Duration = Duration::from_secs(1);
@@ -100,8 +102,8 @@ pub enum RouteAnswer {
     Looking,
     /// A saved folder rule matched locally; its session is still being resolved.
     ResolvingRule { name: String },
-    /// A rule the person saved (`routing.sites` or `routing.apps`, a
-    /// Shift pick's among them) says where it goes: sent to `to`
+    /// A rule the person saved (`routing.sites`, `routing.terminals` or
+    /// `routing.apps`, a Shift pick's among them) says where it goes: sent to `to`
     /// after the countdown, unless Undo cancels it. `site` is what the
     /// rule matches, for an always-rule sending it elsewhere instead.
     Rule {
@@ -114,8 +116,8 @@ pub enum RouteAnswer {
     /// HOME when Jev couldn't tell, a dev server's port, a page or its
     /// publisher, a name that was said). Nothing is sent until one is
     /// picked; picking one with `always` saves a rule for `site`, which is
-    /// what an always-rule would match (the site's host or the app's name),
-    /// `None` when no rule can be made.
+    /// what an always-rule would match (the site's host, the terminal's
+    /// folder or the app's name), `None` when no rule can be made.
     Guess {
         suggested: Vec<RouteDest>,
         recent: Vec<RouteDest>,
@@ -175,7 +177,7 @@ pub fn router() -> Router {
         Some(support.join("routing-decisions.jsonl")),
         Some(settings.captures_dir()),
     );
-    Router::new(config, dirs)
+    let router = Router::new(config, dirs)
         .with_log(|line| {
             if line.starts_with("deliver:") || line.starts_with("routing time:") {
                 tracing::info!(line, "capture router");
@@ -183,7 +185,10 @@ pub fn router() -> Router {
                 tracing::debug!(line, "capture router");
             }
         })
-        .with_summary(scrawl_capture::sketch::summary_markdown)
+        .with_summary(scrawl_capture::sketch::summary_markdown);
+    #[cfg(target_os = "windows")]
+    let router = router.with_opencode(std::sync::Arc::new(opencode::Wsl));
+    router
 }
 
 fn sends(config: &RouterConfig) -> bool {
@@ -194,6 +199,32 @@ fn sends(config: &RouterConfig) -> bool {
 /// sending captures to OpenCode sessions (`DisableOpenCodeProcessing`).
 fn opencode_managed() -> bool {
     crate::policy::Policy::current().locks(crate::policy::Lock::OpenCodeProcessing)
+}
+
+/// Open OpenCode sessions, newest first, as Send to… lists them, read
+/// within `budget`. Blocks; call it off the UI thread.
+#[cfg(target_os = "macos")]
+pub fn recent_sessions(budget: Duration) -> anyhow::Result<Vec<RouteDest>> {
+    anyhow::ensure!(!opencode_managed(), "OpenCode is turned off here");
+    let read = router().run(|| {
+        let mut get = routing::within(scrawl_capture::opencode::api_get_within, budget);
+        look::read_candidates(&mut get, &[], &[], 1)
+    });
+    if read.candidates.is_empty()
+        && let Some(error) = read.error
+    {
+        return Err(error);
+    }
+    Ok(recent(&read.candidates, &[], now_ms()))
+}
+
+/// Sends the PNG at `png` with `text` into `session`, as the router sends
+/// captures. Blocks; call it off the UI thread.
+#[cfg(target_os = "macos")]
+pub fn send_image(session: &str, text: &str, png: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(!opencode_managed(), "OpenCode is turned off here");
+    router().run(|| scrawl_capture::opencode::send_image_to_session(session, text, png))?;
+    Ok(())
 }
 
 /// The tab, terminal, and sessions behind a capture that just stopped,
@@ -239,9 +270,10 @@ fn look_with(context: RouteContext, router: Router, senses: look::Senses) -> Opt
                         context.app_pid,
                         deadline,
                         &senses,
-                        |url| {
-                            local.lock().unwrap_or_else(|e| e.into_inner()).url =
-                                url.map(str::to_owned)
+                        |url, terminal| {
+                            let mut local = local.lock().unwrap_or_else(|e| e.into_inner());
+                            local.url = url.map(str::to_owned);
+                            local.terminal = terminal.map(Path::to_path_buf);
                         },
                     );
                     *local.lock().unwrap_or_else(|e| e.into_inner()) = live.clone();
@@ -615,6 +647,7 @@ impl Worker {
             }
         }
         let unread = live.as_ref().and_then(sessions_unread);
+        let terminal = live.as_ref().and_then(|live| live.terminal.clone());
         // Judged even without the sessions: a rule, page, or publisher names
         // one outright, and the record keeps what was seen for a replay.
         let (decision, url) = router.run(|| match (live, &loaded) {
@@ -629,13 +662,14 @@ impl Worker {
             .as_ref()
             .and_then(|loaded| loaded.target.bundle_id.clone());
         let app = loaded.as_ref().and_then(|loaded| loaded.target.app.clone());
-        let rule = policy::rule_key(url.as_deref(), bundle_id.as_deref());
-        let site = rule.as_ref().map(|(kind, key)| match kind {
-            RuleKind::Site => key
+        let rule = policy::rule_key(url.as_deref(), terminal.as_deref(), bundle_id.as_deref());
+        let site = rule.as_ref().map(|rule| match rule {
+            (RuleKind::Site, key) => key
                 .split_once("://")
                 .map_or(key.as_str(), |(_, host)| host)
                 .to_owned(),
-            RuleKind::App => app.clone().unwrap_or_else(|| key.clone()),
+            (RuleKind::App, key) => app.clone().unwrap_or_else(|| key.clone()),
+            (RuleKind::Terminal, _) => site_of(rule),
         });
         let Answered {
             answer,
@@ -854,7 +888,9 @@ impl Worker {
             "capture sent"
         );
         current.sent = sent;
-        current.route.offer = offered.as_ref().map(|offer| offer.key.clone());
+        current.route.offer = offered
+            .as_ref()
+            .map(|offer| site_of(&(offer.kind, offer.key.clone())));
         current.offered = offered;
         current.route.delivery = Some(delivery);
         self.publish();
@@ -1096,9 +1132,8 @@ const AUTH_REFUSED: &str = "OpenCode needs a password Hex doesn't have";
 /// password itself.
 const AUTH_HINT: &str = "OpenCode refused Hex's password. Hex reads it from OpenCode's \
                          service.json under this user's ~/.local/state/opencode (or \
-                         OPENCODE_PASSWORD); an OpenCode running in WSL keeps its registration \
-                         inside WSL, which Hex on Windows can't read. The capture is saved and \
-                         copied either way";
+                         OPENCODE_PASSWORD); on Windows, turn on Labs › OpenCode in WSL \
+                         when OpenCode runs there. The capture is saved and copied either way";
 
 /// Whether a failed request (`{err:#}`) was OpenCode refusing the
 /// credentials.
@@ -1139,7 +1174,7 @@ fn send_why(error: &str, agent_host: bool) -> String {
     }
 }
 
-/// `routing.sites` or `routing.apps`, as `kind` says.
+/// `routing.sites`, `routing.apps` or `routing.terminals`, as `kind` says.
 fn rules_of(
     config: &scrawl_capture::RouterConfig,
     kind: RuleKind,
@@ -1147,6 +1182,22 @@ fn rules_of(
     match kind {
         RuleKind::Site => &config.sites,
         RuleKind::App => &config.apps,
+        RuleKind::Terminal => &config.terminals,
+    }
+}
+
+/// What the capsule calls the thing a rule would match: a site's origin
+/// or an app's bundle ID as they are, and a terminal by its folder's name
+/// ("hex terminal").
+fn site_of((kind, key): &(RuleKind, String)) -> String {
+    match kind {
+        RuleKind::Site | RuleKind::App => key.clone(),
+        RuleKind::Terminal => {
+            let name = Path::new(key)
+                .file_name()
+                .map_or_else(|| key.clone(), |n| n.to_string_lossy().into_owned());
+            format!("{name} terminal")
+        }
     }
 }
 
@@ -1156,9 +1207,10 @@ fn edit_routing(
     edit: impl FnOnce(&scrawl_capture::RouterConfig) -> color_eyre::Result<scrawl_capture::RouterConfig>,
 ) -> color_eyre::Result<()> {
     let mut settings = crate::app_settings::AppSettings::load()?;
+    let base = settings.clone();
     let next = edit(settings.capture.routing.config())?;
     settings.capture.routing = next.into();
-    settings.save()?;
+    base.update(&settings)?;
     #[cfg(target_os = "macos")]
     if let Some(runtime) = crate::macos_rune::runtime() {
         let _ = runtime.send(crate::macos_rune::Request::ReloadSettings);
@@ -1174,6 +1226,7 @@ fn forget_rule(saved: &SavedRule) {
         let rules = match saved.kind {
             RuleKind::Site => &mut next.sites,
             RuleKind::App => &mut next.apps,
+            RuleKind::Terminal => &mut next.terminals,
         };
         match &saved.before {
             Some(before) => rules.insert(saved.key.clone(), before.clone()),
@@ -1222,10 +1275,16 @@ fn answer_for(
         }
     };
     let mut answered = match decided {
-        // Only a rule the person saved, or a page naming its session, sends
-        // on its own; anything else the router would send is its first
-        // suggestion.
-        Decided::Judged(smart::Decision::Send { to, instead }) if policy::explicit(&to) => {
+        // The router also trusts a page naming its session. In Hex, only the
+        // user's saved site, terminal or app rule authorizes an automatic send.
+        Decided::Judged(smart::Decision::Send { to, instead })
+            if matches!(
+                to.lead().map(|r| r.basis),
+                Some(smart::Basis::Clue(
+                    smart::Source::Rule | smart::Source::AppRule | smart::Source::TerminalRule
+                ))
+            ) =>
+        {
             let dest = smart::destination_of(&to, url);
             let shown = Shown::rule(lead_why(&to));
             let to = scored(&to);
@@ -1323,7 +1382,7 @@ fn recent(candidates: &[smart::Candidate], shown: &[&str], now_ms: u64) -> Vec<R
 /// or nothing (a pick with no reason behind it, such as Jev's).
 fn why(via: &str) -> &str {
     match via {
-        "rule" | "app-rule" => "rule",
+        "rule" | "app-rule" | "terminal-rule" => "rule",
         "signed" => "page names it",
         "named" | "speech" => "mentioned",
         "sdk" | "page" => "same page",
@@ -1332,6 +1391,7 @@ fn why(via: &str) -> &str {
         "recorded" | "chosen" => "sent before",
         "publisher" => "published it",
         "dev-build" => "dev build",
+        "terminal-session" => "open in this terminal",
         "terminal" => "same terminal",
         "document" => "same file",
         "app" => "same app",
@@ -1681,11 +1741,16 @@ mod tests {
     }
 
     #[test]
-    fn only_a_saved_rule_or_a_signed_page_sends_on_its_own() {
+    fn only_a_saved_rule_sends_on_its_own() {
         use smart::{Basis, Source};
         for (basis, why, shown) in [
             (Basis::JevHome, "Jev couldn't tell, so HOME", ""),
             (Basis::Jev, "Jev's pick", ""),
+            (
+                Basis::Clue(Source::Signed),
+                "page names a session",
+                "page names it",
+            ),
             (
                 Basis::Clue(Source::Port),
                 "port 5173 is Alpha's",
@@ -1731,8 +1796,8 @@ mod tests {
                 "routing.apps sends com.example.app to /p/a",
             ),
             (
-                Basis::Clue(Source::Signed),
-                "/srv/artifacts/demo/index.html names it in a meta tag",
+                Basis::Clue(Source::TerminalRule),
+                "routing.terminals sends /p/a",
             ),
         ] {
             let answered = sent_by(basis, why);
@@ -1741,12 +1806,9 @@ mod tests {
                 Some("ses_a".into()),
                 "{why}: sent at once"
             );
-            let chip = if basis == Basis::Clue(Source::Signed) {
-                "page names it"
-            } else {
-                "rule"
-            };
-            assert!(matches!(answered.answer, RouteAnswer::Rule { ref to, .. } if to.why == chip));
+            assert!(
+                matches!(answered.answer, RouteAnswer::Rule { ref to, .. } if to.why == "rule")
+            );
             assert_eq!(answered.shown, Some(Shown::rule(why)));
         }
     }
@@ -1824,13 +1886,13 @@ mod tests {
     /// sheet yet, and the capsule said only "couldn't reach SEER".
     #[test]
     fn a_failed_send_says_what_went_wrong() {
-        let unread = "OpenCode said: Unable to read attachment: file:///Users/kit/Library/\
+        let unread = "OpenCode said: Unable to read attachment: file:///Users/alex/Library/\
                       Application%20Support/scrawl/captures/1.scrawl/contact-sheet.png: \
                       OpenCode API failed: HTTP 400 Bad Request";
         assert_eq!(send_why(unread, false), FILES_UNSEEN);
         assert_eq!(
             send_why(unread, true),
-            "Unable to read attachment: file:///Users/kit/Library/Applica…"
+            "Unable to read attachment: file:///Users/alex/Library/Applic…"
         );
         let cases = [
             (
@@ -2002,7 +2064,7 @@ mod tests {
         fn dev_server(port: u16) -> Option<PathBuf> {
             (port == 4948).then(|| PathBuf::from("/p/board"))
         }
-        fn no_terminal(_: &str) -> Option<(PathBuf, String)> {
+        fn no_terminal(_: &str, _: Option<i32>) -> Option<look::Pane> {
             None
         }
         fn board_tab(_: Option<&str>, _: Option<&str>) -> Option<String> {
@@ -2168,7 +2230,7 @@ mod tests {
                 assert!(started.elapsed() < Duration::from_millis(200));
                 let current = worker.current.as_ref().unwrap();
                 assert!(current.sent.is_none());
-                assert!(current.due.unwrap() >= started + Duration::from_secs(3));
+                assert!(current.due.unwrap() >= started + SEND_HOLD);
                 assert!(matches!(
                     current.route.answer,
                     RouteAnswer::Rule { .. } | RouteAnswer::ResolvingRule { .. }
@@ -2184,45 +2246,91 @@ mod tests {
             }
         }
 
-        /// A site rule for a gallery's whole host once sent pages a session
-        /// had signed elsewhere. The page's own session wins.
+        /// Both timings of the page read: already available at publication or
+        /// arriving with the final session list. Only a saved rule can send.
         #[test]
-        fn a_signed_page_sends_ahead_of_a_rule_for_its_host() {
-            let router = router_with(|c| {
-                c.sites
-                    .insert("https://gallery.example".into(), "ses_ruled".into());
-            });
-            let url = "https://gallery.example/2026-01-02-demo/";
-            let live = look::Live {
-                url: Some(url.into()),
-                clues: vec![smart::Clue::new(
-                    smart::Source::Signed,
-                    smart::Pointer::Session {
-                        id: "ses_signer".into(),
-                        directory: None,
-                    },
-                    "index.html names it in a meta tag",
-                )],
-                ..look::Live::default()
-            };
-            let (look, found) = held_look(router, live);
-            let outcomes = SharedOutcomes::default();
-            let mut worker = worker(outcomes.clone());
-            let bundle = written("com.example.browser");
-            lock(&outcomes).fail(bundle.clone(), "test".into());
-            worker.written(bundle, look);
-            let current = worker.current.as_ref().unwrap();
-            assert_eq!(
-                current.destination.as_ref().map(|d| d.session.as_str()),
-                Some("ses_signer")
-            );
-            assert!(
-                matches!(&current.route.answer, RouteAnswer::Rule { to, .. }
-                    if to.session == "ses_signer" && to.why == "page names it"),
-                "{:?}",
-                current.route.answer
-            );
-            drop(found);
+        fn page_metadata_is_only_a_suggestion_and_never_overrides_a_saved_rule() {
+            static POSTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+            fn post(path: &Path, id: &str) -> anyhow::Result<scrawl_capture::handoff::Posted> {
+                POSTS.lock().unwrap().push(id.into());
+                posted(path, id)
+            }
+            for saved in [false, true] {
+                for early in [false, true] {
+                    for source in [smart::Source::Signed, smart::Source::Page] {
+                        let router = router_with(|c| {
+                            c.jev_routing = false;
+                            if saved {
+                                c.sites
+                                    .insert("https://gallery.example".into(), "ses_ruled".into());
+                            }
+                        });
+                        let url = "https://gallery.example/2026-01-02-demo/";
+                        let mut live = look::Live {
+                            url: Some(url.into()),
+                            clues: vec![smart::Clue::new(
+                                source,
+                                smart::Pointer::Session {
+                                    id: "ses_signer".into(),
+                                    directory: None,
+                                },
+                                "index.html names it in a meta tag",
+                            )],
+                            ..look::Live::default()
+                        };
+                        let (look, found) = held_look(
+                            router,
+                            if early {
+                                live.clone()
+                            } else {
+                                look::Live::default()
+                            },
+                        );
+                        let outcomes = SharedOutcomes::default();
+                        let mut worker = worker(outcomes.clone());
+                        worker.forward = post;
+                        let bundle = written("com.example.browser");
+                        lock(&outcomes).fail(bundle.clone(), "test".into());
+                        worker.written(bundle.clone(), look);
+                        assert!(worker.current.as_ref().unwrap().sent.is_none());
+                        worker.hold(true);
+                        // The local tab matched a rule. A later partial read
+                        // can return the page clue without repeating the URL.
+                        if early {
+                            live.url = None;
+                        }
+                        found.send(Some(live)).unwrap();
+                        drop(found);
+                        let deadline = Instant::now() + Duration::from_secs(5);
+                        while worker.pending.is_some() {
+                            assert!(Instant::now() < deadline);
+                            worker.prepared();
+                            std::thread::yield_now();
+                        }
+                        assert!(POSTS.lock().unwrap().is_empty(), "not during Undo");
+                        worker.hold(false);
+                        settle(&mut worker); // Advance any send deadline and drain finalization.
+                        let current = worker.current.unwrap();
+                        if saved {
+                            assert_eq!(current.sent.unwrap().session, "ses_ruled");
+                            assert!(
+                                matches!(current.route.answer, RouteAnswer::Rule { to, .. } if to.session == "ses_ruled")
+                            );
+                            assert_eq!(std::mem::take(&mut *POSTS.lock().unwrap()), ["ses_ruled"]);
+                        } else {
+                            assert!(POSTS.lock().unwrap().is_empty(), "no automatic post");
+                            assert!(current.route.delivery.is_none());
+                            assert!(current.sent.is_none() && current.due.is_none());
+                            assert!(
+                                matches!(&current.route.answer, RouteAnswer::Guess { suggested, .. } if suggested[0].session == "ses_signer"),
+                                "{:?}",
+                                current.route.answer
+                            );
+                        }
+                        std::fs::remove_dir_all(bundle.parent().unwrap()).unwrap();
+                    }
+                }
+            }
         }
 
         /// A saved app rule to a session id sends before the session server
@@ -2265,6 +2373,47 @@ mod tests {
             );
             drop(found);
             worker.pending = None;
+            std::fs::remove_dir_all(bundle.parent().unwrap()).ok();
+        }
+
+        /// The capsule starts a rule's Undo ring when it first shows the
+        /// rule. A rule still being looked up when its capture was written
+        /// holds its send from its answer, not from the write, so the send
+        /// never goes before the ring runs out.
+        #[test]
+        fn a_rule_answered_late_holds_its_send_from_the_answer() {
+            let router = router_with(|c| {
+                c.apps
+                    .insert("com.example.board".into(), "ses_board".into());
+            });
+            let (look, found) = held_look(router, look::Live::default());
+            let outcomes = SharedOutcomes::default();
+            let mut worker = worker(outcomes.clone());
+            let bundle = written("com.example.board");
+            lock(&outcomes).fail(bundle.clone(), "test".into());
+            worker.written(bundle.clone(), look);
+            // As if the local read found no rule yet, and its hold ran out
+            // while the capsule still said nothing.
+            let current = worker.current.as_mut().unwrap();
+            current.route.answer = RouteAnswer::Looking;
+            current.destination = None;
+            current.due = Some(Instant::now());
+            drop(found);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while matches!(
+                worker.current.as_ref().unwrap().route.answer,
+                RouteAnswer::Looking
+            ) {
+                assert!(Instant::now() < deadline, "the rule never came");
+                worker.prepared();
+                std::thread::park_timeout(Duration::from_millis(1));
+            }
+            let answered = Instant::now();
+            let current = worker.current.as_ref().unwrap();
+            assert!(current.sent.is_none(), "not before its ring runs out");
+            assert!(current.due.unwrap() + Duration::from_millis(100) >= answered + SEND_HOLD);
+            settle(&mut worker);
+            assert!(worker.current.as_ref().unwrap().sent.is_some());
             std::fs::remove_dir_all(bundle.parent().unwrap()).ok();
         }
 
@@ -2617,12 +2766,21 @@ mod tests {
             }
         }
 
+        /// `path` as an absolute path on this OS: Windows needs a drive.
+        fn absolute(path: &str) -> String {
+            if cfg!(windows) {
+                format!("C:{path}")
+            } else {
+                path.to_owned()
+            }
+        }
+
         /// SEER and RUNE DESKTOP working in one checkout, SEER the newer.
         fn one_checkout(path: &str, _: Duration) -> anyhow::Result<Vec<u8>> {
             let session = |id: &str, title: &str, updated: u64| {
                 serde_json::json!({
                     "id": id, "title": title, "parentID": null,
-                    "time": {"updated": updated}, "location": {"directory": "/p/seer"},
+                    "time": {"updated": updated}, "location": {"directory": absolute("/p/seer")},
                 })
             };
             let all = [
@@ -2684,12 +2842,99 @@ mod tests {
             // What it saved before: the checkout, whose newest session is SEER.
             let (_, sent) = route(
                 router_with(|c| {
-                    c.apps.insert("com.example.rune".into(), "/p/seer".into());
+                    c.apps
+                        .insert("com.example.rune".into(), absolute("/p/seer"));
                 }),
                 "com.example.rune",
                 senses(),
             );
             assert_eq!(sent.as_deref(), Some("ses_seer"));
+        }
+
+        /// A Shift pick on a Ghostty capture remembers the terminal's folder,
+        /// not Ghostty: the next capture of a terminal there (or below) goes
+        /// to the session picked, and one elsewhere is only guessed.
+        #[test]
+        fn an_always_rule_from_a_terminal_keys_on_its_folder() {
+            const GHOSTTY: &str = "com.mitchellh.ghostty";
+            fn shell_in(folder: &str) -> look::Pane {
+                look::Pane {
+                    cwd: Some(folder.into()),
+                    title: "zsh".into(),
+                    foreground: None,
+                }
+            }
+            fn in_seer(_: &str, _: Option<i32>) -> Option<look::Pane> {
+                Some(shell_in(&absolute("/p/seer")))
+            }
+            fn below(_: &str, _: Option<i32>) -> Option<look::Pane> {
+                Some(shell_in(&absolute("/p/seer/site")))
+            }
+            fn elsewhere(_: &str, _: Option<i32>) -> Option<look::Pane> {
+                Some(shell_in(&absolute("/p/other")))
+            }
+            let senses = |terminal: fn(&str, Option<i32>) -> Option<look::Pane>| look::Senses {
+                hooks: Hooks {
+                    sdk: no_sdk,
+                    listener_dir: dev_server,
+                    api: one_checkout,
+                },
+                terminal,
+                ..senses(no_tab)
+            };
+            let context = || RouteContext {
+                front_bundle_id: Some(GHOSTTY.into()),
+                captured_bundle_id: Some(GHOSTTY.into()),
+                app_pid: None,
+            };
+            let look = look_with(
+                context(),
+                router_with(|c| c.smart_routing = true),
+                senses(in_seer),
+            )
+            .unwrap();
+            let mut worker = worker(SharedOutcomes::default());
+            worker.written(written(GHOSTTY), look);
+            settle(&mut worker);
+            let answer = &worker.current.as_ref().unwrap().route.answer;
+            assert!(
+                matches!(answer, RouteAnswer::Guess { site: Some(site), .. } if site == "seer terminal"),
+                "{answer:?}"
+            );
+            let (kind, key, target) = worker.rule_for("ses_rune").expect("a terminal rule");
+            assert_eq!(
+                (kind, key.as_str(), target.as_str()),
+                (RuleKind::Terminal, absolute("/p/seer").as_str(), "ses_rune")
+            );
+            let saved = RouterConfig {
+                send_captures: true,
+                smart_routing: true,
+                ..RouterConfig::default()
+            }
+            .with_rule(kind, &key, &target)
+            .unwrap();
+            for terminal in [
+                in_seer as fn(&str, Option<i32>) -> Option<look::Pane>,
+                below,
+            ] {
+                let (answer, sent) = route(
+                    router_with(|c| *c = saved.clone()),
+                    GHOSTTY,
+                    senses(terminal),
+                );
+                assert!(
+                    matches!(answer, RouteAnswer::Rule { ref to, .. } if to.session == "ses_rune"),
+                    "{answer:?}"
+                );
+                assert_eq!(sent.as_deref(), Some("ses_rune"));
+            }
+            let (answer, sent) = route(
+                router_with(|c| *c = saved.clone()),
+                GHOSTTY,
+                senses(elsewhere),
+            );
+            assert!(!matches!(answer, RouteAnswer::Rule { .. }), "{answer:?}");
+            assert_eq!(sent, None);
         }
 
         /// A real repository with SEER in its main checkout (the newer) and

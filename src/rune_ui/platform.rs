@@ -8,6 +8,8 @@
 //! preview data and record the requests, so macOS and Windows surfaces render
 //! and are tested on Linux; a native host fills the same data on its own OS.
 
+use std::path::PathBuf;
+
 use super::meetings::Meeting;
 use crate::audio::hex_microphone::{
     DemoPlaybackTrack, DemoSnapshot, DemoSourceKind, HexMicrophoneStatus, TunedFilterConfig,
@@ -62,6 +64,12 @@ pub(super) struct Capabilities {
     /// Input-source changes can operate the installed-model picker (macOS,
     /// Windows, and Linux on X11; Wayland has no general layout protocol).
     pub(super) keyboard_model_switching: bool,
+    /// A mode's speech model and language follow the frontmost application
+    /// (macOS and Windows; Labs › Switch model with app).
+    pub(super) app_model_switching: bool,
+    /// Labs › Transform typed text: run Output steps on text already typed in
+    /// the focused field and replace it (Linux).
+    pub(super) typed_text: bool,
 }
 
 impl Capabilities {
@@ -80,6 +88,8 @@ impl Capabilities {
         fun: true,
         modifier_sides: false,
         keyboard_model_switching: true,
+        app_model_switching: false,
+        typed_text: true,
     };
 
     pub(super) const MACOS: Self = Self {
@@ -97,6 +107,8 @@ impl Capabilities {
         fun: true,
         modifier_sides: true,
         keyboard_model_switching: true,
+        app_model_switching: true,
+        typed_text: false,
     };
 
     pub(super) const WINDOWS: Self = Self {
@@ -114,6 +126,8 @@ impl Capabilities {
         fun: false,
         modifier_sides: true,
         keyboard_model_switching: true,
+        app_model_switching: true,
+        typed_text: false,
     };
 
     /// This OS's capabilities, with the rows its window host decides.
@@ -162,7 +176,7 @@ impl CalendarView {
         Self {
             access: CalendarAccess::FullAccess,
             calendars: vec![
-                calendar("work", "Work", "kit@anoma.ly"),
+                calendar("work", "Work", "alex@example.com"),
                 calendar("home", "Home", "iCloud"),
                 calendar("birthdays", "Birthdays", "Other"),
             ],
@@ -173,7 +187,7 @@ impl CalendarView {
                     Some(CallProvider::GoogleMeet),
                 ),
                 meeting("Rune review", "Today · 4:00 PM", Some(CallProvider::Zoom)),
-                meeting("1:1 with Dax", "Tomorrow · 10:00 AM", None),
+                meeting("1:1 with Sam", "Tomorrow · 10:00 AM", None),
             ],
             connecting: false,
             error: None,
@@ -268,6 +282,8 @@ pub(super) enum ScrawlRequest {
 #[derive(Clone, Debug)]
 pub(super) struct PlatformState {
     pub(super) caps: Capabilities,
+    /// Whether this Linux window is on Wayland (previews are).
+    pub(super) wayland: bool,
     pub(super) input_sources: Vec<crate::transcription::keyboard_model_switching::InputSource>,
     /// Microphone, Accessibility, and whether the selected
     /// speech model is installed. Every permission is ready where the OS has
@@ -306,6 +322,10 @@ pub(super) struct PlatformState {
     /// A Wayland desktop without data-control (GNOME): a paste can't put
     /// the clipboard back unless Labs › Restore clipboard on GNOME is on.
     pub(super) clipboard_unrestorable: bool,
+    /// This Wayland desktop offers no input-method protocol, so Labs › Live
+    /// typing can't work here (GNOME, KDE): its card says so. Fixtures keep
+    /// it false.
+    pub(super) live_typing_unsupported: bool,
     /// A scene's state: [`Self::setup_status`] reports `permissions` on
     /// every OS rather than asking this computer.
     preview: bool,
@@ -362,10 +382,24 @@ pub(super) enum DemoRequest {
     StopPlayback,
 }
 
+/// Whether this real Linux session is Wayland; other OSes have no row that
+/// asks, and a preview is Wayland so its Linux scenes show the Wayland labs.
+fn wayland_session() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux::session::LinuxSession::detect().is_wayland()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
 impl PlatformState {
     pub(super) fn new(caps: Capabilities) -> Self {
         Self {
             caps,
+            wayland: wayland_session(),
             input_sources: Vec::new(),
             permissions: crate::desktop::onboarding::status_with_transcription_model(false),
             permissions_asked: Vec::new(),
@@ -383,6 +417,7 @@ impl PlatformState {
             relaunch_failed: false,
             paste: None,
             clipboard_unrestorable: false,
+            live_typing_unsupported: false,
             preview: false,
             developer: false,
             accessibility_renamed: false,
@@ -516,6 +551,7 @@ impl PlatformState {
     pub(super) fn preview(caps: Capabilities) -> Self {
         let mut state = Self::new(caps);
         state.preview = true;
+        state.wayland = true;
         let ready = PermissionState::Ready;
         state.permissions = SetupStatus {
             microphone: ready,
@@ -548,16 +584,22 @@ impl PlatformState {
     }
 }
 
-/// A meeting action the pane asks the meetings runtime for.
+/// A meeting action the pane asks the meetings runtime for. Reveal carries the
+/// `RevealTarget` the pane labeled its menu item with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum MeetingRequest {
     Start,
     Stop,
     SetMode(crate::meeting::mode::Change),
-    Rename { id: String, title: String },
+    /// Import a local audio file as a meeting (macOS; Labs › Import audio).
+    Import(PathBuf),
+    Rename {
+        id: String,
+        title: String,
+    },
     Trash(String),
     Summarize(String),
-    Reveal(String),
+    Reveal(crate::meeting::RevealTarget),
     RevealFolder,
     ChooseFolder,
 }
@@ -643,7 +685,9 @@ pub(super) fn poll_voice_filter(state: &mut PlatformState, refresh: bool) -> boo
             state.tuning = tuning;
             changed = true;
         }
-        let status = on.then(mic::status);
+        // A stable build has no filter, but an installed driver still needs
+        // its Uninstall.
+        let status = (on || mic::driver_bundle_installed()).then(mic::status);
         if state.hex_microphone != status {
             state.hex_microphone = status;
             changed = true;
@@ -845,12 +889,26 @@ const DIFFERENCES: &[(&str, Difference)] = &[
         "modifier_sides",
         Difference::Impossible("X11 grabs and the Wayland portal see no sides"),
     ),
+    (
+        "app_model_switching",
+        Difference::Pending(
+            "the Linux service has no foreground-mode model switch; X11 could watch the \
+             focused app the way mode matching already does",
+        ),
+    ),
+    (
+        "typed_text",
+        Difference::OsPattern(
+            "the feature reads and replaces text in the focused Linux app; macOS and Windows \
+             would need their own adapters",
+        ),
+    ),
 ];
 
 impl Capabilities {
     /// Every capability by name. Destructuring makes a new capability a
     /// compile error here until it is named.
-    pub(super) fn fields(self) -> [(&'static str, bool); 13] {
+    pub(super) fn fields(self) -> [(&'static str, bool); 15] {
         let Self {
             os: _,
             meetings,
@@ -866,6 +924,8 @@ impl Capabilities {
             fun,
             modifier_sides,
             keyboard_model_switching,
+            app_model_switching,
+            typed_text,
         } = self;
         [
             ("meetings", meetings),
@@ -881,6 +941,8 @@ impl Capabilities {
             ("fun", fun),
             ("modifier_sides", modifier_sides),
             ("keyboard_model_switching", keyboard_model_switching),
+            ("app_model_switching", app_model_switching),
+            ("typed_text", typed_text),
         ]
     }
 }

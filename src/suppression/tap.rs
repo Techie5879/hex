@@ -77,7 +77,7 @@ pub(super) const MOUSE_MASK: u64 = (1_u64 << EVENT_LEFT_MOUSE_DOWN)
 pub(super) const OBSERVATION_MASK: u64 = 1_u64 << EVENT_FLAGS_CHANGED;
 
 /// The shortcuts whose mouse button the session tap may consume.
-fn mouse_bindable(hotkeys: RuntimeHotkeys) -> [Option<RuntimeHotkey>; 5] {
+fn mouse_bindable(hotkeys: RuntimeHotkeys) -> impl Iterator<Item = RuntimeHotkey> {
     [
         Some(hotkeys.dictation),
         hotkeys.raw_dictation,
@@ -85,6 +85,9 @@ fn mouse_bindable(hotkeys: RuntimeHotkeys) -> [Option<RuntimeHotkey>; 5] {
         hotkeys.paste_last,
         hotkeys.paste_meeting,
     ]
+    .into_iter()
+    .flatten()
+    .chain(hotkeys.extra_dictation.into_iter().flatten())
 }
 
 /// Whether any shortcut is a mouse button, so clicks must pass through the
@@ -93,7 +96,7 @@ fn mouse_bindable(hotkeys: RuntimeHotkeys) -> [Option<RuntimeHotkey>; 5] {
 /// every event unchanged, breaks dragging windows between displays and
 /// Spaces (#1215).
 pub(super) fn filters_mouse(hotkeys: RuntimeHotkeys) -> bool {
-    mouse_bindable(hotkeys).iter().flatten().any(|binding| {
+    mouse_bindable(hotkeys).any(|binding| {
         binding
             .key_code
             .is_some_and(|code| crate::app_settings::HotkeyKey::mouse_button(code).is_some())
@@ -119,10 +122,7 @@ pub(super) fn mouse_input(
     hotkeys: RuntimeHotkeys,
 ) -> Option<InputEvent> {
     let code = crate::app_settings::HotkeyKey::mouse_code(button)?;
-    let bound = mouse_bindable(hotkeys)
-        .iter()
-        .flatten()
-        .any(|binding| binding.key_code == Some(code));
+    let bound = mouse_bindable(hotkeys).any(|binding| binding.key_code == Some(code));
     if bound {
         Some(InputEvent::Key { code, down, flags })
     } else {
@@ -172,35 +172,44 @@ pub(super) fn observation_mask() -> u64 {
     OBSERVATION_MASK
 }
 
+/// The callback-visible switches that decide what the tap keeps from the app.
+pub(super) struct TapFlags {
+    pub(super) takes_escape: Arc<AtomicBool>,
+    pub(super) cancel: Arc<Mutex<Option<RuntimeHotkey>>>,
+}
+
 pub(super) fn run_event_tap(
     sender: Sender<ObservedInputEvent>,
     activity: InputActivity,
-    takes_escape: Arc<AtomicBool>,
-    takes_cancel: Arc<AtomicBool>,
+    flags: TapFlags,
     pending: PendingInputEvents,
     run_loop: Arc<AtomicPtr<c_void>>,
     ready: SyncSender<Result<()>>,
 ) {
+    let sink = Arc::new(InputSink::new(sender, pending));
+    super::secure_input::attach(&sink);
     let mut context = Box::new(EventTapContext {
-        sender,
+        sink,
         activity,
-        takes_escape,
-        takes_cancel,
+        takes_escape: flags.takes_escape,
+        cancel: flags.cancel,
         key_tap: AtomicPtr::new(ptr::null_mut()),
         observation_tap: AtomicPtr::new(ptr::null_mut()),
         physical_tap: AtomicPtr::new(ptr::null_mut()),
+        dictation_key_tap: AtomicPtr::new(ptr::null_mut()),
+        microphone_key: Mutex::new(crate::app_settings::MicrophoneKey::default()),
         shortcut_suppression: Mutex::new(ShortcutSuppression::default()),
-        pending,
-        next_sequence: AtomicU64::new(0),
     });
     let context_ptr = &raw mut *context;
     // SAFETY: This is the dedicated event-tap thread's current run loop.
     let current_run_loop = unsafe { CFRunLoopGetCurrent() };
     let filter_mouse = filters_mouse(crate::app_settings::runtime_hotkeys());
+    let dictation_key = crate::labs::microphone_key();
     let mut taps = Box::new(TapSet {
         context: context_ptr,
         run_loop: current_run_loop,
         filter_mouse,
+        dictation_key,
         taps: TapKind::ALL.map(|kind| ManagedTap {
             kind,
             attached: None,
@@ -208,6 +217,9 @@ pub(super) fn run_event_tap(
         }),
     });
     for tap in &mut taps.taps {
+        if !tap.kind.wanted(dictation_key) {
+            continue;
+        }
         // SAFETY: `context` outlives `taps`, which is declared after it.
         if let Err(message) = unsafe { tap.attach(context_ptr, current_run_loop, filter_mouse) } {
             match tap.kind {
@@ -225,6 +237,13 @@ pub(super) fn run_event_tap(
                     tap.failing = true;
                     tracing::warn!(
                         "could not observe HID key presses; global-shortcut chords cannot cancel"
+                    );
+                }
+                TapKind::DictationKey => {
+                    tap.failing = true;
+                    tracing::warn!(
+                        error = message,
+                        "could not take the microphone key at the session tap; macOS keeps it"
                     );
                 }
             }
@@ -251,17 +270,32 @@ pub(super) enum TapKind {
     Key,
     Observation,
     Physical,
+    /// Labs › Microphone key alone's session tap. It exists only while that
+    /// lab is on; with it off the microphone key stays macOS's.
+    DictationKey,
 }
 
 impl TapKind {
-    const ALL: [Self; 3] = [Self::Key, Self::Observation, Self::Physical];
+    const ALL: [Self; 4] = [
+        Self::Key,
+        Self::Observation,
+        Self::Physical,
+        Self::DictationKey,
+    ];
 
     pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Key => "key",
             Self::Observation => "modifier",
             Self::Physical => "hid",
+            Self::DictationKey => "dictation",
         }
+    }
+
+    /// Whether this tap should exist now. Only the microphone key's tap comes
+    /// and goes with a lab.
+    pub(super) fn wanted(self, microphone_key: bool) -> bool {
+        !matches!(self, Self::DictationKey) || microphone_key
     }
 
     pub(super) fn slot(self, context: &EventTapContext) -> &AtomicPtr<c_void> {
@@ -269,11 +303,13 @@ impl TapKind {
             Self::Key => &context.key_tap,
             Self::Observation => &context.observation_tap,
             Self::Physical => &context.physical_tap,
+            Self::DictationKey => &context.dictation_key_tap,
         }
     }
 
-    /// The key and modifier taps carry shortcut state; a gap in them makes
-    /// the input history untrustworthy. The HID tap only adds chord evidence.
+    /// The key, modifier, and microphone-key taps carry shortcut state; a gap
+    /// in them makes the input history untrustworthy. The HID tap only adds
+    /// chord evidence.
     pub(super) fn tracks_shortcuts(self) -> bool {
         !matches!(self, Self::Physical)
     }
@@ -325,6 +361,22 @@ impl ManagedTap {
                 1_u64 << EVENT_KEY_DOWN,
                 physical_event_callback,
             ),
+            // The microphone (dictation) key: macOS's own symbolic hot keys are
+            // matched before the app and before the annotated-session tap, so
+            // only the session boundary still has the press. Filtering, so a
+            // press Hex takes does not also reach the app. handy-computer/
+            // handy-keys ships this key: its `src/platform/macos/listener.rs`
+            // lines 567-569 create the tap with
+            // `CGEventTapLocation::SessionEventTap`,
+            // `CGEventTapPlacement::HeadInsertEventTap`, and
+            // `CGEventTapOptions::Default`, and blocking the press there is
+            // what its users report keeps the system Dictation popup shut.
+            TapKind::DictationKey => (
+                SESSION_EVENT_TAP,
+                DEFAULT_EVENT_TAP,
+                KEY_MASK,
+                dictation_key::dictation_key_callback,
+            ),
         };
         // SAFETY: forwarded from the caller.
         let attached = unsafe {
@@ -342,13 +394,17 @@ pub(super) struct TapSet {
     /// Whether the key tap, rather than the passive one, receives mouse
     /// events (`tap_masks`).
     pub(super) filter_mouse: bool,
-    pub(super) taps: [ManagedTap; 3],
+    /// Whether Labs › Microphone key alone was on when the set last checked;
+    /// its tap exists only then.
+    pub(super) dictation_key: bool,
+    pub(super) taps: [ManagedTap; 4],
 }
 
 impl TapSet {
     /// Re-enables a disabled tap and recreates an invalidated or missing one.
     /// Also moves mouse events between the session taps once a mouse
-    /// shortcut is bound or unbound.
+    /// shortcut is bound or unbound, and adds or drops the microphone key's
+    /// tap as its lab turns on or off.
     pub(super) fn check(&mut self) {
         // SAFETY: `context` outlives this set (see `run_event_tap`).
         let context = unsafe { &*self.context };
@@ -359,11 +415,42 @@ impl TapSet {
             tracing::info!(filter_mouse, "moving mouse events between event taps");
             self.filter_mouse = filter_mouse;
         }
+        let dictation_key = crate::labs::microphone_key();
+        if dictation_key != self.dictation_key {
+            tracing::info!(
+                microphone_key = dictation_key,
+                "Labs › Microphone key alone changed; its session tap follows"
+            );
+            self.dictation_key = dictation_key;
+        }
         for tap in &mut self.taps {
             let kind = tap.kind.as_str();
+            if !tap.kind.wanted(self.dictation_key) {
+                if tap.attached.take().is_some() {
+                    tap.kind
+                        .slot(context)
+                        .store(ptr::null_mut(), Ordering::Release);
+                    tracing::info!(tap = kind, "removed the event tap its lab turned off");
+                    // Only this tap comes and goes, and only a press the
+                    // listener took has a release to lose: end that capture.
+                    // Removing the recorder's press cancels nothing.
+                    let mut microphone_key = context
+                        .microphone_key
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    interrupted |= microphone_key.holds_listener_press();
+                    microphone_key.clear();
+                }
+                tap.failing = false;
+                continue;
+            }
             let recreate = match &tap.attached {
                 None => true,
-                Some(_) if remask && !matches!(tap.kind, TapKind::Physical) => true,
+                Some(_)
+                    if remask && !matches!(tap.kind, TapKind::Physical | TapKind::DictationKey) =>
+                {
+                    true
+                }
                 // SAFETY: `tap.tap` is a live CFMachPort owned by `AttachedTap`.
                 Some(attached) if unsafe { CFMachPortIsValid(attached.tap) } == 0 => {
                     tracing::warn!(tap = kind, "event tap was invalidated; recreating it");

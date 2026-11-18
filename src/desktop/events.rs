@@ -1,4 +1,4 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -11,6 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
+
+/// The reason a deliberately empty voice prompt records on its discard.
+pub const VOICE_PROMPT_NOTHING_REASON: &str = "voice prompt asked nothing";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -134,6 +137,14 @@ pub enum DictationPhase {
 pub struct DictationProcessing {
     pub profile: String,
     pub latency_ms: u64,
+    /// The OpenCode rewrite model this processing ran against, as
+    /// `provider/id`: the one that answered, or on failure the one the request
+    /// asked for. Absent when no model was named (OpenCode's own default
+    /// answered, or an automatic choice failed before any model answered),
+    /// for the on-device Apple Intelligence cleanup pass, and in events
+    /// written before the model was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
 }
@@ -180,6 +191,10 @@ pub struct EventReader {
     discarding_record: bool,
     events: VecDeque<VoiceEvent>,
     current_context: Option<Option<String>>,
+    /// The file's first bytes when last read. The log trim
+    /// (`desktop::log_trim`) moves newer lines to the front in place, so a
+    /// changed head means the offset no longer points into the same records.
+    head: Vec<u8>,
     #[cfg(unix)]
     file_id: Option<(u64, u64)>,
 }
@@ -187,6 +202,7 @@ pub struct EventReader {
 const EVENT_RETENTION: usize = 1_024;
 const EVENT_WRITER_CAPACITY: usize = 1_024;
 const EVENT_READ_BUFFER_BYTES: usize = 16 * 1024;
+const HEAD_BYTES: usize = 64;
 // This is an observation-reader limit, not a limit on capture or persisted output.
 const MAX_EVENT_RECORD_BYTES: usize = 1024 * 1024;
 
@@ -195,7 +211,7 @@ impl EventLog {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = crate::app_paths::open_private_append(path)?;
         let (sender, receiver) = mpsc::sync_channel(EVENT_WRITER_CAPACITY);
         let error = Arc::new(Mutex::new(None));
         let worker_error = error.clone();
@@ -218,7 +234,7 @@ impl EventLog {
             .sender
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "event writer stopped"))?;
-        match sender.try_send(WriterMessage::Event(event.clone())) {
+        match sender.try_send(WriterMessage::Event(event.without_words())) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(WriterMessage::Event(event))) if event.is_replaceable() => {
                 Ok(())
@@ -324,6 +340,24 @@ impl EventLog {
         })
     }
 
+    /// A voice prompt that deliberately asked nothing.
+    #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
+    pub fn discarded_voice_prompt(&self) -> io::Result<()> {
+        self.discarded_dictation(Some(VOICE_PROMPT_NOTHING_REASON))
+    }
+
+    /// A recording shortcut whose microphone failed kept the audio delivered
+    /// before the loss; it is transcribed and copied instead of pasted.
+    pub fn salvaged_dictation(&self) -> io::Result<()> {
+        self.emit(&VoiceEvent::Dictation {
+            timestamp_ms: now_ms(),
+            phase: DictationPhase::Transcribing,
+            text: String::new(),
+            processing: None,
+            reason: Some("microphone-lost".into()),
+        })
+    }
+
     pub fn processed_dictation(
         &self,
         phase: DictationPhase,
@@ -341,6 +375,20 @@ impl EventLog {
 }
 
 impl VoiceEvent {
+    /// The event as it is written: what was said stays out of the log. The
+    /// log is a plain file kept for diagnosis, never trimmed by History's
+    /// retention or Clear all, and `hex logs` prints it, so dictated words
+    /// live only in History.
+    fn without_words(&self) -> Self {
+        let mut event = self.clone();
+        match &mut event {
+            Self::Transcript { text, .. } | Self::Dictation { text, .. } => text.clear(),
+            Self::Command { heard, .. } => heard.clear(),
+            _ => {}
+        }
+        event
+    }
+
     fn is_replaceable(&self) -> bool {
         matches!(
             self,
@@ -405,6 +453,7 @@ impl EventReader {
             discarding_record: false,
             events: VecDeque::new(),
             current_context: None,
+            head: Vec::new(),
             #[cfg(unix)]
             file_id: None,
         }
@@ -431,6 +480,12 @@ impl EventReader {
             }
             self.file_id = Some(file_id);
         }
+        let mut head = Vec::with_capacity(HEAD_BYTES);
+        (&mut file).take(HEAD_BYTES as u64).read_to_end(&mut head)?;
+        if !head.starts_with(&self.head) {
+            self.reset();
+        }
+        self.head = head;
         file.seek(SeekFrom::Start(self.offset))?;
         // Read this snapshot only: a busy writer must not keep refresh chasing EOF.
         let mut appended = file.take(metadata.len() - self.offset);
@@ -490,7 +545,8 @@ impl EventReader {
         self.events.iter().rev().take(limit).cloned().collect()
     }
 
-    #[cfg(test)]
+    /// The foreground app from the latest context event, even one older
+    /// than the retained events.
     pub fn current_context(&self) -> Option<&Option<String>> {
         self.current_context.as_ref()
     }
@@ -519,6 +575,7 @@ impl EventReader {
         self.discarding_record = false;
         self.events.clear();
         self.current_context = None;
+        self.head.clear();
         #[cfg(unix)]
         {
             self.file_id = None;
@@ -536,6 +593,7 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::OpenOptions;
 
     #[test]
     fn structural_event_equality_preserves_serialized_identity() {
@@ -603,6 +661,7 @@ mod tests {
             processing: Some(DictationProcessing {
                 profile: "slack".into(),
                 latency_ms: 321,
+                model: Some("anthropic/claude-haiku-4-5".into()),
                 fallback: Some("deadline exceeded".into()),
             }),
             reason: None,
@@ -617,11 +676,29 @@ mod tests {
                 processing: Some(DictationProcessing {
                     profile,
                     latency_ms: 321,
+                    model: Some(model),
                     fallback: Some(fallback),
                 }),
                 ..
-            } if profile == "slack" && fallback == "deadline exceeded"
+            } if profile == "slack"
+                && model == "anthropic/claude-haiku-4-5"
+                && fallback == "deadline exceeded"
         ));
+    }
+
+    /// Events and History entries written before the model was recorded still
+    /// decode, and name no model.
+    #[test]
+    fn dictation_processing_without_a_model_still_decodes() {
+        let decoded: DictationProcessing =
+            serde_json::from_str(r#"{"profile":"slack","latency_ms":321}"#).unwrap();
+
+        assert_eq!(decoded.model, None);
+        assert_eq!(decoded.fallback, None);
+        assert_eq!(
+            serde_json::to_string(&decoded).unwrap(),
+            r#"{"profile":"slack","latency_ms":321}"#
+        );
     }
 
     #[test]
@@ -713,6 +790,92 @@ mod tests {
         fs::remove_file(path).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "hex-private-log-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let new = directory.join("new.ndjson");
+        drop(EventLog::create(&new).unwrap());
+        assert_eq!(mode(&new), 0o600);
+
+        let older = directory.join("live.ndjson");
+        fs::write(&older, "").unwrap();
+        fs::set_permissions(&older, fs::Permissions::from_mode(0o644)).unwrap();
+        drop(EventLog::create(&older).unwrap());
+        assert_eq!(mode(&older), 0o600);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_log_never_keeps_what_was_said() {
+        let path = std::env::temp_dir().join(format!(
+            "hex-no-words-{}-{}.ndjson",
+            std::process::id(),
+            now_ms()
+        ));
+        let log = EventLog::create(&path).unwrap();
+        log.emit(&VoiceEvent::Transcript {
+            timestamp_ms: 1,
+            phase: TranscriptPhase::Completed,
+            latency_ms: 5,
+            text: "my bank pin is 4321".into(),
+        })
+        .unwrap();
+        log.dictation(DictationPhase::Pasted, "my bank pin is 4321")
+            .unwrap();
+        log.flush().unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        assert_eq!(written.lines().count(), 2);
+        // A digit sequence can occur inside a millisecond timestamp, so check
+        // the words instead.
+        assert!(!written.contains("bank pin"), "{written}");
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_reader_starts_over_when_the_log_is_trimmed_under_it() {
+        let path = std::env::temp_dir().join(format!(
+            "hex-trimmed-reader-{}-{}.ndjson",
+            std::process::id(),
+            now_ms()
+        ));
+        let line = |timestamp_ms: u64| {
+            format!(
+                "{{\"kind\":\"api_server_stopped\",\"timestamp_ms\":{}}}\n",
+                100 + timestamp_ms
+            )
+        };
+        fs::write(&path, (1..=4).map(line).collect::<String>()).unwrap();
+        let mut reader = EventReader::open(&path);
+        reader.refresh().unwrap();
+        assert_eq!(reader.offset, fs::metadata(&path).unwrap().len());
+
+        // Newer lines arrive, then a trim keeps the newest ones from the front,
+        // so the file stays longer than the reader's offset.
+        let trimmed: String = (5..=12).map(line).collect();
+        fs::write(&path, &trimmed).unwrap();
+        assert!(trimmed.len() as u64 > reader.offset);
+        reader.refresh().unwrap();
+
+        // Read again from the start: exactly the trimmed file's events, none
+        // left from before the trim and none taken from its middle.
+        assert_eq!(reader.offset, trimmed.len() as u64);
+        assert_eq!(reader.events().len(), 8);
+        assert!(matches!(
+            reader.events().front(),
+            Some(VoiceEvent::ApiServerStopped { timestamp_ms: 105 })
+        ));
+        fs::remove_file(path).unwrap();
+    }
+
     #[test]
     fn a_bounded_flush_writes_every_queued_event() {
         let path = std::env::temp_dir().join(format!(
@@ -744,10 +907,11 @@ mod tests {
         })
         .unwrap();
         for timestamp_ms in 1..=2048 {
-            log.dictation(
-                DictationPhase::Pasted,
-                format!("{timestamp_ms}: {}", "é".repeat(100)),
-            )
+            log.emit(&VoiceEvent::ApiAuthFailed {
+                timestamp_ms,
+                method: "POST".into(),
+                path: "é".repeat(100),
+            })
             .unwrap();
         }
         log.flush().unwrap();
@@ -756,9 +920,13 @@ mod tests {
         assert_eq!(reader.offset, fs::metadata(&path).unwrap().len());
         assert_eq!(reader.events().len(), EVENT_RETENTION);
         assert_eq!(reader.current_context(), Some(&Some("Fixture".into())));
-        assert!(
-            matches!(reader.events().back(), Some(VoiceEvent::Dictation { text, .. }) if text.starts_with("2048:"))
-        );
+        assert!(matches!(
+            reader.events().back(),
+            Some(VoiceEvent::ApiAuthFailed {
+                timestamp_ms: 2048,
+                ..
+            })
+        ));
         // Scratch space follows one record, never the size of the file.
         assert!(reader.pending.capacity() <= EVENT_READ_BUFFER_BYTES);
         drop(log);

@@ -8,22 +8,23 @@
 use rune::{El, Icon, row, text};
 
 use super::controls::{
-    ButtonKind, Choice, DESCRIPTION, Paint, button, card, icon_row, icon_toggle_row, note, section,
-    select, setting_row,
+    ButtonKind, CardRow, Choice, DESCRIPTION, Paint, button, card, folder_label, folding, icon_row,
+    icon_toggle_row, note, section, select, setting_row, toggle_row,
 };
-use super::lists::{PermissionControl, Tone, permission_control, tone_tag};
+use super::lists::{PermissionControl, permission_control, small_button};
 use super::paste_access::PasteAccess;
 use super::platform::{CalendarRequest, MeetingRequest, NotesAvailability, Os, PlatformRequest};
 use super::settings::toggle_menu;
 use super::{Menu, Pane, ShortcutTarget, Ui, icons};
 use crate::app_settings::{
-    AppSettings, CALENDAR_LEAD_MINUTES, HotkeyBinding, KNOWN_MEETING_PROVIDERS, MeetingPolicy,
-    MeetingProviderChoice, MeetingRetention, ModifierSide,
+    AppSettings, CALENDAR_LEAD_MINUTES, HotkeyBinding, MeetingPolicy, MeetingProviderChoice,
+    MeetingRetention, MeetingSummaries, ModifierSide,
 };
 use crate::audio::hex_microphone::DriverActionState;
 use crate::calendar::{CalendarAccess, CallProvider};
 use crate::desktop::i18n::{tr, tr_fill, tr_named};
 use crate::desktop::onboarding::{PermissionAction, PermissionKind, PermissionWarning};
+use crate::labs::Feature;
 
 /// A permission's row key, its name as System Settings lists it, and what
 /// Hex cannot do without it.
@@ -236,12 +237,10 @@ pub(super) fn error_section(ui: &Ui, p: Paint) -> Option<El> {
 
 fn notes_description(availability: NotesAvailability) -> &'static str {
     match availability {
-        NotesAvailability::Available => {
-            tr("Meeting titles and short summaries, written on this Mac")
-        }
+        NotesAvailability::Available => tr("Titles and short summaries, written on this Mac"),
         NotesAvailability::DeviceNotEligible => tr("This Mac does not support Apple Intelligence"),
         NotesAvailability::NotEnabled => {
-            tr("Turn on Apple Intelligence in System Settings to use this")
+            tr("Turn on Apple Intelligence in System Settings to write them on this Mac")
         }
         NotesAvailability::ModelNotReady => tr("The Apple Intelligence model is still downloading"),
         NotesAvailability::UnsupportedSystem => tr("Requires macOS 26 or later"),
@@ -249,16 +248,172 @@ fn notes_description(availability: NotesAvailability) -> &'static str {
     }
 }
 
-fn folder_label(ui: &Ui) -> String {
-    let folder = ui.settings.meetings.resolved_output_folder();
-    crate::app_paths::home_dir()
-        .and_then(|home| {
-            folder
-                .strip_prefix(home)
-                .ok()
-                .map(|relative| format!("~/{}", relative.display()))
-        })
-        .unwrap_or_else(|| folder.display().to_string())
+/// The second line of Summaries' On this Mac option: what it does, or why
+/// it can't be chosen and the fix.
+fn on_this_mac_detail(availability: NotesAvailability) -> &'static str {
+    match availability {
+        NotesAvailability::Available => tr("Apple Intelligence. Nothing leaves this Mac"),
+        NotesAvailability::NotEnabled => tr("Turn on Apple Intelligence in System Settings"),
+        other => notes_description(other),
+    }
+}
+
+/// Why Labs › Clean up with Apple Intelligence can't run on this Mac now: the
+/// same words Summaries uses, so every Apple Intelligence row gives one
+/// reason. `None` while it can run.
+pub(super) fn clean_up_note(availability: NotesAvailability) -> Option<String> {
+    let reason = match availability {
+        NotesAvailability::Available => return None,
+        NotesAvailability::DeviceNotEligible => tr("This Mac does not support Apple Intelligence"),
+        NotesAvailability::NotEnabled => tr("Turn on Apple Intelligence in System Settings"),
+        NotesAvailability::ModelNotReady => tr("The Apple Intelligence model is still downloading"),
+        NotesAvailability::UnsupportedSystem => tr("Requires macOS 26 or later"),
+        NotesAvailability::Unknown => tr("Apple Intelligence is unavailable"),
+    };
+    Some(reason.to_owned())
+}
+
+/// Meetings › Settings › After a meeting › Summaries: who writes a meeting's
+/// title and summary, with the OpenCode model nested under it while OpenCode
+/// writes them. A Mac picks Off, On this Mac, or OpenCode; elsewhere a
+/// switch turns OpenCode on. Nothing falls back: an unavailable choice stays
+/// chosen and says how to fix it.
+fn summaries_rows(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<CardRow> {
+    let chosen = ui.settings.meetings.summaries;
+    let managed = opencode_managed();
+    let mut rows: Vec<CardRow> = Vec::new();
+    if ui.platform.caps.os == Os::Macos {
+        let notes = ui.platform.notes;
+        let (description, color) = match chosen {
+            MeetingSummaries::Off => (tr("No titles or summaries"), p.muted()),
+            MeetingSummaries::Mac if notes.is_available() => (notes_description(notes), p.muted()),
+            MeetingSummaries::Mac => (notes_description(notes), p.warning()),
+            MeetingSummaries::OpenCode => {
+                (tr("Sends the transcript to your OpenCode model"), p.muted())
+            }
+        };
+        let label = |choice: MeetingSummaries| match choice {
+            MeetingSummaries::Off => tr("Off"),
+            MeetingSummaries::Mac => tr("On this Mac"),
+            MeetingSummaries::OpenCode => "OpenCode",
+        };
+        let options = [
+            SummariesOption {
+                choice: MeetingSummaries::Off,
+                detail: None,
+                disabled: false,
+            },
+            SummariesOption {
+                choice: MeetingSummaries::Mac,
+                detail: Some(on_this_mac_detail(notes)),
+                disabled: !notes.is_available(),
+            },
+            SummariesOption {
+                choice: MeetingSummaries::OpenCode,
+                detail: Some(if managed {
+                    super::managed_note()
+                } else {
+                    tr("Sends the transcript to your OpenCode model")
+                }),
+                disabled: managed,
+            },
+        ];
+        let menu = Menu::Pick("meeting-summaries");
+        let labels: Vec<&str> = options.iter().map(|option| label(option.choice)).collect();
+        let trigger = rune_kit::Select::new("meeting-summaries-control", &labels)
+            .appearance(rune_kit::SelectAppearance::Inline)
+            .current(Some(label(chosen)))
+            .open(ui.open == Some(menu))
+            .on_toggle(move |ui: &mut Ui| toggle_menu(ui, menu))
+            .trigger(p.k)
+            .label(tr("Summaries"))
+            .a11y_value(label(chosen));
+        let mut picker = rune_kit::Menu::new("meeting-summaries-menu")
+            .trigger(trigger)
+            .placement(rune_kit::Placement::BottomEnd)
+            .gutter(4.0)
+            .min_width(380.0)
+            .open(ui.open == Some(menu))
+            .on_close(|ui: &mut Ui| ui.open = None);
+        for option in options {
+            let mut item = rune_kit::MenuItem::new(label(option.choice))
+                .checked(option.choice == chosen)
+                .disabled(option.disabled);
+            if let Some(detail) = option.detail {
+                item = item.description(detail);
+            }
+            let choice = option.choice;
+            picker = picker.item(item.on_select(move |ui: &mut Ui| {
+                ui.open = None;
+                ui.update(|settings| settings.meetings.summaries = choice);
+            }));
+            if choice == MeetingSummaries::Off {
+                picker = picker.separator();
+            }
+        }
+        rows.push(
+            super::controls::icon_described_row(
+                p,
+                "meeting-summaries",
+                &icons::SPARKLES,
+                tr("Summaries"),
+                Some((description.to_owned(), color)),
+                picker.build(p.k, layer).mr(-8.0),
+            )
+            .into(),
+        );
+    } else if managed {
+        rows.push(
+            super::controls::managed_row(
+                p,
+                "meeting-summaries",
+                Some(&icons::SPARKLES),
+                tr("Summaries"),
+            )
+            .into(),
+        );
+    } else {
+        rows.push(
+            icon_toggle_row(
+                p,
+                "meeting-summaries",
+                &icons::SPARKLES,
+                tr("Summaries"),
+                tr("Titles and short summaries. Sends the transcript to your OpenCode model"),
+                chosen == MeetingSummaries::OpenCode,
+                |ui: &mut Ui| {
+                    let summaries = match ui.settings.meetings.summaries {
+                        MeetingSummaries::OpenCode => MeetingSummaries::Off,
+                        _ => MeetingSummaries::OpenCode,
+                    };
+                    ui.update(|settings| settings.meetings.summaries = summaries);
+                },
+            )
+            .into(),
+        );
+    }
+    let model = if summary_model_shown(ui) {
+        super::models::rows(ui, p, super::models::Target::MeetingSummary, layer)
+            .into_iter()
+            .map(super::controls::nested)
+            .chain(super::models::unavailable(
+                ui,
+                p,
+                crate::desktop::opencode_catalog::OpenCodeFeature::MeetingSummary,
+            ))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    rows.push(folding("summary-model", model));
+    rows
+}
+
+/// One of Summaries' options on a Mac.
+struct SummariesOption {
+    choice: MeetingSummaries,
+    detail: Option<&'static str>,
+    disabled: bool,
 }
 
 /// Whether an organization turned OpenCode processing off.
@@ -292,9 +447,10 @@ pub(super) fn meetings_toggle(ui: &Ui, p: Paint) -> El {
 }
 
 /// Meetings › Settings: the opt-in (and the system-audio permission while
-/// it's missing); once on, how long meetings are kept, Calendar and each detected call provider's Ask /
-/// Always record / Never offer choice; behind Advanced the indicator,
-/// folder, Apple Intelligence notes, and the granted permission.
+/// it's missing); once on, summaries and how long meetings and their audio
+/// are kept, the export folder and file choices, Calendar, and each
+/// detected call provider's Ask / Always record / Never offer choice; behind
+/// Advanced the indicator and the granted permission.
 pub(super) fn meetings_settings(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<El> {
     use super::general::advanced_toggle;
     let meetings = &ui.settings.meetings;
@@ -342,8 +498,9 @@ pub(super) fn meetings_settings(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<E
             rows.push(system_audio);
         }
     }
+    let mut after = Vec::new();
+    let mut export: Vec<CardRow> = Vec::new();
     if meetings.enabled {
-        rows.push(retention_row(ui, p, layer));
         more.push(icon_toggle_row(
             p,
             "meeting-indicator",
@@ -356,97 +513,87 @@ pub(super) fn meetings_settings(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> Vec<E
                 ui.update(|settings| settings.meetings.show_recording_indicator = show);
             },
         ));
-        more.push(icon_row(
-            p,
-            "meeting-folder",
-            &icons::FOLDER,
-            tr("Transcript folder"),
-            Some(tr("Finished meetings are saved here as Markdown")),
-            row()
-                .key("controls")
-                .gap(8.0)
-                .center_y()
-                .child(button(
-                    p,
-                    "reveal-meeting-folder",
-                    tr("Reveal"),
-                    ButtonKind::Secondary,
-                    |ui: &mut Ui, _| ui.ask(PlatformRequest::Meeting(MeetingRequest::RevealFolder)),
-                ))
-                .child(button(
-                    p,
-                    "choose-meeting-folder",
-                    &folder_label(ui),
-                    ButtonKind::Secondary,
-                    |ui: &mut Ui, _| ui.ask(PlatformRequest::Meeting(MeetingRequest::ChooseFolder)),
-                )),
-        ));
-        if ui.platform.caps.os == Os::Macos {
-            more.push(icon_toggle_row(
+        after.extend(summaries_rows(ui, p, layer));
+        after.push(retention_row(ui, p, layer).into());
+        after.push(audio_retention_row(ui, p, layer).into());
+        export.push(
+            icon_row(
                 p,
-                "meeting-notes",
-                &icons::SPARKLES,
-                tr("Summarize with Apple Intelligence"),
-                notes_description(ui.platform.notes),
-                meetings.summarize_with_apple_intelligence,
-                |ui: &mut Ui| {
-                    let enabled = !ui.settings.meetings.summarize_with_apple_intelligence;
-                    ui.update(|settings| {
-                        settings.meetings.summarize_with_apple_intelligence = enabled
-                    });
-                },
-            ));
-        }
-        more.push(if opencode_managed() {
-            super::controls::managed_row(
-                p,
-                "meeting-notes-opencode",
-                Some(&icons::SPARKLES),
-                tr("Summarize with OpenCode"),
+                "meeting-folder",
+                &icons::FOLDER,
+                tr("Transcript folder"),
+                Some(tr("Finished meetings are saved here as Markdown")),
+                row()
+                    .key("controls")
+                    .gap(8.0)
+                    .center_y()
+                    .child(button(
+                        p,
+                        "reveal-meeting-folder",
+                        tr("Reveal"),
+                        ButtonKind::Secondary,
+                        |ui: &mut Ui, _| {
+                            ui.ask(PlatformRequest::Meeting(MeetingRequest::RevealFolder))
+                        },
+                    ))
+                    .child(button(
+                        p,
+                        "choose-meeting-folder",
+                        &folder_label(&ui.settings.meetings.resolved_output_folder()),
+                        ButtonKind::Secondary,
+                        |ui: &mut Ui, _| {
+                            ui.ask(PlatformRequest::Meeting(MeetingRequest::ChooseFolder))
+                        },
+                    )),
             )
-        } else {
-            icon_toggle_row(
-            p,
-            "meeting-notes-opencode",
-            &icons::SPARKLES,
-            tr("Summarize with OpenCode"),
-            if ui.platform.caps.os == Os::Macos {
-                tr("When Apple Intelligence is off or unavailable. Sends the transcript to your OpenCode model")
-            } else {
-                tr("Meeting titles and short summaries. Sends the transcript to your OpenCode model")
-            },
-            meetings.summarize_with_opencode,
-            |ui: &mut Ui| {
-                let enabled = !ui.settings.meetings.summarize_with_opencode;
-                ui.update(|settings| settings.meetings.summarize_with_opencode = enabled);
-            },
-        )
-        });
-        // Labs › Choose meeting summary model, for OpenCode's notes only.
-        if summary_model_shown(ui) {
-            more.extend(super::models::rows(
-                ui,
-                p,
-                super::models::Target::MeetingSummary,
-                layer,
-            ));
-            more.extend(super::models::unavailable(
-                ui,
-                p,
-                crate::desktop::opencode_catalog::OpenCodeFeature::MeetingSummary,
-            ));
-        }
+            .into(),
+        );
         if let Some(error) = &ui.platform.meeting_folder_error {
-            // A failed folder change shows where it happened, opening the fold.
-            more.push(note("meeting-folder-error", error, p.danger()));
+            export.push(note("meeting-folder-error", error, p.danger()).into());
         }
+        export.push(
+            icon_toggle_row(
+                p,
+                "meeting-descriptive-filenames",
+                &icons::PEN,
+                tr("Descriptive meeting file names"),
+                tr(
+                    "Rename exported meeting Markdown to the meeting's title once notes or a rename provide one, keeping the date and time",
+                ),
+                meetings.export.descriptive_filenames,
+                |ui: &mut Ui| {
+                    let on = !ui.settings.meetings.export.descriptive_filenames;
+                    ui.update(|settings| settings.meetings.export.descriptive_filenames = on);
+                },
+            )
+            .into(),
+        );
+        export.push(
+            icon_toggle_row(
+                p,
+                "meeting-notes-file",
+                &icons::BOOK,
+                tr("Separate notes file"),
+                tr(
+                    "Write the meeting's notes to their own file next to the transcript, sharing its name, with a link back to the transcript",
+                ),
+                meetings.export.notes_file,
+                |ui: &mut Ui| {
+                    let on = !ui.settings.meetings.export.notes_file;
+                    ui.update(|settings| settings.meetings.export.notes_file = on);
+                },
+            )
+            .into(),
+        );
     }
     let mut sections = vec![card(p, "meetings", rows)];
     if meetings.enabled {
+        sections.push(section(p, "after-meeting", tr("After a meeting"), after));
+        sections.push(section(p, "meeting-export", tr("Export"), export));
         sections.extend(calendar_section(ui, p, layer));
         sections.push(detected_calls_section(ui, p, layer));
         sections.push(advanced_toggle(ui, p, Pane::Meetings));
-        if meetings_advanced_shown(ui) {
+        if super::general::advanced_open(ui, Pane::Meetings) {
             sections.push(card(p, "advanced", more));
         }
     }
@@ -493,46 +640,78 @@ fn retention_row(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
     )
 }
 
-/// Whether Meetings › Settings shows its Advanced card: the fold is open, or
-/// a failed folder change opened it to show where.
-fn meetings_advanced_shown(ui: &Ui) -> bool {
-    super::general::advanced_open(ui, Pane::Meetings) || ui.platform.meeting_folder_error.is_some()
+/// How long finished meetings keep their audio, apart from their text.
+/// Unchosen follows Keep meetings.
+fn audio_retention_row(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
+    let chosen = ui.settings.meetings.audio_retention;
+    let mut labels = vec![tr("Same as meetings").to_owned()];
+    labels.extend(
+        MeetingRetention::ALL
+            .iter()
+            .map(|retention| tr(retention.label()).to_owned()),
+    );
+    let selected = chosen
+        .and_then(|chosen| {
+            MeetingRetention::ALL
+                .iter()
+                .position(|choice| *choice == chosen)
+        })
+        .map(|index| index + 1)
+        .unwrap_or_default();
+    let control = super::general::quiet_select(
+        ui,
+        p,
+        Menu::Pick("meeting-audio-retention"),
+        "meeting-audio-retention-control".into(),
+        tr("Keep audio"),
+        labels,
+        selected,
+        |ui, index| {
+            ui.update(|settings| {
+                settings.meetings.audio_retention = index
+                    .checked_sub(1)
+                    .map(|index| MeetingRetention::ALL[index]);
+            });
+        },
+        layer,
+    );
+    icon_row(
+        p,
+        "meeting-audio-retention",
+        &icons::CLOCK,
+        tr("Keep audio"),
+        match chosen {
+            None => Some(tr(
+                "Audio follows Keep meetings. Choose a time to delete only meeting audio first",
+            )),
+            Some(MeetingRetention::Forever) => None,
+            Some(_) => Some(tr(
+                "Finished meetings keep their transcript, notes, summary, and Markdown after their audio moves to the Trash",
+            )),
+        },
+        control,
+    )
 }
 
-/// Whether Labs › Choose meeting summary model's picker shows: Meetings ›
-/// Settings › Advanced shows with Summarize with OpenCode and the lab on.
-/// The window reads the OpenCode catalog only while it does.
+/// Whether the summary model picker shows: Meetings › Settings with
+/// Summaries set to OpenCode. The window reads the OpenCode catalog only
+/// while it does.
 pub(super) fn summary_model_shown(ui: &Ui) -> bool {
-    let summary_model = crate::labs::Feature::MeetingSummaryModel;
     ui.pane == Pane::Meetings
         && !ui.labs_open
         && super::meetings::available(ui)
         && ui.meetings.view == super::meetings::View::Settings
         && ui.settings.meetings.enabled
-        && meetings_advanced_shown(ui)
-        && ui.settings.meetings.summarize_with_opencode
+        && ui.settings.meetings.summaries == MeetingSummaries::OpenCode
         && !opencode_managed()
-        && summary_model.managed().is_none()
-        && summary_model.shipped()
-        && summary_model.on(&ui.settings)
 }
 
-/// What the summary model row says about the saved `provider/model`.
-pub(super) fn summary_model_about(saved: &str) -> String {
-    match crate::meeting::generator::parse_model(saved) {
-        Some((provider, model)) => tr_named(
-            "Summaries use {model}. If it isn't available, the meeting shows the error instead of trying another model",
-            &[("model", &format!("{provider}/{model}"))],
-        ),
-        None if saved.trim().is_empty() => tr(
-            "Empty: Hex tries its list of fast models in order and uses the first one OpenCode has",
-        )
-        .to_owned(),
-        None => tr(
-            "Write it as provider/model, such as openai/gpt-5.4-mini. Until then, Hex tries its list of fast models",
-        )
-        .to_owned(),
-    }
+/// What the summary model row says about a saved `provider/model` it can't
+/// use, such as one typed with `hex settings`; `None` when it can.
+pub(super) fn summary_model_problem(saved: &str) -> Option<&'static str> {
+    (!saved.trim().is_empty() && crate::meeting::generator::parse_model(saved).is_none()).then(|| {
+        tr("Write it as provider/model, such as openai/gpt-5.4-mini. Until then, Hex uses OpenCode's default model")
+    })
 }
 
 static ZOOM_ICON: Icon = Icon {
@@ -754,38 +933,87 @@ fn calendars_row(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
             }
         })
         .collect();
-    setting_row(
+    let select = select(
         p,
-        "calendar-calendars",
+        "calendar-calendars-control",
         tr("Calendars"),
-        None,
-        select(
-            p,
-            "calendar-calendars-control",
-            tr("Calendars"),
-            &label,
-            ui.open == Some(Menu::Calendars),
-            choices,
-            |ui: &mut Ui| toggle_menu(ui, Menu::Calendars),
-            layer,
-        ),
-    )
+        &label,
+        ui.open == Some(Menu::Calendars),
+        choices,
+        |ui: &mut Ui| toggle_menu(ui, Menu::Calendars),
+        layer,
+    );
+    // Labs › Select all calendars adds one bulk button; off, the row is the
+    // select alone, exactly as before.
+    let control = if bulk_select_on(ui) && !calendars.is_empty() {
+        row()
+            .key("calendar-calendars-controls")
+            .gap(8.0)
+            .center_y()
+            .child(small_button(
+                p,
+                "calendar-select-all",
+                if included == calendars.len() {
+                    tr("Deselect all")
+                } else {
+                    tr("Select all")
+                },
+                |ui: &mut Ui, _| {
+                    // Read the calendars and the direction now, at the click,
+                    // not when the row was drawn.
+                    let ids: Vec<String> = ui
+                        .platform
+                        .calendar
+                        .calendars
+                        .iter()
+                        .map(|info| info.id.clone())
+                        .collect();
+                    let all_included = ids
+                        .iter()
+                        .all(|id| ui.settings.meetings.calendar.includes(id));
+                    ui.update(move |settings| {
+                        let excluded = &mut settings.meetings.calendar.excluded_calendars;
+                        if all_included {
+                            // Deselect all: the setting stores exclusions, so
+                            // calendars added later are still included.
+                            *excluded = ids;
+                        } else {
+                            excluded.clear();
+                        }
+                    });
+                },
+            ))
+            .child(select)
+    } else {
+        select
+    };
+    setting_row(p, "calendar-calendars", tr("Calendars"), None, control)
 }
 
-/// The known services, then every other website or app the user chose for,
-/// each with Ask / Always record / Never offer.
+/// Whether Labs › Select all calendars adds the Calendars row's bulk button.
+/// The lab is UI only: its own toggle, in this build, with no organization
+/// lock, as `in_place_on` reads its lab (`src/rune_ui/model_import.rs:73`).
+fn bulk_select_on(ui: &Ui) -> bool {
+    let feature = Feature::CalendarSelectAll;
+    feature.shipped() && feature.managed().is_none() && feature.on(&ui.settings)
+}
+
+/// The caption of Detected calls' Stop when the call ends, naming
+/// [`crate::meeting::detection::AUTO_STOP_GRACE`].
+pub(super) const STOP_WHEN_CALL_ENDS_CAPTION: &str = "Stop a recording Hex started on its own 30 s after the call app leaves the microphone and goes quiet";
+
+/// Stop when the call ends (macOS), then the known services and every other
+/// website or app the user chose for, each with Ask / Always record / Never
+/// offer.
 fn detected_calls_section(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
     let choices = &ui.settings.meetings.providers;
-    let known = KNOWN_MEETING_PROVIDERS
+    let providers = crate::app_settings::known_meeting_providers().collect::<Vec<_>>();
+    let known = providers
         .iter()
         .map(|(key, label)| (key.to_string(), label.to_string(), tr(label).to_owned()));
     let others = choices
         .iter()
-        .filter(|choice| {
-            !KNOWN_MEETING_PROVIDERS
-                .iter()
-                .any(|(key, _)| *key == choice.key)
-        })
+        .filter(|choice| !providers.iter().any(|(key, _)| *key == choice.key))
         .map(|choice| {
             (
                 choice.key.clone(),
@@ -794,38 +1022,56 @@ fn detected_calls_section(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
             )
         });
     let labels = [tr("Ask"), tr("Always record"), tr("Never offer")];
-    let rows = known
-        .chain(others)
-        .enumerate()
-        .map(|(index, (key, label, shown))| {
-            let policy = choices
-                .iter()
-                .find(|choice| choice.key == key)
-                .map_or(MeetingPolicy::Ask, |choice| choice.policy);
-            let selected = POLICIES.iter().position(|known| *known == policy);
-            let control = super::general::quiet_select(
-                ui,
-                p,
-                Menu::Call(index),
-                format!("call{index}-policy-control"),
-                &shown,
-                labels.to_vec(),
-                selected.unwrap_or(0),
-                move |ui, index| {
-                    let choice = MeetingProviderChoice {
-                        key: key.clone(),
-                        label: label.clone(),
-                        policy: POLICIES[index],
-                    };
-                    ui.update(|settings| {
-                        crate::app_settings::set_meeting_provider(&mut settings.meetings, choice);
-                    });
-                },
-                layer,
-            );
-            setting_row(p, &format!("call{index}"), &shown, None, control)
-        })
-        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    if ui.platform.caps.os == Os::Macos {
+        rows.push(toggle_row(
+            p,
+            "meeting-stop-when-call-ends",
+            tr("Stop when the call ends"),
+            tr(STOP_WHEN_CALL_ENDS_CAPTION),
+            ui.settings.meetings.stop_when_call_ends,
+            |ui: &mut Ui| {
+                let on = !ui.settings.meetings.stop_when_call_ends;
+                ui.update(|settings| settings.meetings.stop_when_call_ends = on);
+            },
+        ));
+    }
+    rows.extend(
+        known
+            .chain(others)
+            .enumerate()
+            .map(|(index, (key, label, shown))| {
+                let policy = choices
+                    .iter()
+                    .find(|choice| choice.key == key)
+                    .map_or(MeetingPolicy::Ask, |choice| choice.policy);
+                let selected = POLICIES.iter().position(|known| *known == policy);
+                let control = super::general::quiet_select(
+                    ui,
+                    p,
+                    Menu::Call(index),
+                    format!("call{index}-policy-control"),
+                    &shown,
+                    labels.iter().map(|label| (*label).to_owned()).collect(),
+                    selected.unwrap_or(0),
+                    move |ui, index| {
+                        let choice = MeetingProviderChoice {
+                            key: key.clone(),
+                            label: label.clone(),
+                            policy: POLICIES[index],
+                        };
+                        ui.update(|settings| {
+                            crate::app_settings::set_meeting_provider(
+                                &mut settings.meetings,
+                                choice,
+                            );
+                        });
+                    },
+                    layer,
+                );
+                setting_row(p, &format!("call{index}"), &shown, None, control)
+            }),
+    );
     section(p, "detected-calls", tr("Detected calls"), rows)
 }
 
@@ -838,7 +1084,7 @@ const POLICIES: [MeetingPolicy; 3] = [
 
 /// The virtual microphone driver's row: install, update, or uninstall it.
 pub(super) fn driver_row(ui: &Ui, p: Paint) -> El {
-    let title = tr("Virtual microphone driver");
+    let title = tr("Hex Microphone");
     let Some(status) = &ui.platform.hex_microphone else {
         return setting_row(
             p,
@@ -857,102 +1103,59 @@ pub(super) fn driver_row(ui: &Ui, p: Paint) -> El {
             move |ui: &mut Ui, _| ui.ask(request.clone()),
         )
     };
-    let install = || {
-        action(
-            "install",
-            tr("Install"),
-            PlatformRequest::InstallHexMicrophone,
-        )
+    let mut controls = row().key("controls").gap(8.0).center_y().flex_wrap();
+    let in_use = status.driver_loaded && status.mic_in_use;
+    let mut description = if in_use && !status.active_apps.is_empty() {
+        tr_fill("In use by {}", &status.active_apps.join(", "))
+    } else if in_use {
+        tr("In use").into()
+    } else if status.driver_loaded {
+        tr("Select Hex Microphone as the input in your call app").into()
+    } else if status.driver_bundle_installed {
+        tr("Hex Microphone is installed but unavailable").into()
+    } else {
+        tr("Installation briefly restarts system audio").into()
     };
-    let uninstall = || {
-        action(
-            "uninstall",
-            tr("Uninstall"),
-            PlatformRequest::UninstallHexMicrophone,
-        )
-    };
-    let state_tag = |label: &str, tone: Tone| tone_tag(p, "state", label, tone);
-    let controls = row().key("controls").gap(8.0).center_y();
-    let (description, controls) = match &status.action_state {
-        DriverActionState::Installing => (
-            tr("Installing driver and restarting Core Audio…").to_string(),
-            controls.child(state_tag(tr("Installing…"), Tone::Neutral)),
-        ),
-        DriverActionState::Uninstalling => (
-            tr("Removing driver and restarting Core Audio…").to_string(),
-            controls.child(state_tag(tr("Uninstalling…"), Tone::Neutral)),
-        ),
-        state if status.needs_update() => {
-            let installed = status.installed_version.as_deref().unwrap_or("1.0.0");
-            (
-                match state {
-                    DriverActionState::Cancelled => tr("Update cancelled").into(),
-                    DriverActionState::Failed(reason) => {
-                        tr_fill("Could not update driver: {}", reason)
-                    }
-                    _ => tr_fill("Update driver to v{}", &status.bundled_version),
-                },
-                controls
-                    .child(state_tag(
-                        &tr_fill("v{} installed", installed),
-                        Tone::Accent,
-                    ))
-                    .child(action(
+    match &status.action_state {
+        DriverActionState::Installing => {
+            description = tr("Installing driver and restarting Core Audio…").into()
+        }
+        DriverActionState::Uninstalling => {
+            description = tr("Removing driver and restarting Core Audio…").into()
+        }
+        state => {
+            if let DriverActionState::Failed(reason) = state {
+                description = format!("{} · {}", tr("Failed"), reason);
+            }
+            if matches!(state, DriverActionState::Cancelled) {
+                description = format!("{} · {}", tr("Cancelled"), description);
+            }
+            if status.driver_bundle_installed {
+                if status.needs_update() || !status.driver_loaded {
+                    controls = controls.child(action(
                         "update",
-                        tr("Update"),
+                        if status.needs_update() {
+                            tr("Update")
+                        } else {
+                            tr("Retry")
+                        },
                         PlatformRequest::InstallHexMicrophone,
-                    ))
-                    .child(uninstall()),
-            )
+                    ));
+                }
+                controls = controls.child(action(
+                    "uninstall",
+                    tr("Uninstall"),
+                    PlatformRequest::UninstallHexMicrophone,
+                ));
+            } else {
+                controls = controls.child(action(
+                    "install",
+                    tr("Install Hex Microphone"),
+                    PlatformRequest::InstallHexMicrophone,
+                ));
+            }
         }
-        state if status.driver_loaded => {
-            let version = status
-                .installed_version
-                .as_deref()
-                .unwrap_or(&status.bundled_version);
-            (
-                match state {
-                    DriverActionState::Cancelled => tr("Uninstall cancelled").into(),
-                    DriverActionState::Failed(reason) => {
-                        tr_fill("Could not update driver: {}", reason)
-                    }
-                    _ if !status.active_apps.is_empty() => tr_fill(
-                        "Streaming 48 kHz audio to {}",
-                        &status.active_apps.join(", "),
-                    ),
-                    _ => {
-                        tr("Choose Hex Microphone as your input in Slack, Zoom, or Discord").into()
-                    }
-                },
-                controls
-                    .child(state_tag(&tr_fill("Installed v{}", version), Tone::Success))
-                    .child(uninstall()),
-            )
-        }
-        DriverActionState::DoneUninstalled => (
-            tr("Driver removed").into(),
-            controls
-                .child(state_tag(tr("Removed"), Tone::Neutral))
-                .child(install()),
-        ),
-        DriverActionState::Cancelled => (
-            tr("Installation cancelled").into(),
-            controls
-                .child(state_tag(tr("Cancelled"), Tone::Neutral))
-                .child(install()),
-        ),
-        DriverActionState::Failed(reason) => (
-            tr_fill("Could not install driver: {}", reason),
-            controls
-                .child(state_tag(tr("Failed"), Tone::Danger))
-                .child(install()),
-        ),
-        _ => (
-            tr("Install the CoreAudio driver to choose Hex Microphone in Slack, Zoom, or Discord")
-                .into(),
-            controls.child(install()),
-        ),
-    };
+    }
     setting_row(p, "hex-mic-driver", title, Some(&description), controls)
 }
 

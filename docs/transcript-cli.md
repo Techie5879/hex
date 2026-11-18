@@ -15,7 +15,7 @@ hex meetings show 1790000500000-1002 --json
 hex meetings show 1790000500000-1002 --from 113:03 --to 120:43 --md
 hex meetings chapters latest --json
 hex meetings show 1790003000000-1005 --chapter 2
-hex meetings show latest --srt > call.srt   # Labs › Subtitle export
+hex meetings show latest --srt > call.srt
 hex meetings search 'release schedule'
 ```
 
@@ -24,7 +24,9 @@ hex meetings search 'release schedule'
 `history` returns successful retained results, including Send and Voice Action.
 Each result has a timestamp, application, recorded processing mode if present,
 and final text. `--raw` adds the stored pre-processing transcript. Older entries
-may have no app or mode; Hex does not infer missing metadata.
+may have no app or mode; Hex does not infer missing metadata. With Labs › Keep
+recordings on, an entry whose WAV is still beside the store adds its absolute
+path as `recording` in JSON; every other entry omits it.
 
 - `--since` is inclusive and `--until` is exclusive. A date alone means local
   midnight; `--until 2026-10-20` includes all of October 20.
@@ -56,12 +58,18 @@ inserted text split on whitespace), words per minute (words over recorded
 audio minutes, counting only entries with audio; unknown without any), how
 many entries Output changed (inserted text differs from the transcript, ignoring
 surrounding whitespace), the daily streak (consecutive local days with an entry,
-ending today or, with none yet today, yesterday), active days, and the five
-most used applications. With the toggle off it fails, naming the command that
-turns it on, before History is read. `--since` and `--until` narrow it with the
-same time syntax; the retention window always applies. It counts only what
-History still holds: nothing is kept after retention removes an entry, and
-which replacements fired is not tracked.
+ending today or, with none yet today, yesterday), and active days. The printed
+text names the five most used applications, and the JSON's `top_apps` carries
+the same five. `--json` also carries the last 30 local days' dictation counts
+(oldest first, empty days at zero) and each mode's Output time: its runs,
+median, and slowest processing time, rewrite plus any transformations. The
+daily series always ends today and ignores `--until`, and it is empty when
+nothing matches the filters; Output time leaves out runs that fell back and
+runs that only applied transformations. With the toggle off it fails, naming
+the command that turns it on, before History is read. `--since` and `--until`
+narrow it with the same time syntax; the retention window always applies. It
+counts only what History still holds: nothing is kept after retention removes
+an entry, and which replacements fired is not tracked.
 
 ## Meetings use the same queries as MCP
 
@@ -104,11 +112,8 @@ and `chapter` in JSON; it cannot be combined with `--from`/`--to`, and a number
 outside the list is an error. Plain `show` Markdown adds a `## Chapters` list
 when there are any.
 
-`show --srt` and `show --vtt` (Labs › Subtitle export, `hex labs on
-subtitle-export`, off by default) write timed subtitles to stdout instead,
-for example `hex meetings show latest --vtt > call.vtt`. With the toggle off
-they fail, naming the command that turns it on, before any meeting is read.
-They take the same IDs, `--from`/`--to`, and `--chapter` as the other outputs
+`show --srt` and `show --vtt` write timed subtitles to stdout instead, for
+example `hex meetings show latest --vtt > call.vtt`. They take the same IDs, `--from`/`--to`, and `--chapter` as the other outputs
 and conflict with `--md`, `--json`, and each other. Each transcript entry (a
 speaker turn) becomes one cue timed by its offsets from the meeting's start,
 not by word timings: SRT numbers its cues, uses `HH:MM:SS,mmm` times, and
@@ -157,9 +162,13 @@ Every JSON response has integer `version: 1`. Consumers should ignore unknown
 fields; incompatible field changes require a new version. All `*_ms` fields are
 integer milliseconds. Absolute timestamps use Unix time. Nullable fields are
 present as `null`, except `raw_text`, which is omitted without `--raw`,
-`score` and `snippet`, which are omitted without `--search`, `range`, which
+`score` and `snippet`, which are omitted without `--search`, `recording`, which
+is omitted unless Labs › Keep recordings still holds the entry's audio file,
+`range`, which
 is omitted without `--from` or `--to`, `chapters`, which is omitted when a
-meeting has none, and `chapter`, which is omitted without `--chapter`.
+meeting has none, `chapter`, which is omitted without `--chapter`. `yearly`
+is always present in `hex history stats` output, which refuses while Labs ›
+Dictation stats is off.
 JSON goes to stdout; errors go to stderr with a nonzero exit status. Empty
 results are successful responses. `truncated` reports the query's output limit,
 not data already expired or evicted from the store.
@@ -179,6 +188,7 @@ type History = {
     raw_text?: string // present only with --raw
     score?: number // present only with --search; higher is more relevant
     snippet?: string // present only with --search; matches wrapped in **
+    recording?: string // absolute path to the kept WAV; only while Labs › Keep recordings has it
   }[]
 }
 
@@ -188,11 +198,24 @@ type HistoryStats = { // hex history stats --json
   dictations: number
   words: number
   audio_ms: number
+  typing_wpm: number // the typing speed time_saved_ms assumes; saved as typing_wpm, 40 by default
+  time_saved_ms: number // words / typing_wpm minutes minus audio_ms, floored at 0
   words_per_minute: number | null // null without recorded audio
   changed_by_output: number
   streak_days: number
   active_days: number
+  hours: number[] // 24 local hours, index 0 = midnight
+  busiest_hour: number | null // 0–23, the earliest hour on a tie
+  daily: { day: number; dictations: number }[] // the last 30 local days, oldest first, zero on empty days, always ending today; empty when nothing matches; day is days since 1970-01-01, local time
   top_apps: { application: string; dictations: number }[] // at most 5, most first
+  output_time: { profile: string; runs: number; median_ms: number; slowest_ms: number }[] // the 4 most run modes; an even count's median is the mean of its two middle runs, rounded down; fallback and transformation-only runs are left out
+  yearly: { // always present; the command refuses while Labs › Dictation stats is off
+    dictations: number // every kept day, not only what History still retains
+    words: number
+    audio_ms: number
+    hours: number[] // 24 local hours across every kept day
+    days: { day: number; dictations: number; words: number; audio_ms: number; hours: number[] }[] // at most 400 days, oldest first
+  }
 }
 
 type Meeting = {

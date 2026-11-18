@@ -556,7 +556,7 @@ fn changing_the_live_mode_rebuilds_existing_text_without_resetting_copy_cuts() {
         Some(RollingTrack {
             resampler: None,
             sample_rate: RATE as u32,
-            chunker: Chunker::default(),
+            chunker: Chunker::new(source),
             base: 0,
             transcript: track(source, 30_000, &entries),
             fed: RATE * 30,
@@ -603,7 +603,7 @@ fn changing_the_live_mode_rebuilds_existing_text_without_resetting_copy_cuts() {
     assert!(shared.iter().any(|entry| entry.label() == "Room mic"));
     assert!(shared.iter().any(|entry| entry.label() == "Call audio"));
     assert_eq!(
-        cursor.pending_turn_count("synthetic", &shared),
+        cursor.pending("synthetic", &shared).turns,
         1,
         "the already copied call is not pasted again under its new label"
     );
@@ -617,7 +617,7 @@ fn changing_the_live_mode_rebuilds_existing_text_without_resetting_copy_cuts() {
     worker.change_mode(MeetingMode::Standard, reply);
     assert_eq!(applied.recv().unwrap(), Ok(()));
     assert_eq!(read(), standard);
-    assert_eq!(cursor.pending_turn_count("synthetic", &read()), 0);
+    assert_eq!(cursor.pending("synthetic", &read()).turns, 0);
     assert_eq!(worker.cuts, original_cuts);
     assert_eq!(
         worker

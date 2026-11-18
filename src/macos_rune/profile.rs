@@ -37,11 +37,12 @@ impl Pump {
                     return Ok(host::Reply::code(503));
                 }
                 let mut settings = AppSettings::read()?;
+                let base = settings.clone();
                 host::exchange(
                     &host::directory()?,
                     call.exchange,
                     &mut settings,
-                    |updated| updated.save(),
+                    |updated| base.update(updated).map(|_| ()),
                 )
             })();
             let response = match result {

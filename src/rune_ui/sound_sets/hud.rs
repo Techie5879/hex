@@ -128,10 +128,13 @@ impl Hud {
                 Event::Transcribing { job_id: JOB },
             ],
             Beat::Done => &[Event::JobCompleted { job_id: JOB }],
-            Beat::Fail => &[Event::JobFailed { job_id: JOB }],
+            Beat::Fail => &[Event::JobFailed {
+                job_id: JOB,
+                message: None,
+            }],
             Beat::Leave => &[Event::Cancelled, Event::JobCancelled { job_id: JOB }],
         };
-        for &event in events {
+        for event in events.iter().cloned() {
             self.model.handle(event, now, false);
         }
     }
@@ -233,7 +236,6 @@ impl Preview {
             ],
             // The modal's scale included.
             scale: px[2] / WINDOW.0,
-            dark: f.rt.env.system_dark,
         };
         let uniforms = painter.write(&frame, Layout::default(), target, |buffer, data| {
             f.write_buffer(buffer, 0, data)

@@ -4,6 +4,7 @@
 //! capsule can place alike; `dictation_indicator` reads the metrics from
 //! `NSScreen` and applies the result.
 
+use crate::app_settings::IndicatorPosition;
 use crate::rune_hud::dot_scope::Placement;
 
 /// The plate's gap under the menu bar: as close as it sits and still
@@ -129,12 +130,15 @@ impl Default for Layout {
 
 /// A black island grown out of the notch: the notch's size, the island's
 /// open width, and the screen's top edge, from the window's middle, y down.
-/// `ears` keeps it the notch's height and widens it sideways only, with a
-/// glyph either side of the camera instead of Dot scope (Labs' notch
-/// indicator).
+/// `ears` widens it sideways and grows it from the housing's height to
+/// `bar`'s, with a glyph either side of the camera instead of Dot scope
+/// (Labs' notch indicator).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Island {
     pub notch: [f32; 2],
+    /// The height the ears open to: the menu bar's. Zero, and unused,
+    /// outside the ears.
+    pub bar: f32,
     pub width: f32,
     pub top: f32,
     pub ears: bool,
@@ -240,6 +244,7 @@ pub fn place(placement: Placement, screen: &Screen, content: Content, bottom: bo
                 Layout {
                     island: Some(Island {
                         notch: [notch.width as f32, notch.height as f32],
+                        bar: 0.0,
                         width: (notch.width + 2.0 * content.island_spread.max(0.0))
                             .min(window_width - 2.0) as f32,
                         top: -(window_height / 2.0) as f32,
@@ -253,17 +258,22 @@ pub fn place(placement: Placement, screen: &Screen, content: Content, bottom: bo
 }
 
 /// Labs' notch indicator on `screen`: the notch widened by [`EAR_WIDTH`]
-/// on each side at the notch's own height, or `None` on a screen without
-/// a notch.
+/// on each side and grown to the menu bar's height, or `None` on a screen
+/// without a notch.
 pub fn ears(screen: &Screen, content: Content) -> Option<Placed> {
     let notch = screen.notch()?;
     let (window_width, window_height) = content.window;
+    // The ears take the menu bar's height (the frame's top minus the visible
+    // frame's) so they end on the bar's edge, while the housing keeps its
+    // own until they open.
+    let bar = screen.bar_height();
     Some(Placed {
         top_left: (notch.x - window_width / 2.0, screen.frame.top()),
         layout: Layout {
-            center: [0.0, (notch.height / 2.0 - window_height / 2.0) as f32],
+            center: [0.0, (bar / 2.0 - window_height / 2.0) as f32],
             island: Some(Island {
                 notch: [notch.width as f32, notch.height as f32],
+                bar: bar as f32,
                 width: (notch.width + 2.0 * EAR_WIDTH).min(window_width - 2.0) as f32,
                 top: -(window_height / 2.0) as f32,
                 ears: true,
@@ -272,6 +282,20 @@ pub fn ears(screen: &Screen, content: Content) -> Option<Placed> {
         },
         over_menu_bar: true,
     })
+}
+
+/// Labs' notch indicator when `lab` is on and the HUD is shown: [`ears`]'
+/// island on a notched screen, whatever the position setting, or `None`
+/// while Hidden or on a flat screen.
+pub fn notch_placement(
+    lab: bool,
+    position: IndicatorPosition,
+    screen: &Screen,
+    content: Content,
+) -> Option<Placed> {
+    (lab && position != IndicatorPosition::Hidden)
+        .then(|| ears(screen, content))
+        .flatten()
 }
 
 /// The placed plate's top and bottom edges in screen coordinates (y up),
@@ -413,21 +437,79 @@ mod tests {
     }
 
     #[test]
-    fn ears_widen_the_notch_sideways_at_its_own_height() {
+    fn ears_widen_the_notch_sideways_only() {
         assert_eq!(ears(&flat(), CONTENT), None);
         let placed = ears(&notched(), CONTENT).expect("a notch");
         let island = placed.layout.island.expect("an island");
         assert!(island.ears);
+        // The island keeps the housing's size, and opens to the menu bar's
+        // height, which here is the housing's too: this fixture's visible
+        // frame reaches above the screen's top.
         assert_eq!(island.notch, [185.0, 32.0]);
+        assert_eq!(island.bar, 32.0);
         assert_eq!(island.width, 185.0 + 2.0 * EAR_WIDTH as f32);
         assert!(placed.over_menu_bar);
         // Centred on the notch, hanging from the screen's top edge, the
-        // glyphs' middle halfway down the notch.
+        // glyphs' middle halfway down the height the ears open to.
         assert_eq!(placed.top_left, (756.0 - 160.0, 982.0));
         assert_eq!(island.top, -64.0);
         assert_eq!(plate(&placed).1, 982.0 - 16.0);
         // A pretend notch counts as one.
         assert!(ears(&flat().pretending_notch(), CONTENT).is_some());
+    }
+
+    #[test]
+    fn the_ears_reach_the_menu_bars_bottom_edge() {
+        // A 14-inch MacBook Pro whose menu bar is drawn 34 pt tall around its
+        // 32 pt housing. Opening to the housing alone ends the ears 2 pt above
+        // the bar's bottom edge.
+        let screen = Screen {
+            visible: Rect {
+                y: 0.0,
+                height: 948.0,
+                ..notched().visible
+            },
+            ..notched()
+        };
+        assert_eq!(screen.bar_height(), 34.0);
+        let placed = ears(&screen, CONTENT).expect("a notch");
+        let island = placed.layout.island.expect("an island");
+        assert_eq!(island.notch, [185.0, 32.0], "the housing stays the housing");
+        assert_eq!(island.bar, 34.0, "the height it opens to");
+        assert_eq!(island.top, -64.0, "still hanging from the top edge");
+        assert_eq!(plate(&placed).1, 982.0 - 34.0 / 2.0);
+    }
+
+    #[test]
+    fn the_notch_indicator_wins_at_top_or_bottom_but_still_needs_a_notch() {
+        let placed =
+            |lab, position, screen: &Screen| notch_placement(lab, position, screen, CONTENT);
+        let ears = ears(&notched(), CONTENT);
+        assert_eq!(
+            placed(true, IndicatorPosition::Top, &notched()),
+            ears,
+            "the top setting keeps the island"
+        );
+        assert_eq!(
+            placed(true, IndicatorPosition::Bottom, &notched()),
+            ears,
+            "the bottom setting gets the island too"
+        );
+        assert_eq!(
+            placed(true, IndicatorPosition::Hidden, &notched()),
+            None,
+            "hidden still hides"
+        );
+        assert_eq!(
+            placed(true, IndicatorPosition::Top, &flat()),
+            None,
+            "a flat screen keeps its position setting"
+        );
+        assert_eq!(
+            placed(false, IndicatorPosition::Top, &notched()),
+            None,
+            "the lab off changes nothing"
+        );
     }
 
     #[test]

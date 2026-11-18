@@ -102,6 +102,13 @@ fn builtin_transformation(id: &str) -> Option<&'static BuiltinTransformation> {
         .find(|transformation| transformation.id == id)
 }
 
+/// The built-in transformations' ids, in the order they're listed.
+pub fn builtin_transformation_ids() -> impl Iterator<Item = &'static str> {
+    BUILTIN_TRANSFORMATIONS
+        .iter()
+        .map(|transformation| transformation.id)
+}
+
 pub fn is_builtin_transformation(id: &str) -> bool {
     builtin_transformation(id).is_some()
 }
@@ -284,6 +291,27 @@ fn find_config(workspace: &Path) -> Result<Option<&'static str>> {
 pub fn workspace_configured() -> bool {
     crate::app_paths::personal_commands_workspace()
         .is_ok_and(|workspace| matches!(find_config(&workspace), Ok(Some(_)) | Err(_)))
+}
+
+/// Built-ins run natively and never need the script host.
+pub fn custom_transformations_selected(
+    processing: &crate::app_settings::DictationProcessingSettings,
+) -> bool {
+    std::iter::once(&processing.default_mode)
+        .chain(&processing.modes)
+        .flat_map(|mode| &mode.transformations)
+        .any(|id| !is_builtin_transformation(id))
+}
+
+/// Every OS discovers a newly initialized workspace before a transformation
+/// is selected. Call on the host's coarse refresh, not an audio callback.
+pub fn host_needed(custom_selected: bool) -> bool {
+    let allowed = !crate::policy::Policy::current().locks(crate::policy::Lock::Transforms);
+    host_required(custom_selected, allowed && workspace_configured(), allowed)
+}
+
+fn host_required(custom_selected: bool, configured: bool, allowed: bool) -> bool {
+    allowed && (custom_selected || configured)
 }
 
 /// Creates the config folder with Hex's typings and agent notes, and a
@@ -629,7 +657,7 @@ impl Worker {
         request: &TransformationRequest,
         stop: &AtomicBool,
     ) -> std::result::Result<String, String> {
-        let context = json(&invocation_context(&request.context));
+        let context = json(&invocation_context(&request.context, request.source));
         let allowed = self.allowed(&loaded.script);
         let mut text = request.text.clone();
         for id in &request.ids {
@@ -770,6 +798,7 @@ struct TransformationRequest {
     ids: Vec<String>,
     text: String,
     context: ContextSnapshot,
+    source: crate::dictation::processor::Source,
     response: SyncSender<std::result::Result<String, String>>,
 }
 
@@ -780,6 +809,7 @@ impl TransformationClient {
         text: &str,
         context: &ContextSnapshot,
         cancelled: &AtomicBool,
+        source: crate::dictation::processor::Source,
     ) -> std::result::Result<String, String> {
         if ids.is_empty() {
             return Ok(text.into());
@@ -795,7 +825,7 @@ impl TransformationClient {
         for id in ids {
             if let Some(builtin) = builtin_transformation(id) {
                 if !custom.is_empty() {
-                    output = self.transform_custom(&custom, &output, context, cancelled)?;
+                    output = self.transform_custom(&custom, &output, context, cancelled, source)?;
                     custom.clear();
                 }
                 output = (builtin.apply)(&output);
@@ -804,7 +834,7 @@ impl TransformationClient {
             }
         }
         if !custom.is_empty() {
-            output = self.transform_custom(&custom, &output, context, cancelled)?;
+            output = self.transform_custom(&custom, &output, context, cancelled, source)?;
         }
         Ok(output)
     }
@@ -815,6 +845,7 @@ impl TransformationClient {
         text: &str,
         context: &ContextSnapshot,
         cancelled: &AtomicBool,
+        source: crate::dictation::processor::Source,
     ) -> std::result::Result<String, String> {
         let active = self
             .active
@@ -838,6 +869,7 @@ impl TransformationClient {
                 ids: ids.to_vec(),
                 text: text.into(),
                 context: context.clone(),
+                source,
                 response: sender,
             })))
             .map_err(|error| match error {
@@ -925,6 +957,8 @@ fn remove_trailing_punctuation(text: &str) -> String {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InvocationContext {
+    /// Where the text came from: a dictation or typed text.
+    source: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     application: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -935,13 +969,56 @@ struct InvocationContext {
     window_title: Option<String>,
 }
 
-fn invocation_context(context: &ContextSnapshot) -> InvocationContext {
+fn invocation_context(
+    context: &ContextSnapshot,
+    source: crate::dictation::processor::Source,
+) -> InvocationContext {
     InvocationContext {
+        source: source.as_str(),
         application: context.application.clone(),
         browser_host: context.browser_host().map(Into::into),
         browser_url: context.browser_url.as_ref().map(ToString::to_string),
         window_title: context.window_title.clone(),
     }
+}
+
+/// Extensions the script host loads, in any case, shared with the loader so
+/// every file it can import is one the watcher reloads.
+const SCRIPT_EXTENSIONS: [&str; 5] = ["ts", "js", "mjs", "mts", "json"];
+/// Extensions the script host erases types from, and the ones a TypeScript
+/// declaration file can have.
+const TYPESCRIPT_EXTENSIONS: [&str; 2] = ["ts", "mts"];
+
+/// `.ts, .js, .mjs, .mts, .json` for messages about what can be imported.
+fn script_extension_list() -> String {
+    SCRIPT_EXTENSIONS
+        .iter()
+        .map(|extension| format!(".{extension}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The last component's stem and lowercased extension, or None when it has no
+/// extension.
+fn script_name_parts(path: &Path) -> Option<(&str, String)> {
+    let name = path.file_name()?.to_str()?;
+    let (stem, extension) = name.rsplit_once('.')?;
+    Some((stem, extension.to_ascii_lowercase()))
+}
+
+/// Whether `path` names a file the script host loads, and so one the reload
+/// watcher tracks. Declaration files only describe the API, so editing one
+/// never needs a reload.
+fn is_script_file(path: &Path) -> bool {
+    let Some((stem, extension)) = script_name_parts(path) else {
+        return false;
+    };
+    if !SCRIPT_EXTENSIONS.contains(&extension.as_str()) {
+        return false;
+    }
+    let declaration = (stem.ends_with(".d") || stem.ends_with(".D"))
+        && TYPESCRIPT_EXTENSIONS.contains(&extension.as_str());
+    !declaration
 }
 
 fn workspace_fingerprint(root: &Path) -> u64 {
@@ -977,12 +1054,7 @@ fn workspace_fingerprint(root: &Path) -> u64 {
             }
             if metadata.is_dir() {
                 queue.push_back((path, depth + 1));
-            } else if metadata.is_file()
-                && matches!(
-                    path.extension().and_then(|value| value.to_str()),
-                    Some("ts" | "json")
-                )
-            {
+            } else if metadata.is_file() && is_script_file(&path) {
                 for byte in path.as_os_str().as_encoded_bytes() {
                     hash = hash
                         .wrapping_mul(1099511628211)
@@ -1036,6 +1108,74 @@ mod tests {
     }
 
     #[test]
+    fn host_startup_discovers_a_config_without_selecting_a_transformation() {
+        for selected in [false, true] {
+            for configured in [false, true] {
+                assert!(!host_required(selected, configured, false), "policy wins");
+            }
+        }
+        assert!(!host_required(false, false, true));
+        assert!(
+            host_required(false, true, true),
+            "Set up discovers the new config"
+        );
+        assert!(
+            host_required(true, false, true),
+            "a missing selected script still reports its status"
+        );
+        assert!(host_required(true, true, true));
+
+        let mut processing = crate::app_settings::DictationProcessingSettings::default();
+        processing.default_mode.transformations =
+            builtin_transformation_ids().map(str::to_owned).collect();
+        assert!(!custom_transformations_selected(&processing));
+        processing.modes.push(crate::app_settings::DictationMode {
+            transformations: vec!["my-script".into()],
+            ..Default::default()
+        });
+        assert!(custom_transformations_selected(&processing));
+        processing.modes.clear();
+        processing
+            .default_mode
+            .transformations
+            .push("another-script".into());
+        assert!(custom_transformations_selected(&processing));
+    }
+
+    #[test]
+    fn transformation_context_names_its_source() {
+        use crate::dictation::processor::Source;
+        let context = ContextSnapshot::default();
+        let read = |source| -> serde_json::Value {
+            serde_json::from_str(&json(&invocation_context(&context, source))).unwrap()
+        };
+        assert_eq!(read(Source::Dictation)["source"], "dictation");
+        assert_eq!(read(Source::TypedText)["source"], "typed-text");
+        assert!(read(Source::Dictation).get("application").is_none());
+    }
+
+    #[test]
+    fn transformations_see_the_source_that_produced_the_text() {
+        let harness = Harness::new(
+            r#"export default { transformations: { source: { name: "Source", transform: (text, context) => `${text}:${context.source}` } } }"#,
+        );
+        assert_eq!(
+            harness.transform(&["source"], "hi").unwrap(),
+            "hi:dictation"
+        );
+        assert_eq!(
+            harness
+                .transform_with(
+                    crate::dictation::processor::Source::TypedText,
+                    &["source"],
+                    "hi",
+                )
+                .unwrap(),
+            "hi:typed-text"
+        );
+    }
+
+    #[test]
     fn transformation_client_dispatches_only_registered_ids() {
         let (requests, receiver) = mpsc::sync_channel(1);
         let client = TransformationClient::default();
@@ -1065,6 +1205,7 @@ mod tests {
                 "HELLO",
                 &ContextSnapshot::default(),
                 &AtomicBool::new(false),
+                crate::dictation::processor::Source::Dictation,
             )
             .unwrap();
 
@@ -1076,6 +1217,7 @@ mod tests {
                     "HELLO",
                     &ContextSnapshot::default(),
                     &AtomicBool::new(false),
+                    crate::dictation::processor::Source::Dictation,
                 )
                 .is_err()
         );
@@ -1095,6 +1237,7 @@ mod tests {
                     "Hello, WORLD!",
                     &context,
                     &cancelled,
+                    crate::dictation::processor::Source::Dictation,
                 )
                 .unwrap(),
             "hello, world!"
@@ -1106,6 +1249,7 @@ mod tests {
                     "Sponge Bob!",
                     &context,
                     &cancelled,
+                    crate::dictation::processor::Source::Dictation,
                 )
                 .unwrap(),
             "sPoNgE bOb!"
@@ -1151,6 +1295,7 @@ mod tests {
                     "abcd",
                     &context,
                     &cancelled,
+                    crate::dictation::processor::Source::Dictation,
                 )
                 .unwrap()
         };
@@ -1170,6 +1315,7 @@ mod tests {
                     "abcd.",
                     &context,
                     &cancelled,
+                    crate::dictation::processor::Source::Dictation,
                 )
                 .unwrap(),
             "abcd"
@@ -1216,6 +1362,46 @@ mod tests {
         );
         assert_eq!(status.transformations[0].name, "Lowercase");
         assert_eq!(status.transformations[2].name, "No trailing punctuation");
+    }
+
+    #[test]
+    fn workspace_fingerprint_tracks_every_loaded_file_kind() {
+        let root = unique_temp_dir("hex-watch-kinds");
+        fs::create_dir_all(root.join("lib")).unwrap();
+        let watched = [
+            "hex.config.ts",
+            "spelling.js",
+            "lib/words.mjs",
+            "lib/types.mts",
+            "data.json",
+            "lib/upper.JS",
+            "lib/foo.d.js",
+        ];
+        for name in watched {
+            fs::write(root.join(name), "first").unwrap();
+        }
+        fs::write(root.join("notes.md"), "first").unwrap();
+        fs::write(root.join("hex.d.ts"), "first").unwrap();
+        fs::write(root.join("lib/x.d.mts"), "first").unwrap();
+        let mut fingerprint = workspace_fingerprint(&root);
+        for name in watched {
+            fs::write(root.join(name), "second").unwrap();
+            let next = workspace_fingerprint(&root);
+            assert_ne!(next, fingerprint, "editing {name} should reload");
+            fingerprint = next;
+        }
+        fs::write(root.join("lib/new.js"), "first").unwrap();
+        assert_ne!(
+            workspace_fingerprint(&root),
+            fingerprint,
+            "a new .js file should reload"
+        );
+        fingerprint = workspace_fingerprint(&root);
+        fs::write(root.join("notes.md"), "changed").unwrap();
+        fs::write(root.join("hex.d.ts"), "changed").unwrap();
+        fs::write(root.join("lib/x.d.mts"), "changed").unwrap();
+        assert_eq!(workspace_fingerprint(&root), fingerprint);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -1329,6 +1515,15 @@ mod tests {
         }
 
         fn transform(&self, ids: &[&str], text: &str) -> std::result::Result<String, String> {
+            self.transform_with(crate::dictation::processor::Source::Dictation, ids, text)
+        }
+
+        fn transform_with(
+            &self,
+            source: crate::dictation::processor::Source,
+            ids: &[&str],
+            text: &str,
+        ) -> std::result::Result<String, String> {
             let (response, result) = mpsc::sync_channel(1);
             self.worker.transform(
                 TransformationRequest {
@@ -1336,6 +1531,7 @@ mod tests {
                     ids: ids.iter().map(ToString::to_string).collect(),
                     text: text.into(),
                     context: ContextSnapshot::default(),
+                    source,
                     response,
                 },
                 &AtomicBool::new(false),
@@ -1555,6 +1751,7 @@ export default defineHexConfig({
                 ids: vec!["echo".into()],
                 text: "a".into(),
                 context: ContextSnapshot::default(),
+                source: crate::dictation::processor::Source::Dictation,
                 response,
             },
             &AtomicBool::new(false),
@@ -1578,6 +1775,24 @@ export default defineHexConfig({
             "import { shout } from \"./lib/words\"\nexport default { transformations: { shout: { name: \"Shout\", transform: shout } } }\n",
         );
         assert_eq!(harness.transform(&["shout"], "hi").unwrap(), "HI!");
+
+        fs::write(
+            workspace.join("lib/plain.js"),
+            "export const yell = (text) => text.toUpperCase()\n",
+        )
+        .unwrap();
+        harness.write(
+            "import { yell } from \"./lib/plain.js\"\nexport default { transformations: { yell: { name: \"Yell\", transform: yell } } }\n",
+        );
+        assert_eq!(harness.transform(&["yell"], "hi").unwrap(), "HI");
+
+        fs::write(workspace.join("notes.txt"), "export const x = 1\n").unwrap();
+        harness.write("import { x } from \"./notes.txt\"\nexport default {}\n");
+        assert!(
+            harness.error().contains("./notes.txt"),
+            "a .txt import loaded as JavaScript: {}",
+            harness.error()
+        );
 
         for import in [
             "node:fs",

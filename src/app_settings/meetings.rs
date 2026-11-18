@@ -42,13 +42,14 @@ pub struct MeetingSettings {
     pub enabled: bool,
     /// Folder for finished Markdown transcripts; `None` uses the default.
     pub output_folder: Option<PathBuf>,
-    /// Title meetings and write a two-sentence summary with Apple
-    /// Intelligence when it is available.
-    pub summarize_with_apple_intelligence: bool,
-    /// Title meetings and write a two-sentence summary with the OpenCode
-    /// model, which sends the transcript to it. On a Mac, only when Apple
-    /// Intelligence is unavailable or off.
-    pub summarize_with_opencode: bool,
+    /// Who titles finished meetings and writes their two-sentence summary.
+    pub summaries: MeetingSummaries,
+    /// Retired: read once by the summaries migration, never written.
+    #[serde(default, skip_serializing)]
+    pub summarize_with_apple_intelligence: Option<bool>,
+    /// Retired: read once by the summaries migration, never written.
+    #[serde(default, skip_serializing)]
+    pub summarize_with_opencode: Option<bool>,
     /// Show the floating recording indicator while a meeting is recording.
     pub show_recording_indicator: bool,
     /// Screen corner the floating recording indicator snaps to after dragging.
@@ -67,10 +68,84 @@ pub struct MeetingSettings {
     /// while unchosen: a build from before it can't read `null` (#744).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<MeetingRetention>,
-    /// Labs › Choose meeting summary model: the OpenCode `provider/model`
-    /// meeting notes use; left out of the file while unset.
+    /// How long finished meetings keep their WAV tracks, apart from their
+    /// text (Meetings › Settings › Keep audio). `None` follows `retention`
+    /// (Same as meetings), and is left out of the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_retention: Option<MeetingRetention>,
+    /// A recording Hex started on its own stops once its call app has left
+    /// the microphone and gone quiet for 30 s (macOS).
+    pub stop_when_call_ends: bool,
+    /// How finished meetings are written to `output_folder`.
+    pub export: MeetingExportSettings,
+    /// The OpenCode `provider/model` that writes meeting notes when
+    /// `summaries` is OpenCode; left out of the file while unset, when
+    /// OpenCode's own default model writes them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_model: Option<String>,
+}
+
+/// How finished meetings are written to the meetings folder.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
+pub struct MeetingExportSettings {
+    /// Notes or a rename rename the exported Markdown to the meeting's
+    /// title, keeping its date and time.
+    pub descriptive_filenames: bool,
+    /// The transcript exports as `<stem>.transcript.md` and the notes go to
+    /// `<stem>.notes.md` beside it, linking back to the transcript.
+    pub notes_file: bool,
+}
+
+/// Who writes meeting titles and summaries. There is no fallback: Mac never
+/// sends the transcript to OpenCode, and OpenCode never runs on this Mac.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum MeetingSummaries {
+    Off = 0,
+    /// Apple Intelligence on this Mac (macOS only).
+    Mac = 1,
+    /// The OpenCode model, which the transcript is sent to.
+    #[serde(rename = "opencode")]
+    OpenCode = 2,
+}
+
+impl MeetingSummaries {
+    /// On this Mac on macOS, otherwise off.
+    pub const fn platform_default() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Mac
+        } else {
+            Self::Off
+        }
+    }
+
+    pub(super) const fn decode(value: u8) -> Self {
+        match value {
+            1 => Self::Mac,
+            2 => Self::OpenCode,
+            _ => Self::Off,
+        }
+    }
+
+    /// What the two retired switches meant: Apple Intelligence on wins on a
+    /// Mac (its OpenCode fallback is gone); elsewhere only OpenCode counted.
+    pub(super) fn from_retired(apple_intelligence: bool, opencode: bool) -> Self {
+        if cfg!(target_os = "macos") && apple_intelligence {
+            Self::Mac
+        } else if opencode {
+            Self::OpenCode
+        } else {
+            Self::Off
+        }
+    }
+}
+
+impl Default for MeetingSummaries {
+    fn default() -> Self {
+        Self::platform_default()
+    }
 }
 
 /// How long a finished meeting is kept, counted from when it ended.
@@ -198,6 +273,27 @@ pub const KNOWN_MEETING_PROVIDERS: [(&str, &str); 8] = [
     ("com.hnc.Discord", "Discord"),
 ];
 
+/// The other call services Hex names and offers, by the same provider keys.
+pub const MORE_MEETING_PROVIDERS: [(&str, &str); 10] = [
+    ("org.whispersystems.signal-desktop", "Signal"),
+    ("ru.keepcoder.Telegram", "Telegram"),
+    ("com.tencent.xinWeChat", "WeChat"),
+    ("jp.naver.line.mac", "LINE"),
+    ("com.webex.meetingmanager", "Webex"),
+    ("im.riot.app", "Element"),
+    ("com.apple.mobilephone", "Phone"),
+    ("voice.google.com", "Google Voice"),
+    ("messenger.com", "Messenger"),
+    ("web.groupme.com", "GroupMe"),
+];
+
+/// The providers Settings always lists: the common services, then the rest.
+pub fn known_meeting_providers() -> impl Iterator<Item = (&'static str, &'static str)> {
+    KNOWN_MEETING_PROVIDERS
+        .into_iter()
+        .chain(MORE_MEETING_PROVIDERS)
+}
+
 /// What Hex does when it detects a call from a provider.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -226,18 +322,24 @@ fn legacy_never_offer() -> MeetingPolicy {
     MeetingPolicy::NeverOffer
 }
 
+pub(super) const DEFAULT_SHOW_RECORDING_INDICATOR: bool = true;
+
 impl Default for MeetingSettings {
     fn default() -> Self {
         Self {
             enabled: false,
             output_folder: None,
-            summarize_with_apple_intelligence: true,
-            summarize_with_opencode: false,
-            show_recording_indicator: true,
+            summaries: MeetingSummaries::platform_default(),
+            summarize_with_apple_intelligence: None,
+            summarize_with_opencode: None,
+            show_recording_indicator: DEFAULT_SHOW_RECORDING_INDICATOR,
             recording_indicator_corner: MeetingIndicatorCorner::TopRight,
             providers: Vec::new(),
             calendar: CalendarSettings::default(),
             retention: None,
+            audio_retention: None,
+            stop_when_call_ends: false,
+            export: MeetingExportSettings::default(),
             opencode_model: None,
         }
     }
@@ -273,15 +375,9 @@ pub fn meetings_off_reason() -> &'static str {
     }
 }
 
-/// Apple Intelligence may write meeting notes (macOS).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn meeting_notes_enabled() -> bool {
-    MEETING_NOTES_ENABLED.load(Ordering::Acquire)
-}
-
-/// The OpenCode model may write meeting notes.
-pub fn meeting_notes_with_opencode() -> bool {
-    MEETING_NOTES_OPENCODE.load(Ordering::Acquire)
+/// Who writes meeting notes, as last applied.
+pub fn meeting_summaries() -> MeetingSummaries {
+    MeetingSummaries::decode(MEETING_SUMMARIES.load(Ordering::Acquire))
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -319,9 +415,73 @@ pub fn meeting_retention() -> Option<MeetingRetention> {
 }
 
 fn stored_meeting_retention() -> Option<MeetingRetention> {
+    stored_retention("retention")
+}
+
+/// [`MeetingSettings::audio_retention`] for the running meeting controller;
+/// `None` means audio follows `meetings.retention`. A process that never
+/// loaded settings reads it from `settings.json` without writing anything.
+pub fn meeting_audio_retention() -> Option<MeetingRetention> {
+    match MEETING_AUDIO_RETENTION.load(Ordering::Acquire) {
+        RETENTION_UNSET if cfg!(test) => None,
+        RETENTION_UNSET => stored_audio_retention(),
+        value => MeetingRetention::decode(value),
+    }
+}
+
+fn stored_retention(field: &str) -> Option<MeetingRetention> {
     let data = fs::read(path().ok()?).ok()?;
     let settings: serde_json::Value = serde_json::from_slice(&data).ok()?;
-    serde_json::from_value(settings.get("meetings")?.get("retention")?.clone()).ok()
+    retention_in(&settings, field)
+}
+
+fn stored_audio_retention() -> Option<MeetingRetention> {
+    let data = fs::read(path().ok()?).ok()?;
+    let settings: serde_json::Value = serde_json::from_slice(&data).ok()?;
+    audio_retention_in(&settings)
+}
+
+fn retention_in(settings: &serde_json::Value, field: &str) -> Option<MeetingRetention> {
+    serde_json::from_value(settings.get("meetings")?.get(field)?.clone()).ok()
+}
+
+/// The audio retention a settings file holds. A file the
+/// `meeting-labs-settings` migration hasn't seen keeps it only while its
+/// retired Labs switch was on, as the migration will.
+fn audio_retention_in(settings: &serde_json::Value) -> Option<MeetingRetention> {
+    let migrated = settings
+        .get("migrations")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .any(|id| id.as_str() == Some(MEETING_LABS_SETTINGS_MIGRATION))
+        });
+    let lab_on = settings
+        .pointer("/labs/expire_meeting_audio")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    (migrated || lab_on)
+        .then(|| retention_in(settings, "audio_retention"))
+        .flatten()
+}
+
+/// Meetings › Settings' Stop when the call ends, as last applied (macOS;
+/// read on each pass of the meeting controller).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn meeting_stop_when_call_ends() -> bool {
+    MEETING_STOP_WHEN_CALL_ENDS.load(Ordering::Acquire)
+}
+
+/// Meetings › Settings › Export's Descriptive meeting file names, as last
+/// applied (read when notes are applied and when a meeting is renamed).
+pub fn meeting_descriptive_filenames() -> bool {
+    MEETING_DESCRIPTIVE_FILENAMES.load(Ordering::Acquire)
+}
+
+/// Meetings › Settings › Export's Separate notes file, as last applied
+/// (read at final export and when notes are written).
+pub fn meeting_notes_file() -> bool {
+    MEETING_NOTES_FILE.load(Ordering::Acquire)
 }
 
 pub fn calendar_settings() -> CalendarSettings {
@@ -358,8 +518,9 @@ pub fn set_meeting_provider(meetings: &mut MeetingSettings, choice: MeetingProvi
 pub fn save_meeting_provider(choice: MeetingProviderChoice) {
     match AppSettings::load() {
         Ok(mut settings) => {
+            let base = settings.clone();
             if set_meeting_provider(&mut settings.meetings, choice)
-                && let Err(error) = settings.save()
+                && let Err(error) = base.update(&settings)
             {
                 tracing::warn!(%error, "could not save a meeting provider choice");
             }
@@ -375,8 +536,9 @@ pub fn save_meeting_indicator_corner(corner: MeetingIndicatorCorner) {
             if settings.meetings.recording_indicator_corner == corner {
                 return;
             }
+            let base = settings.clone();
             settings.meetings.recording_indicator_corner = corner;
-            if let Err(error) = settings.save() {
+            if let Err(error) = base.update(&settings) {
                 tracing::warn!(%error, "could not save the recording capsule's corner");
             }
         }
@@ -391,4 +553,71 @@ pub fn meeting_output_folder() -> PathBuf {
         .unwrap_or_else(|error| error.into_inner())
         .clone()
         .unwrap_or_else(default_meeting_output_folder)
+}
+
+impl AppSettings {
+    /// The four meeting labs that became Meetings › Settings rows carry
+    /// their switches over once; a separate audio retention stays only if
+    /// its lab was on, since it applied only then.
+    pub(super) fn migrate_meeting_labs(&mut self) {
+        if !self.has_migration(MEETING_LABS_SETTINGS_MIGRATION) {
+            let labs = &self.labs;
+            self.meetings.stop_when_call_ends |= labs.stop_when_call_ends == Some(true);
+            self.meetings.export.descriptive_filenames |=
+                labs.meeting_descriptive_filenames == Some(true);
+            self.meetings.export.notes_file |= labs.meeting_notes_file == Some(true);
+            if labs.expire_meeting_audio != Some(true) {
+                self.meetings.audio_retention = None;
+            }
+            self.migrations.push(MEETING_LABS_SETTINGS_MIGRATION.into());
+        }
+        self.labs.stop_when_call_ends = None;
+        self.labs.meeting_descriptive_filenames = None;
+        self.labs.meeting_notes_file = None;
+        self.labs.expire_meeting_audio = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_lists_the_common_providers_first_then_the_rest() {
+        let on = known_meeting_providers().collect::<Vec<_>>();
+        assert_eq!(on[..KNOWN_MEETING_PROVIDERS.len()], KNOWN_MEETING_PROVIDERS);
+        assert_eq!(
+            on.len(),
+            KNOWN_MEETING_PROVIDERS.len() + MORE_MEETING_PROVIDERS.len()
+        );
+        assert!(on.contains(&("org.whispersystems.signal-desktop", "Signal")));
+        assert!(on.contains(&("ru.keepcoder.Telegram", "Telegram")));
+        assert!(on.contains(&("com.tencent.xinWeChat", "WeChat")));
+        assert!(on.contains(&("jp.naver.line.mac", "LINE")));
+        assert!(on.contains(&("com.webex.meetingmanager", "Webex")));
+        assert!(on.contains(&("im.riot.app", "Element")));
+        assert!(on.contains(&("com.apple.mobilephone", "Phone")));
+        assert!(on.contains(&("voice.google.com", "Google Voice")));
+        assert!(on.contains(&("messenger.com", "Messenger")));
+        assert!(on.contains(&("web.groupme.com", "GroupMe")));
+    }
+
+    #[test]
+    fn an_unmigrated_file_keeps_audio_retention_only_with_its_lab() {
+        use MeetingRetention::Day;
+        let read = |json: &str| audio_retention_in(&serde_json::from_str(json).unwrap());
+        assert_eq!(read(r#"{"meetings":{"audio_retention":"day"}}"#), None);
+        assert_eq!(
+            read(r#"{"meetings":{"audio_retention":"day"},"labs":{"expire_meeting_audio":true}}"#),
+            Some(Day)
+        );
+        assert_eq!(
+            read(
+                r#"{"meetings":{"audio_retention":"day"},"migrations":["meeting-labs-settings"]}"#
+            ),
+            Some(Day)
+        );
+        assert_eq!(read(r#"{"migrations":["meeting-labs-settings"]}"#), None);
+        assert_eq!(MeetingSettings::default().audio_retention, None);
+    }
 }

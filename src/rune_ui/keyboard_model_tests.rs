@@ -8,6 +8,15 @@ fn runtime(scene: &str) -> Runtime<Ui> {
     if scene == "portal" {
         state.platform.caps = platform::Capabilities::LINUX;
     }
+    // Only Labs' Models group open, so the lab's card stays inside the
+    // window however many labs this OS lists above it.
+    for group in crate::labs::Group::ALL {
+        state
+            .settings
+            .labs
+            .groups
+            .insert(group.id().to_string(), group == crate::labs::Group::Models);
+    }
     let text = TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);
     let mut rt = crate::rune_ui::offscreen::runtime(
         state,
@@ -92,11 +101,14 @@ fn keyboard_model_switching_maps_enabled_sources_to_an_installed_model_and_langu
             language: "es".into(),
         })
     );
-    let german = crate::transcription::models::definition(TranscriptionModelId::ParakeetV3)
-        .language_choices()
-        .iter()
-        .position(|code| *code == "de")
-        .unwrap();
+    // The language menu sorts by name, so German's index comes from there.
+    let german = crate::transcription::models::menu_order(
+        &crate::transcription::models::definition(TranscriptionModelId::ParakeetV3)
+            .language_choices(),
+    )
+    .iter()
+    .position(|code| *code == "de")
+    .unwrap();
     tap(&mut rt, "input-source-language0-trigger");
     tap(&mut rt, &format!("input-source-language0-item{german}"));
     assert_eq!(mapping(&rt).unwrap().language, "de");

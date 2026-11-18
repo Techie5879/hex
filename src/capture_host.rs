@@ -42,19 +42,6 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use color_eyre::eyre::{Result, WrapErr, eyre};
-use scrawl_capture::audio::{GapSpan, RecordedAudio};
-use scrawl_capture::capture::{
-    AudioIn, ConfigSource, Event, Host, InputSink, OwnWindows, SharedCaptureTelemetry,
-    SharedResources, Stage, Start, Target,
-};
-use scrawl_capture::handoff::EngineConfig;
-use scrawl_capture::hosted_input::{HostInput, HostedInput, Modifiers};
-use scrawl_capture::model::{TranscriptData, WordTiming};
-#[cfg(target_os = "macos")]
-use scrawl_capture::transcribe::AppleTranscriber;
-use scrawl_capture::transcribe::Transcriber;
-
 use crate::audio::CaptureInstant;
 #[cfg(target_os = "macos")]
 pub use crate::audio::recording_environment::RecordingEnvironmentController as Environment;
@@ -64,11 +51,20 @@ use crate::control::{
     ControlReply, ScrawlCaptureAction, ScrawlCaptureOutcome, ScrawlCaptureReport,
     ScrawlCaptureState,
 };
-use crate::dictation::StreamingResampler;
 #[cfg(target_os = "macos")]
 use crate::dictation::audio::DictationAudio;
 use crate::transcription::engine::TranscriptionEngine;
 use crate::transcription::models::{ModelRuntime, TranscriptionModelId};
+use color_eyre::eyre::{Result, WrapErr, eyre};
+use scrawl_capture::audio::RecordedAudio;
+use scrawl_capture::capture::{
+    AudioIn, ConfigSource, Event, Host, InputSink, MovieQuality, OwnWindows,
+    SharedCaptureTelemetry, SharedResources, Stage, Start, Target,
+};
+use scrawl_capture::handoff::EngineConfig;
+use scrawl_capture::hosted_input::{HostInput, HostedInput, Modifiers};
+use scrawl_capture::model::WordTiming;
+use scrawl_capture::transcribe::Transcriber;
 
 // `hex annotate`'s folder commands; Windows has no control transport for
 // them yet.
@@ -80,26 +76,34 @@ mod routing;
 #[cfg(target_os = "macos")]
 mod screen_access;
 mod sink;
+mod timeline;
+mod wav_file;
+mod words;
 
 pub use library::{
     explain as explain_capture, list as list_captures, send as send_capture, show as show_capture,
 };
+#[cfg(target_os = "macos")]
+pub use permissions::report_screenshots as report_screenshot_permission;
 #[cfg_attr(not(target_os = "macos"), allow(unused_imports))]
 pub use permissions::{
-    CaptureNeed, NeedState, allow as allow_permission, on_missing,
-    report as report_missing_permission, restart as restart_for_permission,
-    state_of as permission_state,
+    AskedBy, CaptureNeed, NeedState, allow as allow_permission, on_missing,
+    restart as restart_for_permission, state_of as permission_state,
 };
 pub use replay::available as replay_available;
 pub use routing::CaptureRoute;
-pub use routing::{RouteAnswer, RouteDelivery, RouteDest};
+pub use routing::{RouteAnswer, RouteDelivery, RouteDest, SEND_HOLD};
 #[cfg(target_os = "macos")]
-pub use screen_access::{ScreenAccess, invalidate_screen_access, screen_access, screen_access_now};
+pub use routing::{recent_sessions, send_image};
+#[cfg(target_os = "macos")]
+pub use screen_access::*;
 #[cfg(target_os = "macos")]
 pub use sink::CaptureSink;
 #[cfg(not(target_os = "macos"))]
 pub use sink::ListenerTimeline;
 pub use sink::{CaptureAudio, CaptureSinkClosed};
+use timeline::Timeline;
+use words::ChosenTranscriber;
 
 /// "While dictating" for a capture on Linux: its own audio suppressor, made
 /// when the capture starts and restoring what it changed when dropped.
@@ -143,7 +147,8 @@ const SINK_CAPACITY: usize = 512;
 const EVENT_CAPACITY: usize = 64;
 const SAMPLE_RATE: u32 = 16_000;
 /// A capture keeps at most this much audio; the rest is recorded as a gap.
-const MAX_CAPTURE: Duration = Duration::from_secs(20 * 60);
+/// It bounds disk use only: the audio streams to `audio.wav.partial`, never memory.
+const MAX_CAPTURE: Duration = Duration::from_secs(8 * 60 * 60);
 const GAP_TOLERANCE: Duration = Duration::from_millis(50);
 /// How long shutdown waits for capture threads, inside the quit deadline.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
@@ -269,6 +274,11 @@ pub enum TargetKind {
 pub enum CaptureCommand {
     /// Starts a capture on the picker's pick; nothing while one records.
     Start(CaptureTarget),
+    /// Labs › Screenshots' recording: a capture of `target` that, once
+    /// written, goes to the screenshot card ([`on_clip_written`]) rather
+    /// than the clipboard and the router.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Clip(CaptureTarget),
     /// Looks for a cabled iPhone off the listener's thread;
     /// [`CaptureSnapshot::phone`] follows. Each start also looks.
     FindPhone,
@@ -291,9 +301,8 @@ pub enum CaptureCommand {
     /// The pointer is on the capsule (`true`) or left it: a rule's send
     /// still waiting out its Undo window pauses while it is there.
     Hold(bool),
-    /// Pastes the newest written capture into the app in front, as
-    /// Scrawl's Paste chip does: its contact sheet, then its summary.
-    Paste,
+    /// Pastes the capsule's written capture, never a later completion.
+    Paste(PathBuf),
     /// Opens the newest written capture's contact sheet: Hex has no review
     /// window, and opening the bundle could launch Scrawl.app, which takes
     /// captures over.
@@ -341,6 +350,8 @@ struct Written {
     words: usize,
     /// Spans of its audio that went missing.
     gaps: usize,
+    /// Where its audio stops, when Hex had to stop keeping it.
+    audio_stopped_at_ms: Option<u64>,
     /// Why it has no transcript, if it has none.
     missing_transcript: Option<String>,
 }
@@ -390,6 +401,7 @@ impl Sealed for scrawl_capture::capture::SealedCapture {
         Ok(Written {
             words: finished.words,
             gaps: finished.gaps,
+            audio_stopped_at_ms: finished.bundle.audio_stopped_at_ms,
             missing_transcript: finished.missing_transcript,
         })
     }
@@ -412,8 +424,10 @@ fn scrawl_engine(
 }
 
 /// What the capture asks for: `target`, on the clock the dictation timeline
-/// shares, with Hex's audio and Hex's folder.
-fn start_request(t0: CaptureInstant, bundle: PathBuf, target: Target) -> Start {
+/// shares, with Hex's audio and Hex's folder. A Screenshots recording is for
+/// people, so its movie keeps every pixel; an Annotate capture's stays sized
+/// for agents.
+fn start_request(t0: CaptureInstant, bundle: PathBuf, target: Target, clip: bool) -> Start {
     Start {
         t0_boot_ns: t0.as_nanos(),
         target,
@@ -421,6 +435,11 @@ fn start_request(t0: CaptureInstant, bundle: PathBuf, target: Target) -> Start {
         audio: AudioIn::External,
         window_log: true,
         note: None,
+        movie: if clip {
+            MovieQuality::Full
+        } else {
+            MovieQuality::Compact
+        },
     }
 }
 
@@ -460,13 +479,10 @@ impl Host for HexHost {
 /// looks through for clicks: the ink overlay, and the capsule's panel, which
 /// lets clicks through everywhere but its pill. Clicks on the pill never
 /// reach the engine ([`CapsulePill`]).
-fn own_windows_of(own: &[Option<u32>; 3]) -> OwnWindows {
+fn own_windows_of(own: &OwnWindowIds) -> OwnWindows {
     OwnWindows {
-        excluded: own.iter().flatten().copied().collect(),
-        passthrough: [OwnWindow::Ink, OwnWindow::Capsule]
-            .into_iter()
-            .filter_map(|role| own[role as usize])
-            .collect(),
+        excluded: own.excluded(),
+        passthrough: [own.ink, own.capsule].into_iter().flatten().collect(),
         recorded: Arc::clone(&OWN_WINDOWS_RECORDED),
     }
 }
@@ -535,7 +551,8 @@ impl CapsulePill {
         };
         let Some(window) = OWN_WINDOWS
             .lock()
-            .unwrap_or_else(|error| error.into_inner())[OwnWindow::Capsule as usize]
+            .unwrap_or_else(|error| error.into_inner())
+            .capsule
         else {
             return false;
         };
@@ -571,7 +588,31 @@ fn on_pill(origin: [f64; 2], pill: [f32; 4], x: f64, y: f64) -> bool {
 
 /// Hex's windows a capture leaves out of its recording, one per role. A
 /// capture reads them when it starts.
-static OWN_WINDOWS: Mutex<[Option<u32>; 3]> = Mutex::new([None, None, None]);
+static OWN_WINDOWS: Mutex<OwnWindowIds> = Mutex::new(OwnWindowIds {
+    capsule: None,
+    ink: None,
+    picker: None,
+});
+
+/// The window holding each [`OwnWindow`] role.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OwnWindowIds {
+    capsule: Option<u32>,
+    ink: Option<u32>,
+    picker: Option<u32>,
+}
+
+impl OwnWindowIds {
+    /// Every window held, which a recording leaves out.
+    fn excluded(self) -> Vec<u32> {
+        let Self {
+            capsule,
+            ink,
+            picker,
+        } = self;
+        [capsule, ink, picker].into_iter().flatten().collect()
+    }
+}
 
 /// Which of Hex's windows a capture leaves out.
 #[derive(Clone, Copy, Debug)]
@@ -592,7 +633,11 @@ pub fn exclude_window(role: OwnWindow, window: u32) {
     let mut own = OWN_WINDOWS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    own[role as usize] = Some(window);
+    *match role {
+        OwnWindow::Capsule => &mut own.capsule,
+        OwnWindow::Ink => &mut own.ink,
+        OwnWindow::Picker => &mut own.picker,
+    } = Some(window);
     let joined = own_windows_of(&own);
     drop(own);
     let Some(source) = ink_source() else { return };
@@ -670,133 +715,11 @@ fn shared_engine(
     Ok(made)
 }
 
-/// The transcriber `capture.transcriber` names when a capture is written.
-struct ChosenTranscriber;
-
-impl Transcriber for ChosenTranscriber {
-    fn transcribe(&self, audio: &RecordedAudio) -> anyhow::Result<Option<TranscriptData>> {
-        match crate::app_settings::capture_settings().transcriber {
-            crate::app_settings::CaptureTranscriber::Parakeet => HexTranscriber {
-                engine: DICTATION_ENGINE
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-            }
-            .transcribe(audio),
-            #[cfg(target_os = "macos")]
-            crate::app_settings::CaptureTranscriber::Apple => {
-                AppleTranscriber::default().transcribe(audio)
-            }
-            // Apple's SpeechAnalyzer is macOS's; elsewhere it is Hex's model.
-            #[cfg(not(target_os = "macos"))]
-            crate::app_settings::CaptureTranscriber::Apple => HexTranscriber {
-                engine: DICTATION_ENGINE
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .clone(),
-            }
-            .transcribe(audio),
-        }
-    }
-}
-
-/// Word-timed transcription on the dictation engine's loaded model. It holds
-/// the engine weakly, so a capture still writing never keeps it alive.
-struct HexTranscriber {
-    engine: Option<Weak<TranscriptionEngine>>,
-}
-
-impl Transcriber for HexTranscriber {
-    /// Word times are milliseconds from `audio.samples[0]`; the engine moves
-    /// them onto the capture's clock and builds the segments.
-    fn transcribe(&self, audio: &RecordedAudio) -> anyhow::Result<Option<TranscriptData>> {
-        let Some(engine) = &self.engine else {
-            return Ok(None);
-        };
-        let samples = if audio.sample_rate == SAMPLE_RATE {
-            audio.samples.clone()
-        } else {
-            crate::dictation::try_resample_for_parakeet(&audio.samples, audio.sample_rate)
-                .map_err(|error| anyhow::anyhow!(error))?
-        };
-        let (_, selection) = crate::app_settings::transcription_selection();
-        let (text, words) = transcribe_words(engine, &selection, samples)
-            .map_err(|error| anyhow::anyhow!("{error:#}"))?;
-        Ok(Some(TranscriptData {
-            source: "hex".into(),
-            model: Some(selection.model.as_str().into()),
-            text,
-            words: corrected_words(words, word_lag(selection.model)),
-            ..TranscriptData::default()
-        }))
-    }
-}
-
 /// One word and its times, in ms from the clip's start.
 pub struct TimedWord {
     pub start_ms: i64,
     pub end_ms: i64,
     pub text: String,
-}
-
-/// The clip's text and words on the dictation engine's warm model.
-#[cfg(target_os = "macos")]
-fn transcribe_words(
-    engine: &Weak<TranscriptionEngine>,
-    selection: &crate::transcription::models::TranscriptionSelection,
-    samples: Vec<f32>,
-) -> Result<(String, Vec<TimedWord>)> {
-    let transcript = crate::parakeet::transcribe_with_words(engine, selection, samples)?;
-    let words = transcript
-        .words
-        .into_iter()
-        .map(|word| TimedWord {
-            start_ms: word.start_ms,
-            end_ms: word.end_ms,
-            text: word.text,
-        })
-        .collect();
-    Ok((transcript.text, words))
-}
-
-/// The clip's text and words, as one foreground request on the Linux or
-/// Windows listener's engine: after the dictation already sent, never inside
-/// a live stream. Its model is whatever the listener has loaded.
-#[cfg(not(target_os = "macos"))]
-fn transcribe_words(
-    engine: &Weak<TranscriptionEngine>,
-    _selection: &crate::transcription::models::TranscriptionSelection,
-    samples: Vec<f32>,
-) -> Result<(String, Vec<TimedWord>)> {
-    if samples.is_empty() {
-        return Ok((String::new(), Vec::new()));
-    }
-    let (send, transcript) = mpsc::sync_channel(1);
-    let offline: crate::transcription::engine::Offline = Box::new(move |model, samples| {
-        let (text, words) = model
-            .transcribe_words(&samples)
-            .map_err(|error| format!("{error:#}"))?;
-        let _ = send.send((text.clone(), words));
-        Ok(text)
-    });
-    engine
-        .upgrade()
-        .ok_or_else(|| eyre!("the transcription engine stopped"))?
-        .foreground(samples, offline)?
-        .wait()
-        .map_err(|error| eyre!(error))?;
-    let (text, words) = transcript
-        .try_recv()
-        .map_err(|_| eyre!("the transcription returned no words"))?;
-    let words = words
-        .into_iter()
-        .map(|(start_ms, end_ms, text)| TimedWord {
-            start_ms,
-            end_ms,
-            text,
-        })
-        .collect();
-    Ok((text, words))
 }
 
 /// How late a model's word times run, in ms: the median against Apple's
@@ -1023,6 +946,8 @@ struct Active {
     collector: JoinHandle<()>,
     /// "While dictating", held until the capture stops.
     quiet: Option<Quiet>,
+    /// A Screenshots recording ([`CaptureCommand::Clip`]).
+    clip: bool,
 }
 
 /// A stopped capture and its audio, waiting for the finisher.
@@ -1066,6 +991,9 @@ pub struct RecordingCapture {
     /// The capture recorded a click, scroll, or ink stroke: the person got
     /// to work, so the capsule's switch chips fold.
     pub worked: bool,
+    /// A Screenshots recording: once stopped, the screenshot card shows it
+    /// and the capsule folds.
+    pub clip: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1085,9 +1013,14 @@ pub struct SettledCapture {
     /// no transcript, if it has none.
     pub words: Option<usize>,
     pub gaps: Option<usize>,
+    /// Where a written capture's audio stops, when Hex had to stop keeping it.
+    pub audio_stopped_at_ms: Option<u64>,
     pub missing_transcript: Option<String>,
     /// Why a capture failed, when Hex knows.
     pub error: Option<String>,
+    /// Why a written capture's summary didn't reach the clipboard; `None`
+    /// once it did (or for a capture that isn't copied).
+    pub copy_error: Option<String>,
     /// Where a written capture goes, while captures are sent to OpenCode
     /// (`capture.routing`'s `autoSend`).
     pub route: Option<CaptureRoute>,
@@ -1100,6 +1033,7 @@ impl SettledCapture {
             stage: self.stage.label().into(),
             words: self.words,
             gaps: self.gaps,
+            audio_stopped_at_ms: self.audio_stopped_at_ms,
             missing_transcript: self.missing_transcript.clone(),
         }
     }
@@ -1166,10 +1100,7 @@ impl Feed {
 static FEED: Feed = Feed::new();
 
 /// The current capture snapshot.
-#[expect(
-    dead_code,
-    reason = "the capture capsule subscribes next (scrawl-capsule)"
-)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn snapshot() -> CaptureSnapshot {
     FEED.snapshot()
 }
@@ -1235,6 +1166,8 @@ struct Unfinished {
     /// Dropped for another target: views never see it again, and it
     /// settles no outcome.
     discarded: bool,
+    /// A Screenshots recording ([`CaptureCommand::Clip`]).
+    clip: bool,
 }
 
 impl Default for Outcomes {
@@ -1268,7 +1201,12 @@ impl Outcomes {
             .count()
     }
 
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn started(&mut self, bundle: PathBuf, since: CaptureInstant, target: TargetKind) {
+        self.start(bundle, since, target, false);
+    }
+
+    fn start(&mut self, bundle: PathBuf, since: CaptureInstant, target: TargetKind, clip: bool) {
         self.unfinished.push(Unfinished {
             bundle,
             since,
@@ -1277,8 +1215,16 @@ impl Outcomes {
             target,
             worked: false,
             discarded: false,
+            clip,
         });
         self.publish();
+    }
+
+    /// Whether `bundle` is a Screenshots recording still unsettled.
+    fn is_clip(&self, bundle: &Path) -> bool {
+        self.unfinished
+            .iter()
+            .any(|unfinished| unfinished.bundle == bundle && unfinished.clip)
     }
 
     fn stopped(&mut self, bundle: &Path, end: End) {
@@ -1317,11 +1263,11 @@ impl Outcomes {
     }
 
     fn settle(&mut self, bundle: PathBuf, stage: Stage, written: Option<Written>) {
-        self.settle_with(bundle, stage, written, None, None);
+        self.settle_with(bundle, stage, written, None, None, None);
     }
 
     fn fail(&mut self, bundle: PathBuf, error: String) {
-        self.settle_with(bundle, Stage::Failed, None, Some(error), None);
+        self.settle_with(bundle, Stage::Failed, None, Some(error), None, None);
     }
 
     /// A switch discarded `bundle` and then could not start: its outcome,
@@ -1332,8 +1278,10 @@ impl Outcomes {
             stage: Stage::Failed,
             words: None,
             gaps: None,
+            audio_stopped_at_ms: None,
             missing_transcript: None,
             error: Some(error),
+            copy_error: None,
             route: None,
         });
         self.publish();
@@ -1363,6 +1311,7 @@ impl Outcomes {
         stage: Stage,
         written: Option<Written>,
         error: Option<String>,
+        copy_error: Option<String>,
         route: Option<CaptureRoute>,
     ) {
         let discarded = self
@@ -1376,8 +1325,12 @@ impl Outcomes {
                 stage,
                 words: written.as_ref().map(|written| written.words),
                 gaps: written.as_ref().map(|written| written.gaps),
+                audio_stopped_at_ms: written
+                    .as_ref()
+                    .and_then(|written| written.audio_stopped_at_ms),
                 missing_transcript: written.and_then(|written| written.missing_transcript),
                 error,
+                copy_error,
                 route,
             });
         }
@@ -1409,6 +1362,7 @@ impl Outcomes {
                         screen: unfinished.screen,
                         target: unfinished.target,
                         worked: unfinished.worked,
+                        clip: unfinished.clip,
                     });
                 }
                 Some((stage, cancelling)) => snapshot.finishing.push(FinishingCapture {
@@ -1764,13 +1718,17 @@ impl CaptureHost {
         let now = CaptureInstant::now();
         self.reap(now, audio);
         let result = match action {
-            ScrawlCaptureAction::Start => self.begin(now, audio, CaptureTarget::Pointer, None),
+            ScrawlCaptureAction::Start => {
+                self.begin(now, audio, CaptureTarget::Pointer, None, false)
+            }
             ScrawlCaptureAction::Stop => self.end(now, audio, End::Finish),
             ScrawlCaptureAction::Cancel => self.end(now, audio, End::Cancel),
             ScrawlCaptureAction::Toggle if self.recording_since(audio).is_some() => {
                 self.end(now, audio, End::Finish)
             }
-            ScrawlCaptureAction::Toggle => self.begin(now, audio, CaptureTarget::Pointer, None),
+            ScrawlCaptureAction::Toggle => {
+                self.begin(now, audio, CaptureTarget::Pointer, None, false)
+            }
             ScrawlCaptureAction::Status => Ok(self.report(false, None)),
             ScrawlCaptureAction::Replay => {
                 let busy = self.active.is_some();
@@ -1797,7 +1755,8 @@ impl CaptureHost {
         let now = CaptureInstant::now();
         self.reap(now, audio);
         let result = match command {
-            CaptureCommand::Start(target) => self.begin(now, audio, target, None),
+            CaptureCommand::Start(target) => self.begin(now, audio, target, None, false),
+            CaptureCommand::Clip(target) => self.begin(now, audio, target, None, true),
             CaptureCommand::FindPhone => {
                 self.find_phone();
                 Ok(self.report(false, None))
@@ -1809,8 +1768,8 @@ impl CaptureHost {
             }
             CaptureCommand::Undo => Ok(self.route(routing::Job::Undo)),
             CaptureCommand::Hold(on) => Ok(self.route(routing::Job::Hold(on))),
-            CaptureCommand::Paste => self.hand_off(HandOff::Paste),
-            CaptureCommand::Inspect => self.hand_off(HandOff::Inspect),
+            CaptureCommand::Paste(bundle) => self.hand_off(HandOff::Paste, Some(bundle)),
+            CaptureCommand::Inspect => self.hand_off(HandOff::Inspect, None),
         };
         result.unwrap_or_else(|error| ControlReply::error("failed", format!("{error:#}")))
     }
@@ -1913,9 +1872,10 @@ impl CaptureHost {
         let discarded = self.active.as_ref().map(|active| active.bundle.clone());
         // Output stays muted or media paused from one capture to the next.
         let quiet = self.active.as_mut().and_then(|active| active.quiet.take());
+        let clip = self.active.as_ref().is_some_and(|active| active.clip);
         let switched = self
             .end(now, audio, End::Discard)
-            .and_then(|_| self.begin(now, audio, target, quiet));
+            .and_then(|_| self.begin(now, audio, target, quiet, clip));
         let mut outcomes = lock(&self.outcomes);
         if let (Some(bundle), true) = (discarded, self.active.is_none()) {
             let error = match &switched {
@@ -1961,13 +1921,15 @@ impl CaptureHost {
     }
 
     /// Starts a capture, holding "While dictating" with `quiet` when a
-    /// switch carries the previous capture's session over.
+    /// switch carries the previous capture's session over; `clip` makes it
+    /// a Screenshots recording.
     fn begin(
         &mut self,
         now: CaptureInstant,
         audio: &impl AudioTimeline,
         target: CaptureTarget,
         quiet: Option<Quiet>,
+        clip: bool,
     ) -> Result<ControlReply> {
         if self.active.is_some() || self.replay.is_narrating() {
             return Ok(self.report(false, None));
@@ -1979,7 +1941,9 @@ impl CaptureHost {
         if !cfg!(test)
             && let Some((need, _)) = permissions::missing(target != CaptureTarget::Phone)
         {
-            permissions::report(need);
+            // A Screenshots recording (`clip`) goes back to its picker once
+            // the grant is made; any other capture records the screen.
+            permissions::report_capture(need, clip);
             return Ok(ControlReply::error(
                 "permission",
                 format!("{} is off for Hex", need.name()),
@@ -2001,7 +1965,7 @@ impl CaptureHost {
         }
         // Unfinished from here until its collector or the finisher settles
         // it, whatever stop or cancel does meanwhile.
-        lock(&self.outcomes).started(bundle.clone(), now, target.kind());
+        lock(&self.outcomes).start(bundle.clone(), now, target.kind(), clip);
         self.input.recording(Some(&bundle));
         let (seal, sealed) = mpsc::sync_channel(1);
         let collector = {
@@ -2015,7 +1979,7 @@ impl CaptureHost {
                 .spawn(move || {
                     let start = engine
                         .target(target)
-                        .map(|target| start_request(now, recording.clone(), target));
+                        .map(|target| start_request(now, recording.clone(), target, clip));
                     collect(
                         &*engine, start, &recording, chunks, sealed, &jobs, &outcomes, &input,
                     );
@@ -2034,6 +1998,7 @@ impl CaptureHost {
             seal,
             collector,
             quiet: quiet.or_else(|| self.quiet()),
+            clip,
         });
         self.find_phone();
         Ok(self.report(true, None))
@@ -2091,12 +2056,15 @@ impl CaptureHost {
 
     /// Pastes or opens the newest written capture on a thread of its own,
     /// one at a time: pasting waits on the pasteboard and the app in front.
-    fn hand_off(&self, how: HandOff) -> Result<ControlReply> {
-        let bundle = lock(&self.outcomes)
-            .last
-            .as_ref()
-            .filter(|last| last.stage == Stage::Done)
-            .map(|last| last.bundle.clone())
+    fn hand_off(&self, how: HandOff, shown: Option<PathBuf>) -> Result<ControlReply> {
+        let bundle = shown
+            .or_else(|| {
+                lock(&self.outcomes)
+                    .last
+                    .as_ref()
+                    .filter(|last| last.stage == Stage::Done)
+                    .map(|last| last.bundle.clone())
+            })
             .ok_or_else(|| eyre!("no written capture"))?;
         if !cfg!(test) {
             static HANDING_OFF: AtomicBool = AtomicBool::new(false);
@@ -3165,7 +3133,10 @@ fn takes(keys: CapsuleKeys, key: &CapsuleKey) -> bool {
             CapsuleKey::Shortcut | CapsuleKey::Press | CapsuleKey::Shift(_),
         ) => true,
         (
-            CapsuleKeys::Suggest { cycle: true, .. },
+            CapsuleKeys::Suggest {
+                cycle: true,
+                search: true,
+            },
             CapsuleKey::Return { shift: false } | CapsuleKey::Tab { .. },
         ) => true,
         (CapsuleKeys::Suggest { search: true, .. }, CapsuleKey::Text(typed)) => opens_search(typed),
@@ -3280,7 +3251,15 @@ fn finish_captures(
         let finished = capture.finish(audio);
         let look = look.recv().ok();
         restrict_bundle(&bundle);
+        let clip = lock(outcomes).is_clip(&bundle);
         match finished {
+            Ok(written) if clip => {
+                tracing::info!(bundle = %bundle.display(), words = written.words, "recording finished");
+                lock(outcomes).settle(bundle.clone(), Stage::Done, Some(written));
+                if let Some(written) = CLIP_WRITTEN.get() {
+                    written(bundle);
+                }
+            }
             Ok(written) => {
                 tracing::info!(
                     bundle = %bundle.display(),
@@ -3289,9 +3268,22 @@ fn finish_captures(
                     missing_transcript = written.missing_transcript.as_deref(),
                     "capture finished"
                 );
-                copy_to_clipboard(&bundle);
+                let copy_error = if crate::capture_zip::copy_as_zip(&bundle) {
+                    None
+                } else {
+                    copy_to_clipboard(&bundle)
+                        .err()
+                        .map(|error| format!("{error:#}"))
+                };
                 let route = look.as_ref().map(|_| CaptureRoute::looking());
-                lock(outcomes).settle_with(bundle.clone(), Stage::Done, Some(written), None, route);
+                lock(outcomes).settle_with(
+                    bundle.clone(),
+                    Stage::Done,
+                    Some(written),
+                    None,
+                    copy_error,
+                    route,
+                );
                 if let Some(look) = look {
                     let job = routing::Job::Written {
                         bundle: bundle.clone(),
@@ -3308,6 +3300,17 @@ fn finish_captures(
             }
         }
     }
+}
+
+/// Who learns of each written Screenshots recording, on the
+/// `capture-finish` thread: it must only hand the bundle on.
+static CLIP_WRITTEN: OnceLock<fn(PathBuf)> = OnceLock::new();
+
+/// Sends each written Screenshots recording to `written`; the first caller
+/// wins.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn on_clip_written(written: fn(PathBuf)) {
+    let _ = CLIP_WRITTEN.set(written);
 }
 
 /// What the capsule's Paste and Inspect do with the newest written capture.
@@ -3355,7 +3358,7 @@ fn hand_off(how: HandOff, bundle: &Path) -> anyhow::Result<()> {
                     }
                     Some(Err(error)) => tracing::warn!(%error, "contact sheet unreadable"),
                 }
-                paster.paste(&summary)
+                paster.paste(&summary, false)
             })
         }
         HandOff::Inspect => inspect(bundle),
@@ -3388,32 +3391,18 @@ fn summary(bundle: &Path) -> anyhow::Result<String> {
 /// The process's one paster for captures. On X11 it serves the clipboard
 /// for as long as it lives, so a copied capture stays pasteable.
 #[cfg(target_os = "linux")]
-fn with_linux_paster(
+pub(crate) fn with_linux_paster(
     use_it: impl FnOnce(&mut crate::linux::paste::LinuxPaster) -> Result<()>,
 ) -> anyhow::Result<()> {
-    static PASTER: Mutex<Option<crate::linux::paste::LinuxPaster>> = Mutex::new(None);
-    let mut paster = PASTER.lock().unwrap_or_else(|error| error.into_inner());
-    if paster.is_none() {
-        let shift = crate::app_settings::AppSettings::load()
-            .map(|settings| settings.paste_with_shift)
-            .unwrap_or(false);
-        *paster = Some(
-            crate::linux::paste::LinuxPaster::new(
-                Arc::default(),
-                Arc::new(AtomicBool::new(shift)),
-                Default::default(),
-            )
-            .map_err(|error| anyhow::anyhow!("{error:#}"))?,
-        );
-    }
-    use_it(paster.as_mut().expect("made above")).map_err(|error| anyhow::anyhow!("{error:#}"))
+    crate::linux::paste::with_paster(use_it).map_err(|error| anyhow::anyhow!("{error:#}"))
 }
 
 /// Copies a written capture to the clipboard, as Scrawl does: its summary,
-/// ready to paste into an agent.
-fn copy_to_clipboard(bundle: &Path) {
+/// ready to paste into an agent. The capsule says "Summary copied" only
+/// once this is `Ok`.
+fn copy_to_clipboard(bundle: &Path) -> anyhow::Result<()> {
     if cfg!(test) {
-        return;
+        return Ok(());
     }
     #[cfg(target_os = "macos")]
     let copied =
@@ -3423,9 +3412,10 @@ fn copy_to_clipboard(bundle: &Path) {
         summary(bundle).and_then(|summary| with_linux_paster(|paster| paster.copy(&summary)));
     #[cfg(target_os = "windows")]
     let copied = scrawl_capture::handoff::copy_bundle_to_clipboard(bundle);
-    if let Err(error) = copied {
+    if let Err(error) = &copied {
         tracing::warn!(error = format!("{error:#}"), "could not copy the capture");
     }
+    copied.map_err(|error| anyhow::anyhow!("{error:#}"))
 }
 
 /// One capture's audio thread: starts the engine, collects until the sink
@@ -3464,8 +3454,12 @@ fn collect(
             return;
         }
     };
-    let mut timeline = Timeline::new(t0);
-    let prepared = capture.route_context().and_then(routing::look);
+    let mut timeline = Timeline::new(t0, bundle.join("audio.wav"));
+    // A Screenshots recording goes to its card, never the router.
+    let routed = !lock(outcomes).is_clip(&bundle);
+    let prepared = routed
+        .then(|| capture.route_context().and_then(routing::look))
+        .flatten();
     let mut checked = Instant::now();
     loop {
         let chunk = match chunks.recv_timeout(SCREEN_CHECK) {
@@ -3491,6 +3485,8 @@ fn collect(
                 tracing::error!(error, "the capture's screen source failed");
                 input.detach(&bundle);
                 drop(chunks);
+                // Close and remove the partial audio before the bundle is removed.
+                timeline.discard();
                 capture.cancel();
                 remove_bundle(&bundle);
                 lock(outcomes).fail(bundle, error);
@@ -3520,7 +3516,9 @@ fn collect(
                 Ok(()) => {
                     // Reuse recording-time preparation; adapters without an
                     // early context start their look once the capture queues.
-                    if let Some(look) = prepared.or_else(|| context.and_then(routing::look)) {
+                    if let Some(look) = prepared
+                        .or_else(|| routed.then(|| context.and_then(routing::look)).flatten())
+                    {
                         let _ = give_look.send(look);
                     }
                     return;
@@ -3531,161 +3529,13 @@ fn collect(
                 }
             }
         }
-        Ok(Seal::Cancel) | Err(_) => capture.cancel(),
+        Ok(Seal::Cancel) | Err(_) => {
+            // Close and remove the partial audio before the bundle is removed.
+            timeline.discard();
+            capture.cancel();
+        }
     }
     lock(outcomes).settle(bundle, Stage::Cancelled, None);
-}
-
-/// A capture's audio at 16 kHz on its own clock: resampled as it arrives,
-/// with missing spans padded with silence so positions stay on the clock.
-struct Timeline {
-    t0: CaptureInstant,
-    /// Where `samples[0]` sits on the clock, once audio arrived.
-    first: Option<CaptureInstant>,
-    samples: Vec<f32>,
-    resampler: Option<(u32, StreamingResampler)>,
-    gaps: Vec<GapSpan>,
-    /// The most samples kept (`MAX_CAPTURE`).
-    limit: usize,
-    /// Where audio past the limit started being dropped.
-    truncated_at: Option<CaptureInstant>,
-}
-
-impl Timeline {
-    fn new(t0: CaptureInstant) -> Self {
-        Self::with_limit(t0, MAX_CAPTURE)
-    }
-
-    fn with_limit(t0: CaptureInstant, limit: Duration) -> Self {
-        Self {
-            t0,
-            first: None,
-            samples: Vec::new(),
-            resampler: None,
-            gaps: Vec::new(),
-            limit: (limit.as_nanos() * u128::from(SAMPLE_RATE) / 1_000_000_000) as usize,
-            truncated_at: None,
-        }
-    }
-
-    fn push(&mut self, samples: &[f32], sample_rate: u32, through: CaptureInstant) {
-        if samples.is_empty() || sample_rate == 0 {
-            return;
-        }
-        let from = through.sub_frames(samples.len(), sample_rate);
-        self.first.get_or_insert(from.max(self.t0));
-        if self
-            .resampler
-            .as_ref()
-            .is_none_or(|(rate, _)| *rate != sample_rate)
-        {
-            self.flush();
-            match StreamingResampler::new(sample_rate) {
-                Ok(resampler) => self.resampler = Some((sample_rate, resampler)),
-                Err(error) => {
-                    tracing::warn!(%error, sample_rate, "capture audio cannot be resampled");
-                    self.gap(from, through);
-                    return;
-                }
-            }
-        }
-        if let Some((_, resampler)) = &mut self.resampler {
-            let resampled = resampler.push(samples);
-            self.append(&resampled, through);
-        }
-    }
-
-    fn gap(&mut self, from: CaptureInstant, through: CaptureInstant) {
-        if through.duration_since(from) <= GAP_TOLERANCE {
-            return;
-        }
-        let Some(first) = self.first else {
-            // Before any audio: the recording simply starts later.
-            return;
-        };
-        if self.truncated_at.is_some() {
-            // Past the limit: `finish` records everything after it as one gap.
-            return;
-        }
-        self.flush();
-        let limit_at = first + duration_for(self.limit);
-        self.gaps.push(GapSpan {
-            start_ms: self.clock_ms(from.max(first).min(limit_at)),
-            end_ms: self.clock_ms(through.min(limit_at)),
-        });
-        // Padding stops one sample past the limit, which marks the truncation.
-        let end = position(first, through).min(self.limit + 1);
-        if end > self.samples.len() {
-            let padding = vec![0.0; end - self.samples.len()];
-            self.append(&padding, through);
-        }
-    }
-
-    fn finish(
-        mut self,
-        through: CaptureInstant,
-        closed: Option<CaptureSinkClosed>,
-    ) -> RecordedAudio {
-        if let Some(closed) = closed {
-            if let Some((from, until)) = closed.pending_gap {
-                self.gap(from, until);
-            }
-            if closed.accounted_through < through {
-                self.gap(closed.accounted_through.max(self.t0), through);
-            }
-        }
-        self.flush();
-        if let Some(truncated_at) = self.truncated_at {
-            self.gaps.push(GapSpan {
-                start_ms: self.clock_ms(truncated_at),
-                end_ms: self.clock_ms(through),
-            });
-        }
-        let Some(first) = self.first else {
-            return RecordedAudio::new(Vec::new(), SAMPLE_RATE, self.clock_ms(through), Vec::new());
-        };
-        // Audio delivered after the stop belongs to no capture.
-        self.samples.truncate(position(first, through));
-        let start_offset_ms = self.clock_ms(first);
-        RecordedAudio::new(self.samples, SAMPLE_RATE, start_offset_ms, self.gaps)
-    }
-
-    fn flush(&mut self) {
-        if let Some((_, resampler)) = self.resampler.take() {
-            let rest = resampler.finish();
-            let through = self
-                .first
-                .map(|first| first + duration_for(self.samples.len() + rest.len()))
-                .unwrap_or(self.t0);
-            self.append(&rest, through);
-        }
-    }
-
-    fn append(&mut self, samples: &[f32], through: CaptureInstant) {
-        let limit = self.limit;
-        let room = limit.saturating_sub(self.samples.len());
-        if samples.len() > room && self.truncated_at.is_none() {
-            tracing::warn!("capture reached its length limit; dropping the rest of its audio");
-            self.truncated_at = Some(
-                self.first
-                    .map_or(through, |first| first + duration_for(limit)),
-            );
-        }
-        self.samples
-            .extend_from_slice(&samples[..samples.len().min(room)]);
-    }
-
-    fn clock_ms(&self, at: CaptureInstant) -> u64 {
-        at.duration_since(self.t0).as_millis() as u64
-    }
-}
-
-fn position(first: CaptureInstant, at: CaptureInstant) -> usize {
-    (at.duration_since(first).as_nanos() * u128::from(SAMPLE_RATE) / 1_000_000_000) as usize
-}
-
-fn duration_for(samples: usize) -> Duration {
-    crate::audio::duration_for_frames(samples, SAMPLE_RATE)
 }
 
 /// `hex dev capture-replay`: runs a capture through [`CaptureHost`] on a
@@ -3813,6 +3663,8 @@ impl AudioTimeline for WavTimeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scrawl_capture::audio::{GapSpan, pcm16};
+    use scrawl_capture::model::TranscriptData;
 
     /// A pen release on the `capture-input` thread ends its stroke while
     /// that thread holds the input target's lock; reading the ink must not
@@ -3857,7 +3709,11 @@ mod tests {
             window(capsule, own, [544.0, 0.0, 640.0, 424.0], 27),
             window(app, own + 1, [0.0, 0.0, 1728.0, 1117.0], 0),
         ];
-        let roles = [Some(capsule), Some(ink), None];
+        let roles = OwnWindowIds {
+            capsule: Some(capsule),
+            ink: Some(ink),
+            picker: None,
+        };
         let OwnWindows {
             excluded,
             passthrough,
@@ -3898,9 +3754,48 @@ mod tests {
         std::env::temp_dir().join(format!("hex-capture-{name}-{unique}"))
     }
 
+    /// A temp `audio.wav` in its own folder, with the folder made.
+    fn temp_wav(name: &str) -> PathBuf {
+        let dir = temp_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("audio.wav")
+    }
+
+    fn wav_samples(path: &Path) -> Vec<i16> {
+        let mut reader = hound::WavReader::open(path).unwrap();
+        assert_eq!(reader.spec().sample_rate, 16_000);
+        assert_eq!(reader.spec().channels, 1);
+        assert_eq!(reader.spec().bits_per_sample, 16);
+        reader
+            .samples::<i16>()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    /// The samples a finished timeline's build publishes: the partial takes its
+    /// final name when the build journals the capture, not when it stops.
+    fn published_wav(audio: &mut RecordedAudio, path: &Path) -> Vec<i16> {
+        assert!(audio.is_on_disk());
+        assert!(audio.publish_audio(path.parent().unwrap()));
+        wav_samples(path)
+    }
+
+    fn remove_wav(path: &Path) {
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_screenshots_recording_keeps_every_pixel_and_a_capture_stays_compact() {
+        let t0 = CaptureInstant::now();
+        let movie = |clip| start_request(t0, PathBuf::new(), Target::ActiveDisplay, clip).movie;
+        assert_eq!(movie(true), MovieQuality::Full);
+        assert_eq!(movie(false), MovieQuality::Compact);
+    }
+
     #[test]
     fn the_timeline_resamples_pads_gaps_and_ends_at_the_stop() {
-        let mut timeline = Timeline::new(t(0));
+        let path = temp_wav("timeline");
+        let mut timeline = Timeline::new(t(0), path.clone());
         // Audio starts 100 ms in (a cold microphone).
         let mut through = t(100);
         for _ in 0..50 {
@@ -3914,12 +3809,13 @@ mod tests {
             through = through + Duration::from_millis(10);
             timeline.push(&[0.5; 160], 16_000, through);
         }
-        let audio = timeline.finish(
+        let mut audio = timeline.finish(
             through.checked_sub(Duration::from_millis(100)).unwrap(),
             None,
         );
         assert_eq!(audio.sample_rate, 16_000);
         assert_eq!(audio.start_offset_ms, 100);
+        assert!(audio.samples.is_empty() && audio.is_on_disk());
         assert_eq!(
             audio.gaps,
             [GapSpan {
@@ -3929,15 +3825,41 @@ mod tests {
         );
         // 500 + 300 + 500 ms of audio, cut 100 ms before the last chunk.
         assert_eq!(audio.duration_ms(), 100 + 1_200);
-        let resampled_silence = &audio.samples[8_000 + 100..8_000 + 4_700];
-        assert!(resampled_silence.iter().all(|sample| *sample == 0.0));
+        assert_eq!(audio.sample_count(), 1_200 * 16);
+        // A stopped capture keeps its partial name until its build journals it.
+        assert!(!path.exists(), "audio.wav waits for the journal");
+        let samples = published_wav(&mut audio, &path);
+        assert_eq!(samples.len(), 100 * 16 + 1_200 * 16);
+        // The WAV keeps the leading 100 ms and the 300 ms gap as silence.
+        assert!(samples[..1_600].iter().all(|&sample| sample == 0));
+        assert!(
+            !path
+                .with_file_name(scrawl_capture::recover::PARTIAL_AUDIO)
+                .exists(),
+            "the streamed file is renamed, never left partial"
+        );
+        assert!(
+            samples[1_600 + 8_000..1_600 + 8_000 + 4_800]
+                .iter()
+                .all(|&sample| sample == 0)
+        );
+        assert!(
+            samples[1_600..9_600].iter().any(|&sample| sample != 0),
+            "the resampled first 500 ms is written"
+        );
+        assert!(
+            samples[14_400..].iter().all(|&sample| sample == pcm16(0.5)),
+            "the 16 kHz tail is written exactly"
+        );
+        remove_wav(&path);
     }
 
     #[test]
     fn a_pending_gap_and_a_stalled_tail_come_back_from_the_closed_sink() {
-        let mut timeline = Timeline::new(t(0));
+        let path = temp_wav("pending");
+        let mut timeline = Timeline::new(t(0), path.clone());
         timeline.push(&[0.5; 1_600], 16_000, t(100));
-        let audio = timeline.finish(
+        let mut audio = timeline.finish(
             t(600),
             Some(CaptureSinkClosed {
                 pending_gap: Some((t(100), t(300))),
@@ -3957,7 +3879,53 @@ mod tests {
                 }
             ]
         );
-        assert_eq!(audio.samples.len(), 9_600);
+        assert_eq!(audio.sample_count(), 9_600);
+        assert_eq!(published_wav(&mut audio, &path).len(), 9_600);
+        remove_wav(&path);
+    }
+
+    #[test]
+    fn a_gap_is_digital_silence_where_it_happened() {
+        let path = temp_wav("gap");
+        let mut timeline = Timeline::new(t(0), path.clone());
+        timeline.push(&[0.5; 1_600], 16_000, t(100));
+        timeline.gap(t(100), t(400));
+        timeline.push(&[0.5; 1_600], 16_000, t(500));
+        let mut audio = timeline.finish(t(500), None);
+        assert_eq!(
+            audio.gaps,
+            [GapSpan {
+                start_ms: 100,
+                end_ms: 400
+            }]
+        );
+        let samples = published_wav(&mut audio, &path);
+        assert_eq!(samples.len(), 8_000);
+        assert!(samples[..1_600].iter().all(|&sample| sample == pcm16(0.5)));
+        assert!(samples[1_600..6_400].iter().all(|&sample| sample == 0));
+        assert!(samples[6_400..].iter().all(|&sample| sample == pcm16(0.5)));
+        remove_wav(&path);
+    }
+
+    #[test]
+    fn a_capture_longer_than_twenty_minutes_keeps_all_of_its_audio() {
+        let path = temp_wav("long");
+        let mut timeline = Timeline::new(t(0), path.clone());
+        // 21 minutes in 5 s chunks, the way the sink delivers them.
+        let chunk = vec![0.25_f32; 5 * 16_000];
+        let mut through = t(0);
+        for _ in 0..(21 * 60 / 5) {
+            through = through + Duration::from_secs(5);
+            timeline.push(&chunk, 16_000, through);
+        }
+        let mut audio = timeline.finish(through, None);
+        let expected = 21 * 60 * 16_000;
+        assert_eq!(audio.sample_count(), expected);
+        assert!(audio.is_on_disk() && audio.samples.is_empty());
+        assert!(audio.gaps.is_empty());
+        assert_eq!(audio.audio_stopped_at_ms(), None);
+        assert_eq!(published_wav(&mut audio, &path).len(), expected);
+        remove_wav(&path);
     }
 
     #[derive(Default)]
@@ -4010,18 +3978,25 @@ mod tests {
     impl Transcriber for FakeTranscriber {
         fn transcribe(&self, audio: &RecordedAudio) -> anyhow::Result<Option<TranscriptData>> {
             assert_eq!(audio.sample_rate, 16_000);
+            // Word times are from `samples[0]`; a streamed capture's file
+            // starts with its own leading silence, so the words move with it.
+            let lead_ms = audio
+                .samples
+                .iter()
+                .position(|sample| *sample != 0.0)
+                .map_or(0, |lead| lead as u64 * 1_000 / u64::from(audio.sample_rate));
             Ok(Some(TranscriptData {
                 source: "fake".into(),
                 text: "hello there".into(),
                 words: vec![
                     WordTiming {
-                        t0: 0,
-                        t1: 200,
+                        t0: lead_ms,
+                        t1: lead_ms + 200,
                         text: "hello".into(),
                     },
                     WordTiming {
-                        t0: 250,
-                        t1: 500,
+                        t0: lead_ms + 250,
+                        t1: lead_ms + 500,
                         text: "there".into(),
                     },
                 ],
@@ -4152,8 +4127,9 @@ mod tests {
                 Some(&*self.transcriber),
             )?;
             Ok(Written {
-                words: bundle.transcript.words.len(),
+                words: scrawl_capture::transcribe::word_count(&bundle.transcript),
                 gaps,
+                audio_stopped_at_ms: None,
                 missing_transcript: bundle.transcript.missing.map(|missing| missing.reason),
             })
         }
@@ -4201,12 +4177,10 @@ mod tests {
         let idle = report(host.control(ScrawlCaptureAction::Stop, &audio));
         assert!(!idle.changed && idle.bundle.is_none());
         // Paste and Inspect need a written capture.
-        for command in [CaptureCommand::Paste, CaptureCommand::Inspect] {
-            assert!(matches!(
-                host.command(command, &audio),
-                ControlReply::Error { .. }
-            ));
-        }
+        assert!(matches!(
+            host.command(CaptureCommand::Inspect, &audio),
+            ControlReply::Error { .. }
+        ));
         assert!(!report(host.control(ScrawlCaptureAction::Cancel, &audio)).changed);
 
         let started = report(host.control(ScrawlCaptureAction::Start, &audio));
@@ -4238,7 +4212,10 @@ mod tests {
         let snapshot = lock(&host.outcomes).snapshot();
         assert!(snapshot.recording.is_none() && snapshot.finishing.is_empty());
         assert_eq!(snapshot.last.unwrap().stage, Stage::Done);
-        for command in [CaptureCommand::Paste, CaptureCommand::Inspect] {
+        for command in [
+            CaptureCommand::Paste(bundle.clone()),
+            CaptureCommand::Inspect,
+        ] {
             assert!(report(host.command(command, &audio)).changed);
         }
         // The fake audio ends before the stop, so the tail may count as a gap.
@@ -4248,6 +4225,7 @@ mod tests {
         // Hex's audio, on Hex's clock, into Hex's folder; nothing else.
         let start = engine.starts.lock().unwrap()[0].clone();
         assert_eq!(start.audio, AudioIn::External);
+        assert_eq!(start.movie, MovieQuality::Compact);
         assert!(matches!(start.target, Target::ActiveDisplay));
         assert_eq!(start.bundle_dir.as_ref(), Some(&bundle));
         assert_eq!(start.t0_boot_ns, t0.as_nanos());
@@ -4407,16 +4385,17 @@ mod tests {
     }
 
     #[test]
-    fn padding_past_the_length_limit_stays_bounded() {
-        let mut timeline = Timeline::with_limit(t(0), Duration::from_secs(1));
+    fn past_the_guard_the_file_stops_and_the_rest_is_one_gap() {
+        let path = temp_wav("guard");
+        let mut timeline = Timeline::with_limit(t(0), path.clone(), Duration::from_secs(1));
         timeline.push(&[0.5; 1_600], 16_000, t(100));
-        // A gap far past the limit pads only up to it.
+        // A gap far past the guard pads only up to it.
         timeline.gap(t(100), t(3 * 60 * 60 * 1_000));
-        assert!(timeline.samples.len() <= 16_000);
         timeline.gap(t(3 * 60 * 60 * 1_000), t(6 * 60 * 60 * 1_000));
         timeline.push(&[0.5; 1_600], 16_000, t(6 * 60 * 60 * 1_000 + 100));
-        let audio = timeline.finish(t(6 * 60 * 60 * 1_000 + 100), None);
-        assert_eq!(audio.samples.len(), 16_000);
+        let mut audio = timeline.finish(t(6 * 60 * 60 * 1_000 + 100), None);
+        assert_eq!(audio.sample_count(), 16_000);
+        assert_eq!(published_wav(&mut audio, &path).len(), 16_000);
         assert_eq!(
             audio.gaps,
             [
@@ -4430,6 +4409,67 @@ mod tests {
                 }
             ]
         );
+        remove_wav(&path);
+    }
+
+    #[test]
+    fn the_guard_records_where_the_audio_stopped() {
+        let path = temp_wav("guard-point");
+        let mut timeline = Timeline::with_limit(t(0), path.clone(), Duration::from_secs(1));
+        timeline.push(&[0.5; 1_600], 16_000, t(100));
+        // Past the guard: the first second is kept, the rest is one gap.
+        timeline.push(&[0.5; 16_000], 16_000, t(1_100));
+        let mut audio = timeline.finish(t(1_100), None);
+        assert_eq!(audio.audio_stopped_at_ms(), Some(1_000));
+        assert_eq!(audio.sample_count(), 16_000);
+        assert_eq!(published_wav(&mut audio, &path).len(), 16_000);
+        remove_wav(&path);
+
+        // A capture that stays inside the guard says nothing.
+        let path = temp_wav("guard-point-short");
+        let mut timeline = Timeline::with_limit(t(0), path.clone(), Duration::from_secs(1));
+        timeline.push(&[0.5; 1_600], 16_000, t(100));
+        let audio = timeline.finish(t(100), None);
+        assert_eq!(audio.audio_stopped_at_ms(), None);
+        assert_eq!(audio.sample_count(), 1_600);
+        remove_wav(&path);
+    }
+
+    #[test]
+    fn a_mid_capture_write_failure_stops_where_the_file_stopped() {
+        let path = temp_wav("mid-failure");
+        let mut timeline = Timeline::new(t(0), path.clone());
+        timeline.push(&[0.5; 1_600], 16_000, t(100));
+        timeline.push(&[0.5; 1_600], 16_000, t(200));
+        // The disk refuses the next chunk: 200 ms reached the file.
+        timeline.write_failed(t(250));
+        timeline.push(&[0.5; 1_600], 16_000, t(300));
+        let mut audio = timeline.finish(t(300), None);
+        assert_eq!(audio.audio_stopped_at_ms(), Some(200));
+        assert_eq!(audio.sample_count(), 3_200);
+        assert_eq!(published_wav(&mut audio, &path).len(), 3_200);
+        assert_eq!(audio.gaps.last().map(|gap| gap.end_ms), Some(300));
+        remove_wav(&path);
+    }
+
+    #[test]
+    fn a_write_failure_stops_the_audio_where_the_file_stopped() {
+        let dir = temp_dir("write-failure");
+        fs::create_dir_all(&dir).unwrap();
+        // A regular file where the bundle folder should be: `audio.wav.partial`
+        // cannot be opened under it.
+        let blocked = dir.join("blocked");
+        fs::write(&blocked, b"not a folder").unwrap();
+        let mut timeline = Timeline::new(t(0), blocked.join("audio.wav"));
+        timeline.push(&[0.5; 1_600], 16_000, t(100));
+        timeline.push(&[0.5; 1_600], 16_000, t(200));
+        let audio = timeline.finish(t(200), None);
+        // The first sound was at 0 ms and nothing reached the disk, so the audio
+        // stops there instead of claiming a file.
+        assert_eq!(audio.audio_stopped_at_ms(), Some(0));
+        assert!(!audio.is_on_disk());
+        assert_eq!(audio.sample_count(), 0);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Holds every transcription until the test lets it through.
@@ -4738,6 +4778,9 @@ mod tests {
             (recording.target, recording.worked),
             (TargetKind::Pointer, false)
         );
+        // Some audio, so discarding also closes and removes its partial file.
+        audio.feed(160, recording.since + Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(20));
 
         let discarded = report(host.command(CaptureCommand::Discard, &audio));
         assert!(discarded.changed);
@@ -4751,6 +4794,10 @@ mod tests {
         assert!(audio.open.lock().unwrap().is_none(), "the sink is closed");
         wait_until_idle(&host);
         assert!(!first.exists());
+        assert!(
+            !first.join("audio.wav").exists() && !first.join("audio.wav.partial").exists(),
+            "the streamed file is gone"
+        );
         assert_eq!(lock(&host.outcomes).snapshot(), CaptureSnapshot::default());
         assert!(
             report(host.control(ScrawlCaptureAction::Status, &audio))
@@ -4801,12 +4848,19 @@ mod tests {
         let start = engine.starts.lock().unwrap()[0].clone();
         assert!(matches!(start.target, Target::Phone { .. }));
         assert_eq!(start.audio, AudioIn::External);
+        // Some narration, so the finish has a streamed partial to publish.
+        audio.feed(1_600, recording.since + Duration::from_millis(100));
 
         // Unplugged: the next look at the host finishes what it recorded.
         lock(&host.outcomes).phone_ended = true;
         assert_eq!(host.recording_since(&audio), None);
         let last = wait_for_last(&mut host, &audio, &bundle, true);
         assert_eq!(last.stage, "done");
+        assert!(bundle.join("audio.wav").is_file());
+        assert!(
+            !bundle.join(scrawl_capture::recover::PARTIAL_AUDIO).exists(),
+            "a finished iPhone bundle keeps no streamed partial"
+        );
         host.shutdown(&audio);
         fs::remove_dir_all(dir).ok();
     }
@@ -5077,7 +5131,7 @@ mod tests {
         let settled = lock(&host.outcomes).snapshot().last.unwrap();
         assert_eq!(settled.error.as_deref(), Some("the window closed"));
         assert!(matches!(
-            host.command(CaptureCommand::Paste, &audio),
+            host.command(CaptureCommand::Inspect, &audio),
             ControlReply::Error { .. }
         ));
         host.shutdown(&audio);
@@ -5343,16 +5397,21 @@ mod tests {
         ] {
             assert!(!capsule_key(key.clone()), "{key:?}");
         }
-        // The toast's one guess at a time: Return sends it, Tab moves on.
+        // A toast appearing over another app never takes its Return or Tab.
         second.set(CapsuleKeys::Suggest {
             cycle: true,
             search: false,
         });
         assert!(suggesting());
+        assert!(!capsule_key(CapsuleKey::Tab { shift: false }));
+        assert!(!capsule_key(CapsuleKey::Return { shift: false }));
+        second.set(CapsuleKeys::Suggest {
+            cycle: true,
+            search: true,
+        });
         assert!(capsule_key(CapsuleKey::Tab { shift: false }));
         assert!(capsule_key(CapsuleKey::Return { shift: false }));
         assert!(!capsule_key(CapsuleKey::Return { shift: true }));
-        assert!(!capsule_key(CapsuleKey::Text("h".into())));
         second.set(CapsuleKeys::List);
         assert!(!suggesting());
         assert!(list_open() && !wants_escape());
@@ -5437,6 +5496,7 @@ mod tests {
                 screen: false,
                 target: TargetKind::Pointer,
                 worked: false,
+                clip: false,
             })
         );
         outcomes.progress(&one, Stage::Recording);
@@ -5466,6 +5526,7 @@ mod tests {
             Some(Written {
                 words: 3,
                 gaps: 0,
+                audio_stopped_at_ms: None,
                 missing_transcript: None,
             }),
         );

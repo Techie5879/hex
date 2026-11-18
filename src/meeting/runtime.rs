@@ -60,12 +60,12 @@ impl Meetings {
                 app,
                 commands,
                 move |choice| {
-                    crate::app_settings::save_meeting_provider(choice.clone());
-                    chosen.update(move |ui, _| crate::rune_ui::meeting_provider_chosen(ui, choice));
+                    crate::app_settings::save_meeting_provider(choice);
+                    chosen.update(move |ui, _| crate::rune_ui::meeting_settings_saved(ui));
                 },
                 move |corner| {
                     crate::app_settings::save_meeting_indicator_corner(corner);
-                    moved.update(move |ui, _| crate::rune_ui::meeting_corner_moved(ui, corner));
+                    moved.update(move |ui, _| crate::rune_ui::meeting_settings_saved(ui));
                 },
             )
         };
@@ -75,7 +75,7 @@ impl Meetings {
                 for event in events {
                     capsules.event(&event);
                     #[cfg(target_os = "linux")]
-                    if matches!(event, ControllerEvent::Offer(_)) {
+                    if matches!(event, ControllerEvent::Offer(..)) {
                         let window = window.clone();
                         capsules.when_offer_unshown(move |reason| offer_unshown(&window, reason));
                     }
@@ -149,7 +149,7 @@ fn offer_unshown(window: &rune::AppHandle<Ui>, reason: String) {
     );
     if !crate::labs::gnome_meeting_capsules() {
         message.push_str(
-            " On GNOME, Labs › Floating meeting capsules on GNOME can show it over your call.",
+            " On GNOME, Labs › Call recording controls on GNOME can show it over your call.",
         );
     }
     window.update(move |ui, tx| {
@@ -170,8 +170,10 @@ fn follow(event: &ControllerEvent, window: &rune::AppHandle<Ui>) {
                 id: id.clone(),
                 title: title.clone(),
                 chapters: Vec::new(),
+                warning: None,
             };
         }
+        ControllerEvent::SourceWarning { warning } => state.source_warning(*warning),
         ControllerEvent::Retitled { title } => {
             if let MeetingMenuState::Recording { title: shown, .. } = &mut *state {
                 shown.clone_from(title);
@@ -190,13 +192,6 @@ fn follow(event: &ControllerEvent, window: &rune::AppHandle<Ui>) {
             tracing::info!(id = %manifest.id, "meeting transcript ready");
             *state = MeetingMenuState::Idle;
         }
-        ControllerEvent::OpenMeeting(id) => {
-            let id = id.clone();
-            window.update(move |ui, tx| {
-                crate::rune_ui::show(ui, Destination::Meetings(Some(id)), tx)
-            });
-            window.open();
-        }
         ControllerEvent::Failed { title, error } => {
             tracing::error!(%title, %error, "meeting failed");
             *state = MeetingMenuState::Idle;
@@ -207,14 +202,24 @@ fn follow(event: &ControllerEvent, window: &rune::AppHandle<Ui>) {
             });
             window.open();
         }
+        ControllerEvent::ImportFailed { error } => {
+            tracing::error!(%error, "meeting audio import failed");
+            let message = error.clone();
+            window.update(move |ui, tx| {
+                crate::rune_ui::meeting_import_failed(ui, message);
+                crate::rune_ui::show(ui, Destination::Meetings(None), tx);
+            });
+            window.open();
+        }
         ControllerEvent::CallEnded { app, .. } => {
             tracing::info!(%app, "the call ended; the recording continues until Stop");
         }
-        ControllerEvent::Offer(_)
+        ControllerEvent::Offer(..)
+        | ControllerEvent::OfferWithdrawn(_)
         | ControllerEvent::Reminder { .. }
         | ControllerEvent::ReminderWithdrawn { .. }
-        | ControllerEvent::AutoStopCancelled { .. }
         | ControllerEvent::RecordingContinued
+        | ControllerEvent::CallEndedWithdrawn
         | ControllerEvent::NotesStarted
         | ControllerEvent::NotesFinished(_) => {}
     }
