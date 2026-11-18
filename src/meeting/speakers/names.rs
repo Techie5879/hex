@@ -48,8 +48,8 @@ fn is_format_mark(character: char) -> bool {
     )
 }
 
-/// `raw` without invisible format marks, its whitespace runs (control
-/// characters included) collapsed to single spaces; nothing is judged.
+/// `raw` without invisible format marks, its whitespace runs (tabs and
+/// newlines included) collapsed to single spaces; nothing is judged.
 pub fn normalize(raw: &str) -> String {
     raw.chars()
         .filter(|character| !is_format_mark(*character))

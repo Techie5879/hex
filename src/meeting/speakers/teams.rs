@@ -441,6 +441,10 @@ mod tests {
                 "Ana Ruiz  External unfamiliar\u{200e}, Context menu is available",
                 "Ana Ruiz",
             ),
+            (
+                "Ana Ruiz\nExternal\tUnfamiliar, Context menu is available",
+                "Ana Ruiz",
+            ),
             // A name at the length limit keeps it once its badge is gone.
             (
                 &format!("{} Unverified, Context menu is available", "A".repeat(80)),
