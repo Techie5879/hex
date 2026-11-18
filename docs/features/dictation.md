@@ -133,6 +133,28 @@ chord evidence; any other key still is. Check:
 `globe_key_events_are_not_a_chord_with_the_function_shortcut` in
 `suppression/tests.rs` (constructed events; no physical-keyboard run).
 
+**Implemented November 7, 2026 (issue 37), unverified:** remapping Caps Lock to
+Control makes macOS's HID keyboard filter rewrite its usage (0x39) to Right
+Control (0xE4) before CoreGraphics sees it, so a Right Control shortcut also
+started from Caps Lock. Hex now reads the raw HID modifier state below that
+filter (`IOHIDManager`, opened without seizing the keyboards), and when Caps
+Lock is physically held while a side-specific modifier bit has no matching
+physical key, it drops the side and keeps the general modifier flag, which
+matches as either side. A real Right Control press (physical usage 0xE4) is
+untouched. Hex never requests Input Monitoring, so the tracker runs only when
+Hex already has it: turn Hex on under System Settings › Privacy & Security ›
+Input Monitoring and restart Hex. `IOHIDCheckAccess` gates the tracker; without
+that permission it stays off (logged once), the flags are unchanged, and Right
+Control still starts from a remapped Caps Lock. The shortcut recorder applies
+the same normalization only while the listener's input monitor is running, so
+recording a remapped Caps Lock saves a side-less Control. This is implemented
+but not verified on physical hardware; see the missing-evidence note in
+[recovery.md](recovery.md#remapped-control).
+Check: `normalized_remapped_caps_lock_starts_only_a_side_less_control_binding`
+and `a_remapped_caps_lock_does_not_hold_a_real_right_control_capture` in
+`suppression/tests.rs`, plus the normalization tests in
+`app_settings/hotkeys.rs` (constructed snapshots; no physical remap run in CI).
+
 ### Chord Shortcuts
 
 **Added October 29, 2026 (issue 394):** every shortcut (dictation, Voice
@@ -436,11 +458,26 @@ chunks; not run against PipeWire or a physical microphone).
 **Changed November 4, 2026 (issue 1309 follow-up):** with "While dictating"
 set to Mute or Pause media, the pre-roll came from before the mute took
 effect and picked up whatever was playing. On every OS, those hotkey captures
-now keep no pre-roll (`dictation::hotkey_pre_roll`); Duck and Do nothing keep
-450 ms. There is no separate setting. Check:
-`muting_or_pausing_while_dictating_keeps_no_pre_roll` in
+now keep no pre-roll (`dictation::hotkey_pre_roll`); Do nothing keeps 450 ms
+(Duck kept it until issue 1468, below). There is no separate setting. Check:
+`suppressing_audio_while_dictating_keeps_no_pre_roll` in
 [dictation.rs](../../src/dictation.rs) (constructed audio; not run on a
 device).
+
+**Changed November 7, 2026 (issue 1468):** with "While dictating" set to
+Lower audio, lowering ramped over a full second after the 300 ms hold
+threshold, and the 450 ms pre-roll came from before the lower took effect, so
+the start of every dictation stayed loud. Lowering now reaches its target in
+about 120 ms (`LOWER` in
+[audio/output_ducking.rs](../../src/audio/output_ducking.rs)), Duck keeps no
+pre-roll like Mute and Pause media, and restoring still eases back over one
+second. Checks:
+`ducking_preserves_balance_silence_and_restores` and
+`lowering_finishes_at_its_own_duration_while_restoring_is_still_ramping` in
+audio/output_ducking.rs, and
+`suppressing_audio_while_dictating_keeps_no_pre_roll` in
+[dictation.rs](../../src/dictation.rs) (constructed audio; not run on a device
+or physical output).
 
 **Fixed November 2, 2026 (issue 978):** a Windows paste refused to run when
 the clipboard held only a format Hex can't snapshot (an app's private
@@ -648,7 +685,7 @@ These cover gesture decisions, not hardware keyboard-layout or remapping equival
 ```ts
 Keep ready -> Press shortcut                          // dictate.boundaries
   -> Include up to 450 ms of available pre-roll
-     └── "While dictating" mutes or pauses -> No pre-roll (it predates the mute)
+     └── "While dictating" mutes, pauses, or lowers -> No pre-roll (it predates it)
   -> Linux: press and release placed on the stream clock (newest chunk's end
      plus the time since it arrived), so large chunks add no pre-press audio
   -> Delayed handling still uses original event boundaries
@@ -792,12 +829,18 @@ Model advertises streaming, GPU device             // dictate.streaming
   Release -> Collect the release tail (200 ms, up to 600 ms while speech goes on)
     -> Finish with the complete clip
     -> Feed any unfed remainder
-    -> macOS Unified English: feed 400 ms of silence, as the whole clip gets
+    -> Unified English: feed 400 ms of silence, as the whole clip gets (every OS)
     -> Finalize -> Final text
        ├── Stream failed, produced no text, or was fed > 250 ms past the clip
        │   -> Transcribe the whole clip offline (source=fallback)
+       ├── ≥ 300 ms of speech the stream heard ends > 400 ms before its text's start
+       │   -> Transcribe the whole clip offline (source=fallback)   // lost opening
        ├── ≥ 300 ms of speech the stream heard lies > 400 ms past its text's end
        │   -> Transcribe the whole clip offline (source=fallback)   // #1101
+       ├── The raw decode carries two different <ll-RR> language tags
+       │   -> Transcribe the whole clip offline (source=fallback)   // language switch
+       ├── Unified English: the text has no closing sentence mark
+       │   -> Transcribe the whole clip offline (source=fallback)   // #1933
        ├── No final text within 1.5 s -> Abort the stream -> Whole clip
        └── Model switched during the capture -> Stream closed -> Whole clip
   Short tap, chord discard, microphone failure -> Drop the stream
@@ -965,7 +1008,10 @@ words that resumed after 6 s and 13 s pauses were lost or garbled. Replaying
 floor) through `metal_stream_tracks_offline_transcription` lost "I" after the
 8 s gap of digital silence only, and the whole clip kept it: the loss depends
 on where speech resumes against the stream's chunks. Live text does not cause
-it: `HEX_STREAM_LIVE_TEXT=0` gives the same text.
+it: `HEX_STREAM_LIVE_TEXT=0` gives the same text. The losses replayed here sit
+in the middle of transcribed text, so neither coverage check below sees them;
+a loss of at least 300 ms at the stream's very start is checked since
+November 7, 2026 (`a_stream_that_lost_the_opening_phrase_falls_back_to_the_whole_clip`).
 
 **Mitigation, October 29, 2026 (#338's diagnosis, by ElliottH):** the engine's
 `PauseCap` now feeds a dictation stream only the first 2.5 s and last 0.3 s of
@@ -1044,6 +1090,50 @@ letters or digits (`spoken_text_end_ms`), and no clip fell back. Check:
 `a_closing_full_stop_at_the_clips_end_does_not_cover_a_dropped_phrase`. Not
 macOS or a microphone.
 
+**Guard, November 7, 2026 (opening and language):** the coverage check now
+also runs at the start. `PauseCap` takes the first token with letters or
+digits (`spoken_text_start_ms`, the minimum `t0_ms`) and counts the speech
+frames the stream heard that end more than 400 ms before it; at least 300 ms
+of such speech means the stream lost its opening, so the whole clip is
+transcribed offline (`source=fallback`, reason "the stream's text starts at …
+ms but … ms of speech precedes it"). A short click before the speech is
+shorter than that. Hesitation fillers, coughs, or clicks that together reach
+300 ms before the first word would trip it too, and that false-positive rate
+is unmeasured; a false positive costs only the whole clip's latency, since its
+text is the fallback's. This check cannot see an opening that was garbled
+rather than dropped: a garbled opening still yields word tokens at the speech
+onset. The stream's unfiltered raw decode also keeps Nemotron 3.5's `<ll-RR>`
+language tags, which the public text drops; two distinct tags in one stream
+mean it changed language mid-clip, and the whole clip decides too
+(`language_tags`). That catches a garbled opening only when the garbled part
+carries a different tag, and neither check catches a stream that stays in one
+wrong language for the whole clip. Checks:
+`a_stream_that_lost_the_opening_phrase_falls_back_to_the_whole_clip`,
+`a_short_click_before_the_text_does_not_discard_the_stream`,
+`a_punctuation_token_does_not_start_the_streams_text`, and
+`a_stream_that_switched_language_falls_back_to_the_whole_clip` (synthetic
+tones and tags, a fake stream). Not measured on a real model, microphone, or
+device; the stream's own loss is not fixed upstream.
+
+**Mitigation, November 17, 2026 (issue 1933):** a Unified English stream often
+finalizes without the closing full stop or question mark its whole-clip run
+keeps, so the paste lost the sentence mark. The native chunked decode still
+drops it; Hex now refuses a stream whose text, past trailing spaces and
+closing quotes or brackets, ends in anything but `.`, `?`, `!`, or `…`, and
+transcribes that clip whole (`source=fallback`, reason "the stream ended
+without closing sentence punctuation"). That also refuses text with nothing
+left once those are stripped, so it costs one extra whole-clip run on clips
+whose right text has no closing mark at all: single words, fragments, or a
+sentence whose trailing punctuation a transformation removed. The added
+latency was not measured. Checks:
+`a_sentence_mark_ends_every_accepted_stream`,
+`closing_quotes_and_brackets_do_not_hide_the_mark`,
+`a_stream_that_must_close_a_sentence_without_a_mark_falls_back`,
+`a_missing_mark_is_accepted_when_the_model_does_not_require_one`,
+`text_with_nothing_before_the_closers_fails_the_mark_check`, and
+`only_unified_english_streams_require_a_closing_mark` (synthetic text). Not
+measured on a real model or microphone.
+
 ### Ongoing Jobs And Output
 
 ```ts
@@ -1079,11 +1169,15 @@ sections in each repetition. This is Metal inference evidence on an M2 Max, not
 physical capture/paste or Linux runtime proof. Chunk boundaries can still affect
 individual words; this is not a claim of perfect recognition or silence handling.
 
-The macOS `Transcriber` owns backend input padding for ordinary
-transcription. `short_unified_input_is_minimum_padded_before_trailing_context`
-in [transcription.rs](../../src/transcription.rs) checks minimum-duration padding
-followed by Unified English's additional trailing silence. This is a pure sample
-policy check, not native inference-quality proof.
+`pad_gguf_samples` in [transcription.rs](../../src/transcription.rs) owns backend
+input padding on every OS for ordinary transcription: the minimum duration,
+then Unified English's additional trailing silence. The macOS `Transcriber` and
+the Linux and Windows `LocalTranscriber::transcribe_clip` both call it; a
+non-macOS whole-clip run calls it after its pause cut.
+`short_unified_input_is_minimum_padded_before_trailing_context` in
+[transcription.rs](../../src/transcription.rs) checks minimum-duration padding
+followed by Unified English's additional trailing silence. This is a pure
+sample policy check, not native inference-quality proof.
 
 **Fixed October 31, 2026 (issue 657):** with Unified English on macOS,
 dictated sentences and questions pasted without their closing full stop or
@@ -1093,8 +1187,18 @@ trailing silence at all, and whole clips got only 200 ms. Both now get
 the stream hears it through `PauseCap` just before finalizing). Check:
 `a_dictation_stream_hears_trailing_silence_before_it_finalizes` in
 transcription/engine.rs (a fake stream). Not measured on the real model or a
-microphone; Linux and Windows streams are unchanged. Padding is now included in
-`inference_ms`; `prepare_ms` covers clip conversion and diagnostic retention.
+microphone; at the time, Linux and Windows streams were unchanged. Padding is
+now included in `inference_ms`; `prepare_ms` covers clip conversion and
+diagnostic retention.
+
+**Fixed November 10, 2026 (issue 1629):** Windows and Linux had been gated out
+of that fix. They now get the same 400 ms for Unified English on stream finish
+(`LocalTranscriber::stream_trailing_silence` through `PauseCap`) and on the
+whole clip. A whole-clip run cuts long pauses first, then pads, so a trailing
+pause cannot trim the silence. Check:
+`a_whole_clip_is_padded_after_cutting_its_trailing_pause` in
+transcription/engine.rs. Not measured on a real Windows or Linux model or
+microphone.
 
 ```ts
 Listening idle                            // dictate.model-memory
@@ -1306,12 +1410,17 @@ Record -> Release -> Transcribing/processing/paste -> Finished // dictate.feedba
         the microphone is open and the hold counts
   Dictation pasted >= 2 s after the stop tone -> Done tone      // dictate.done-tone
      -> Pasted sooner (the usual case) -> Stop tone only; `DONE_MIN_AFTER_STOP`
+     -> Stop tone still waiting on Lower audio -> Stop only, never done first
      -> Empty, failed, cancelled, Paste Last, programmatic -> No done tone
   Failure -> Error tone; wake/sleep keep macOS Pop/Tink      // dictate.error-tone
      -> Classic has none: macOS Basso, Signature's error on Windows and Linux
      -> A lost microphone or input -> No tone; the capture ends
   Tone requested -> Playback worker opens the default output, then plays
-     -> Output stays open five minutes past the last tone, then releases
+     -> macOS releases ~10 s after the last tone; Windows 5 min; Linux 1 s
+     -> An open macOS output is a live CoreAudio client coreaudiod services
+        and holds an idle-sleep assertion for, so it must not idle for long
+     -> A fatal stream error (the output became unavailable or invalid)
+        drops the output, and the next tone reopens
      -> Released output holds no macOS idle-sleep assertion
   Feedback volume = 0 -> No tones
      -> Playback worker releases output on its next 250 ms observation
@@ -1384,7 +1493,8 @@ restored from git; it has no done tone, errors play macOS Basso as they
 did, and onboarding success plays its stop sound (the other sets have their own).
 The done sound of every set plays only when the paste lands at least
 `DONE_MIN_AFTER_STOP` (2 s) after the stop sound, as after a slow rewrite; the
-Sounds sheet's demo still plays it. Checked by `done_plays_only_after_a_slow_paste`.
+Sounds sheet's demo still plays it. Checked by
+`done_plays_only_after_a_slow_paste` and `done_never_plays_before_a_delayed_stop_tone`.
 
 Each set is a folder in `resources/audio/sounds/` made by
 [`scripts/sounds/synth.py`](../../scripts/sounds/synth.py)
@@ -1413,16 +1523,34 @@ of the session. Linux already logged and continued; the macOS worker now
 matches that behavior instead of stopping desktop recognition.
 
 The playback worker never opens the output at startup. It opens the default
-output for the first tone, keeps it through a five-minute idle grace so bursts
-of dictation share a warm device, and releases it after that grace or on the
-next observation after sounds turn Off. macOS idle-sleep timers count from the
-last user input, and a tone implies recent input, so the grace never delays
-sleep by itself. A device open already in progress must return before the
-worker can observe that change. Output-open failures retry at most once per
-two seconds, and a released device reopens without that backoff. Bundled
-samples remain decoded in memory. A tone that arrives after the grace pays a
-cold device open first; the tone is delayed, not clipped or dropped.
-Overlapping tones extend the playing window rather than shortening it.
+output for the first tone, keeps it through an idle grace so bursts of
+dictation share a warm device, and releases it after that grace or on the next
+observation after sounds turn Off. On macOS the grace is ten seconds: an open
+output is a live CoreAudio IO client that coreaudiod services and holds an
+idle-sleep assertion for. coreaudiod logged client timeouts against Hex's open
+output (#1531), and a shorter grace reduces how long such a client exists.
+Ten seconds still covers a quick start-tone to stop-tone dictation, though a
+dictation held past about ten seconds pays a cold output open for its stop
+tone; the tone is delayed, not dropped. Cold-open time on Bluetooth outputs is
+unmeasured. Windows keeps five minutes; Linux releases after one second because
+an open output is a listed stream in its sound controls (#720). A per-sink flag
+records a fatal stream error (the output became unavailable or invalid);
+overload glitches (`Xrun`) never set it. A default-output change does not set it
+on macOS, where cpal reports `DeviceChanged` only after the default-output unit
+has already rerouted the stream. On Windows cpal's WASAPI backend never
+rebinds, so a default-device change ends the stream with `StreamInvalidated`
+and counts as fatal, dropping that output so the next tone opens the new
+default. The stream error callback may run on a CoreAudio thread, so it only
+flips the flag; the worker drops a flagged sink on its next 250 ms observation
+or next tone, logs one warning, and lets the next tone open a fresh one. macOS idle-sleep timers count from the last user
+input, and a tone implies recent input, so the grace never delays sleep by
+itself. A device open
+already in progress must return before the worker can observe that change.
+Output-open failures retry at most once per two seconds, and a released device
+reopens without that backoff. Bundled samples remain decoded in memory. A tone
+that arrives after the grace pays a cold device open first; the tone is
+delayed, not clipped or dropped. Overlapping tones extend the playing window
+rather than shortening it.
 
 **Fixed after 2.3.0:** the start tone used to wait for the 300 ms intentional
 hold, then pay rodio's default 50 ms output buffer, so it sounded about 345 ms
@@ -1448,9 +1576,10 @@ slept ([#95](https://github.com/anomalyco/hex/issues/95)). 2.1.18 released the
 stream only when sounds were Off. Startup admission therefore no longer
 reports `could not open the audio output`; a device failure surfaces as a
 warning when the first tone plays.
-`output_opens_for_a_tone_and_releases_after_the_idle_grace` and
-`overlapping_tones_extend_playback_instead_of_truncating_it` check ownership,
-grace, and drop with a controlled sink;
+`output_opens_for_a_tone_and_releases_after_the_idle_grace`,
+`overlapping_tones_extend_playback_instead_of_truncating_it`, and
+`an_errored_sink_is_dropped_and_reopened_on_the_next_tone` check ownership,
+grace, drop, and stream-error recovery with a controlled sink;
 `failed_output_initialization_retries_with_a_bounded_backoff` checks
 failure-to-success recovery without an audio device. The opt-in
 `native_output_release_clears_the_idle_sleep_assertion` opens the real default
@@ -1543,7 +1672,14 @@ HUD's surface (backend, adapter, alpha mode) once, and treats a dictation
 start whose HUD presents no frame within 1.5 s as a failure too. Each
 failure is logged as an error in process.log once per reason, and Settings
 shows it as the listener's warning (`HudSender::failure`). Every OS takes dark or light and Reduce Motion
-from Rune, and loads `dot-scope.json` at launch.
+from Rune, and loads `dot-scope.json` at launch. Windows and Linux drop the
+HUD's painter, and its buffers, bind group and pipeline, once Rune's own hold
+on the device would end: five minutes after the HUD hides on Windows, ten on
+Linux (Rune's surface idle plus the five minutes it then parks the device),
+and also when the indicator is set to Hidden while the HUD shows; macOS keeps
+it. The GPU device itself frees only once Rune's parked device also expires,
+and on Wayland layer-shell Rune keeps its own device regardless. The memory
+drop is not yet measured on a real Windows machine (#1431).
 
 ```ts
 Dot scope                                    // dot_scope
@@ -1690,6 +1826,14 @@ TextEdit process were stopped afterward.
   (CPU-forced) evidence only. Real microphones, room noise, Bluetooth inputs,
   and a physical shortcut on a Mac or a Linux GPU have not been observed with a
   live stream.
+- **M5-class Metal:** macOS `main` sets `GGML_METAL_TENSOR_DISABLE` before any
+  backend or thread starts, because ggml's Metal tensor-API kernels (which it
+  enables by itself on M5/M6/A19/A20 GPUs) give wrong results there, so every
+  GGUF model transcribed to empty or garbage text (#1965). This build has not
+  been run on an M5 Mac; the evidence is the reporter's
+  `GGML_METAL_TENSOR_DISABLE=1 hex transcribe` run. Ignored model tests and
+  `scripts/dictation-corpus.sh` run under the test harness's own `main`, so set
+  the variable yourself when running them on an M5.
 - **Paste consumption:** current paste policy waits a fixed interval rather than
   acknowledging target consumption. Internal ordering does not establish
   correctness for an arbitrarily slow target application.

@@ -67,16 +67,22 @@ Draw                                     // capture.draw (capture_host::drawing)
 │   physical for the hold on a portal desktop ("Annotate pen" is logged)
 ├── Ink holds 650 ms, then fades over 650 ms on screen; every stroke stays in
 │   the bundle (keyframes, contact sheet, scrawl.json)
-├── Linux: strokes are placed on the recorded screen in its logical points,
-│   from the ScreenCast portal's stream size when it reports one smaller
-│   than the frames, so a fractional scale (1.5, 1.33), which reaches the
-│   overlay rounded up to 2, no longer pins strokes to a top-left part of
-│   the screen; without that size it divides the pixels by the overlay's
-│   scale. Check: scrawl-capture capture::platform::tests
-│   a_fractionally_scaled_screen_keeps_its_logical_size; not observed on a
-│   fractionally scaled monitor. Known gap: the overlay starts below a
-│   desktop bar's reserved area, so saved ink sits that bar's height off
-│   the live ink
+├── Linux: strokes are placed on the recorded screen in its logical points.
+│   A monitor pick whose portal names the output (`mapping_id`, as
+│   xdg-desktop-portal-hyprland 1.4.0+ does, e.g. `DP-3`) opens the pen on
+│   that output with its logical size from xdg-output (linux::output::find),
+│   so strokes land on the recorded monitor even when the overlay had opened
+│   on another one. Otherwise it uses the ScreenCast portal's stream size
+│   when it reports one smaller than the frames, so a fractional scale
+│   (1.5, 1.33), which reaches the overlay rounded up to 2, no longer pins
+│   strokes to a top-left part of the screen; without that size it divides
+│   the pixels by the overlay's scale. Window picks still report no position
+│   and no output. Check: scrawl-capture capture::platform::tests
+│   a_fractionally_scaled_screen_keeps_its_logical_size and
+│   linux::output::tests the_named_output_carries_its_global_and_logical_size;
+│   neither the follow nor a fractional scale is observed on real hardware
+│   here. Known gap: the overlay starts below a desktop bar's reserved area,
+│   so saved ink sits that bar's height off the live ink
 └── Linux recordings show the overlay itself (Wayland can't leave it out)
 
 On Linux                                 // capture.linux
@@ -102,11 +108,18 @@ On Linux                                 // capture.linux
 │   frames in 9.97 s from 282 raw 4K grabs; raw 4K pipe readback is CPU-bound)
 ├── Wayland -> the ScreenCast portal (zbus): Screen asks the desktop once and
 │   keeps its restore token (<support>/screencast-token), so later captures
-│   start without a dialog; Window shows the desktop's picker every time (the
-│   capsule's Window chip goes straight to it); the cursor is embedded
+│   start without a dialog and record the remembered monitor; a monitor pick
+│   the portal names (`mapping_id`: xdg-desktop-portal-hyprland 1.4.0+) moves
+│   the pen to that output (see the pen bullet above). Window shows the
+│   desktop's picker every time (the capsule's Window chip goes straight to
+│   it) and names no output, so the pen keeps its old placement; the cursor
+│   is embedded
 ├── Frames -> the portal's PipeWire stream, libpipewire-0.3 loaded at run
 │   time (`maxFramerate` 60/1); 32-bit RGB as a linear DMA-BUF (niri, GNOME,
-│   KDE) or shared memory
+│   KDE) or shared memory. A stream that ends or fails before its first frame
+│   ends the capture with that reason, keeping no voice; a stream with no frame
+│   yet when the person stops is saved with its voice and marks, the summary
+│   saying the stream sent no frames
 ├── Encoding -> VA-API (libva loaded at run time): each DMA-BUF imported, scaled
 │   to a 2560 px long edge (1920 for a window, exact even sides padded to 16 px
 │   macroblocks and cropped in SPS) and converted on the video engine, H.264
@@ -226,8 +239,7 @@ Settings › Annotate                      // capture.pane
 │       on the next read. Never part of onboarding (macOS also asks at the first
 │       capture). Check: rune_ui::scrawl tests
 ├── Show in screen recordings (capture.show_overlays_in_recordings, default
-│   off; also the menu bar's Show Hex in Screen Recordings checkmark) -> see
-│   capture.own-windows; applies at once, to open windows and a recording capture
+│   off) -> see capture.own-windows; applies at once, to open windows and a recording capture
 ├── Transcriber (capture.transcriber) -> Parakeet (default) | Apple
 ├── Captures folder (capture.folder, default Scrawl's) -> Reveal | choose another
 ├── Keep (capture.media_days / bundle_days) -> Scrawl's presets, or imported days
@@ -347,10 +359,11 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
 │   │   Capture ⌥⇧S"; Capture or the shortcut records the pointer's display
 │   ├── ✕ closes it; unanswered it folds after 2 min; the shortcut brings it
 │   │   back as it stood
-│   ├── A capture written with no frames (Screen Recording turned off mid-way)
-│   │   -> sent with only the voice and marks, its summary noting "No screen:
-│   │   Screen Recording is off for Hex", no contact sheet; the helper opens
-│   │   once its capsule folds
+│   ├── A capture written with no frames -> sent with only the voice and
+│   │   marks, its summary naming the actual reason the picture is missing
+│   │   (Screen Recording is off for Hex, or the screen source failed or sent
+│   │   no frames), no contact sheet; a permission miss opens the helper once
+│   │   its capsule folds
 │   └── Story: hex://story/prototypes/capture-capsule/permission; goldens
 │       capture-capsule-permission{,-restart,-ready}
 ├── A shown recording that leaves with no outcome (a discard, from a chip or
@@ -560,9 +573,25 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
     │   then the capsule folds into the menu-bar item
     ├── cursor -> recording stays under the menu bar; the "Send to" card
     │   (number, name, reason) opens at the pointer and its Sent stays there
-    └── notch -> a black shape grows out of the notch (185 pt wide; on a
-        flat display a pretend one the menu bar's height) into the pill and
-        the same card, its content under the notch, and shrinks back into it
+    └── notch -> a black shape grows out of the notch (the measured one on
+        macOS's pointer screen, read when the panel may go to that display:
+        a new capture, an anchor change, the capsule coming back from
+        hidden, or while the picker is open. A capsule that is showing and
+        not following stays put when the pointer moves, whatever the notch
+        there reads; left and right edges snapped to the backing pixels, the
+        panel moved under its middle and pinned to the display it was
+        measured on, so the panel and the notch can't disagree. Pinned, Rune
+        doesn't follow the pointer for it; while the picker is open, Hex
+        re-reads the pointer's screen at the picker's display-check cadence
+        (`picker::DISPLAY_EVERY`, 100 ms) and re-places display and inset
+        together, so the capsule crosses with the picker within that
+        cadence. Only the fallback that couldn't read the screen keeps
+        `UnderPointer`, where Rune can show one frame at the previous inset
+        before Hex re-places it; 185 pt
+        on a flat display, a pretend one the menu bar's height, so its panel
+        lands within a point of the display's middle rather than exactly on
+        it) into the pill and the same card, its content under the notch,
+        and shrinks back into it
         (capture_capsule/notch.rs). The playground's "Prototypes/Capture capsule/notch"
         story plays it on a 14-inch MacBook Pro and a 27-inch display, side
         by side or each whole, at their real sizes
@@ -574,8 +603,8 @@ The capsule                              // capture.capsule (rune_ui/capture_cap
     simulation), bars, or a line; only the capture adds a red dot or a small
     screen, the cue alternating each loop
     Gap: only the shapes are prototyped; the menu-bar item's capture list
-    is not, the app doesn't read the screen's notch (the overlay still puts
-    the pill's content under it), and no flow but list has run live
+    is not, the app reads the notch's edges but not its height (the walls
+    run up past the screen's top), and no flow but list has run live
 
 The on-screen picker                     // capture.picker (capture_capsule/picker.rs)
 ├── A full-screen Rune overlay on the pointer's display, under the capsule,
@@ -602,6 +631,13 @@ Hex's own windows                        // capture.own-windows
 ├── Chrome (the capsule, ink, picker, HUDs, meeting capsules: Hex's named
 │   windows and any of its windows above the normal level) -> never recorded,
 │   never in the window log, never the target, clicks on it not logged
+│   ├── While the pen is on, the ink overlay holds the keys, so the window
+│   │   log's system-wide focused-application read names Hex itself; AppKit
+│   │   answers that read on the asking `scrawl-window-log` thread, and the
+│   │   vendored AccessKit macOS adapter now answers such off-main reads as a
+│   │   plain view instead of borrowing its main-thread state. That borrow
+│   │   aborted Hex mid-capture (#1859, Rune #1040); a test would need AppKit
+│   │   and a key window, so none covers it
 │   ├── Other recorders -> the capsule, picker, and ink are left out
 │   │   (sharingType none) while shown; the dictation HUD and meeting
 │   │   capsules show
@@ -632,7 +668,10 @@ Hex's own windows                        // capture.own-windows
     the last other app, never into Hex
 
 Ink and laser                            // capture.ink
-├── A click-through overlay over the recorded display, excluded from the recording
+├── A click-through overlay over the recorded display, excluded from the
+│   recording; on a Wayland monitor pick the portal names (`mapping_id`) it
+│   is recreated on that output, and strokes use its xdg-output logical size
+│   (see the Linux pen bullet above)
 ├── Shift strokes draw as ink, hold 650 ms, then fade over 650 ms
 └── The laser's tail lasts 420 ms; nothing lags the pointer
 
@@ -674,9 +713,18 @@ Never on Hex's path                      // capture.isolation
     captures), the agentContext summary format off
 
 Retention                                // capture.retention
-└── Hex's own thread: Scrawl's retention pass with capture.*'s policy, 90 s after
-    captures turn on, then hourly; skipped while a capture records or writes,
-    or while Scrawl.app runs (it cleans the shared folder then)
+├── Hex's own thread: Scrawl's retention pass with capture.*'s policy, 90 s after
+│   captures turn on, then hourly; skipped while a capture records or writes,
+│   or while Scrawl.app runs (it cleans the shared folder then)
+├── Linux sends media to the desktop Trash itself (the freedesktop.org Trash
+│   layout, no `trash` command; macOS uses /usr/bin/trash, Windows the
+│   Recycle Bin), so file managers can restore it
+├── `.media-cleaned` is written only after the media reaches the Trash; a
+│   failed trash leaves the media in the bundle. Staging left by an earlier
+│   version or an interrupted pass is put back on the next pass, and staging
+│   whose bundle is gone goes to the Trash
+└── Old media goes to the Trash and the prompt stays; after bundleDays the
+    whole bundle goes
 
 hex capture stop                         // capture.stop
 ├── Closes the sink (≤ 100 ms wait) -> reply: idle + the bundle path, at once
@@ -758,15 +806,19 @@ Where it goes                            // capture.route; capture.routing's aut
 │   NoAnswer | Unreachable. Background refinements preserve an open search and
 │   selected session; a pick or Undo cancels them
 │   ├── Rule -> only a rule the person saved (`routing.sites`, `routing.apps`,
-│   │   a Shift pick's): a three-second countdown begins at Written. A folder
+│   │   a Shift pick's), or a page that names its session (a
+│   │   `<meta name="opencode-session">` tag or an `.opencode-session` file in
+│   │   its folder, found through symlinked folders too), which beats any rule
+│   │   and is sent to that exact session, a subagent's included ("page names
+│   │   it"): a three-second countdown begins at Written. A folder
 │   │   rule shows its repository while its session resolves; it sends once both
 │   │   the countdown and resolution finish. Undo during the countdown posts
 │   │   nothing. The capsule's `Hold` pauses the countdown while the pointer is
 │   │   on it and resumes it with what it had left (at least 1 s; a hold the
 │   │   capsule never ends lapses after 2 min, and the next capture resumes
 │   │   it). Sending -> Sent, or Queued when OpenCode didn't take it. Whatever
-│   │   autoSend, smartRouting, or jevRouting say, a saved rule sends and
-│   │   nothing else sends on its own. smartRouting off decides with the port
+│   │   autoSend, smartRouting, or jevRouting say, a saved rule or signed page
+│   │   sends and nothing else sends on its own. smartRouting off decides with the port
 │   │   ladder, after rules and addresses, on the same look
 │   ├── Guess -> everything else the router would send (Jev's pick, HOME when
 │   │   Jev couldn't tell, a dev server's port, a page's data-session or
@@ -1010,6 +1062,12 @@ Checks:
   `the_menu_bar_hint_is_brief_and_its_chips_send`,
   `the_cursor_card_lists_its_guesses_at_the_pointer`,
   `the_notch_hangs_from_the_top_edge`,
+  `the_default_notch_rests_where_it_always_has`,
+  `the_notch_shell_fits_a_measured_notch`,
+  `notch_content_centres_on_the_notch`,
+  `a_wide_recording_row_stays_inside_the_notch_shell`,
+  `a_measured_notch_refreshes_the_entry_and_the_rest`,
+  `a_measured_notch_never_tucks_under_reduce_motion`,
   `the_menu_bar_flow_folds_up_toward_the_menu_bar`, goldens
   `tests/golden/capture-capsule-*.png`, and
   `the_capsule_moves_inside_its_panel_and_comes_to_rest`, which traces every
@@ -1018,7 +1076,29 @@ Checks:
   motion-lint. `cues_mark_start_stop_sent_and_taking_back`,
   `nothing_heard_says_so`, and `a_capture_with_no_words_says_nothing_was_heard`
   cover the tones and the empty transcript. Observed (Oct 27, worker, r19 motion): all 28
-  capsule runs, Calm and Reduce Motion, pass lint.
+  capsule runs, Calm and Reduce Motion, pass lint. In
+  [notch.rs](../../src/rune_ui/capture_capsule/notch.rs):
+  `the_default_geometry_is_the_pretend_notch`,
+  `a_measured_notch_moves_the_panel_with_its_edges`,
+  `a_two_x_notch_lands_on_whole_pixels`, and
+  `edges_between_pixels_snap_outward_or_inward`. Flat displays go through
+  the same measured path with the pretend notch, so their panel is
+  pixel-snapped within a point of the display's middle, not exactly on it.
+  Which poll re-measures and re-places is decided by `move_of` in
+  [mod.rs](../../src/rune_ui/capture_capsule/mod.rs), tested by
+  `a_showing_capsule_that_is_not_following_stays_put`,
+  `a_new_capture_places_the_capsule_on_the_pointers_display`,
+  `an_anchor_change_places_the_capsule_again`,
+  `a_capsule_coming_back_from_hidden_places_on_the_pointers_display`, and
+  `following_places_only_for_a_changed_notch`: a showing capsule that isn't
+  following never moves because the pointer's notch changed, a capsule coming
+  back from hidden is placed before it shows rather than on the display it
+  last hid on, and following moves it only for a changed notch. Whether a
+  poll looks at the pointer's screen on its own (an open picker over a
+  pinned capsule with an overlay) is `follows_display`, tested by
+  `only_an_open_picker_over_a_pinned_capsule_looks_again`. The native
+  read, the re-place, and the 100 ms wake itself have no test: they need two
+  real displays.
 - Playground: `hex capsule-playground` (feature builds; hidden), or
   `scripts/build-capsule-playground.sh` for an ad-hoc signed
   `Hex Playground.app`, runs the real capsule in a window of its own against a

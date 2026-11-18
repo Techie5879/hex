@@ -3,8 +3,11 @@
 //! - The main thread runs Rune's event loop (`rune::App`, windowless and
 //!   kept running, as an accessory app) and, beside it on the same AppKit
 //!   run loop, the native status item, the updater, the main menu, the Dock
-//!   reopen handler, and the Metal dictation HUD. A 16 ms main-loop timer
-//!   ([`Pump`]) drives them, so they keep working with no window open.
+//!   reopen handler, and the Metal dictation HUD. A main-loop timer
+//!   ([`Pump`]) drives them, so they keep working with no window open: every
+//!   frame (16 ms) while the HUD animates, otherwise every 250 ms, and
+//!   whatever sends it work (HUD events, menu actions, control calls,
+//!   meeting events, input-source changes) wakes it at once ([`wake_pump`]).
 //! - The runtime thread owns model preparation, starts the listener once
 //!   setup is ready, and publishes the listener, model, update, and settings
 //!   state the window shows ([`RuntimeHandle`]).
@@ -62,18 +65,23 @@ mod launch;
 mod main_menu;
 mod profile;
 pub(crate) mod status_item;
+mod wake;
 
 use activation::{observe_activation, reopen_on_activation};
 use launch::{LaunchWindow, launched_as_login_item, observe_launch, take_login_launch_activation};
 use main_menu::install_main_menu;
+use wake::{pump_now, relay, start_pump_timer};
+
+pub(crate) use wake::wake_pump;
+
+#[cfg(test)]
+use wake::pump_interval;
 
 #[cfg(test)]
 mod tests;
 
 /// How often the runtime refreshes while nothing is asked.
 const RUNTIME_TICK: Duration = Duration::from_millis(250);
-/// The main-loop timer: the HUD follows the pointer and channels drain.
-const PUMP_INTERVAL: f64 = 0.016;
 /// Seconds a window opened at launch has to draw its first frame before the
 /// status item, HUD, and menu are set up anyway.
 const LAUNCH_SETUP_DEADLINE: f64 = 1.0;
@@ -311,7 +319,7 @@ fn watch_process() {
     procwatch::watch_with(config, |event, _| tracing::warn!(%event, "process watch"));
 }
 
-pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()> {
+pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig, hidden: bool) -> Result<()> {
     let Some(mtm) = MainThreadMarker::new() else {
         return Err(eyre!("desktop startup requires the main thread"));
     };
@@ -323,9 +331,13 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
     crate::keyboard::initialize_layout()?;
     crate::updater::finish_on_launch();
     let _ = UPDATER.set(crate::updater::Updater::start());
-    // Never a silent launch failure: unreadable settings start with defaults
+    // Never a silent launch failure: invalid settings start with defaults
     // and the window says why (#744).
-    let (mut settings, settings_error) = AppSettings::load_for_launch();
+    let launch = AppSettings::load_for_launch();
+    let mut settings = launch.settings;
+    let settings_error = launch
+        .note
+        .map(crate::app_settings::LaunchNote::into_message);
     // Preload bundled feedback sounds on a worker so onboarding and the Sounds
     // sheet play immediately even before permissions let `recognition` start.
     // Opens no audio output device until a tone actually plays.
@@ -488,6 +500,7 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
         LaunchWindow::Open
     } else {
         LaunchWindow::decide(
+            hidden,
             settings.show_dock_icon,
             setup_ready,
             onboarding_completed,
@@ -538,13 +551,17 @@ pub fn run(shutdown: &'static AtomicBool, listener: ListenerConfig) -> Result<()
         .name("hex-control".into())
         .spawn(move || {
             for call in control_receiver {
-                if let Some(call) = control::answer_off_main(&control_runtime, call)
-                    && pump_calls.send(call).is_err()
-                {
-                    return;
+                if let Some(call) = control::answer_off_main(&control_runtime, call) {
+                    if pump_calls.send(call).is_err() {
+                        return;
+                    }
+                    wake_pump();
                 }
             }
         })?;
+    // The pump idles between events, so its other senders wake it.
+    let controller_events = relay("hex-meeting-events", controller_events, 32)?;
+    let developer_receiver = relay("hex-developer-calls", developer_receiver, 8)?;
     let pump = Pump {
         window: window.clone(),
         capsules,
@@ -846,6 +863,7 @@ impl Runtime {
                 }
                 .into(),
                 warning: failure,
+                notice: None,
                 shortcuts: DesktopShortcuts::Registered,
                 shortcuts_configurable: false,
             },
@@ -898,6 +916,8 @@ struct PumpState {
     /// Created on the main thread, so it stays out of the `Send` [`Pump`].
     indicator: DictationIndicatorUi,
     timer: Retained<NSTimer>,
+    /// The timer runs every frame, not at the idle interval ([`wake`]).
+    fast: bool,
     _menu_target: Retained<MenuTarget>,
 }
 
@@ -949,7 +969,9 @@ fn start_main_thread() {
     let Some(Launch { mut pump, target }) = LAUNCH.with(|slot| slot.borrow_mut().take()) else {
         return;
     };
-    pump.status_actions = match crate::macos_rune::status_item::install() {
+    pump.status_actions = match crate::macos_rune::status_item::install().and_then(|actions| {
+        relay("hex-status-actions", actions, 8).map_err(color_eyre::Report::from)
+    }) {
         Ok(actions) => Some(actions),
         Err(error) => {
             tracing::error!(%error, "could not install Hex status item; opening the window");
@@ -981,43 +1003,19 @@ fn start_main_thread() {
             andEventID: REOPEN_APPLICATION,
         ];
     }
-    let block = RcBlock::new(|_: std::ptr::NonNull<NSTimer>| {
-        PUMP.with(|slot| {
-            if let Some(state) = slot.borrow_mut().as_mut() {
-                if let Some(mtm) = MainThreadMarker::new() {
-                    let switching = state.pump.runtime.published().is_some_and(|published| {
-                        published.settings.keyboard_model_switching.enabled
-                    });
-                    if crate::keyboard_input_sources::take_layout_change(mtm) {
-                        refresh_keyboard_layout(mtm);
-                    }
-                    crate::keyboard_input_sources::observe(mtm, switching);
-                    if let Some(source) = crate::keyboard_input_sources::take_change(mtm) {
-                        let _ = state.pump.runtime.send(Request::InputSourceChanged(source));
-                    }
-                }
-                state.pump.tick(&mut state.indicator);
-            }
-        });
-    });
-    // SAFETY: the timer runs its block on this (main) thread's run loop.
-    let timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(PUMP_INTERVAL, true, &block)
-    };
-    // Keep firing while a menu is open (event-tracking run loop mode).
-    // SAFETY: adding a scheduled timer to the main run loop's common modes.
-    unsafe {
-        let run_loop = objc2_foundation::NSRunLoop::mainRunLoop();
-        run_loop.addTimer_forMode(&timer, objc2_foundation::NSRunLoopCommonModes);
-    }
+    let fast = indicator.animating();
+    let timer = start_pump_timer(fast);
     PUMP.with(|slot| {
         *slot.borrow_mut() = Some(PumpState {
             pump,
             indicator,
             timer,
+            fast,
             _menu_target: target,
         });
     });
+    // Anything sent before the pump existed is drained now.
+    pump_now();
 }
 
 /// Rebuilds the keyboard layout snapshot after the selected input source
@@ -1115,10 +1113,8 @@ impl Pump {
         }
         self.settle_meeting_waiters(None);
         #[cfg(hex_capture)]
-        if let Some(overlays) = &mut self.capture_overlays
-            && let Some(shown) = overlays.follow_recordings()
-        {
-            crate::macos_rune::status_item::update_overlays_in_recordings(shown);
+        if let Some(overlays) = &mut self.capture_overlays {
+            overlays.follow_recordings();
         }
         if self.status_actions.is_none() {
             return;
@@ -1130,6 +1126,7 @@ impl Pump {
                     &published.settings,
                     &published.preparation,
                 );
+                crate::macos_rune::status_item::update_paste_last(&published.settings);
             }
             self.model_menu_at = now + MODEL_MENU_REFRESH;
         }
@@ -1228,30 +1225,9 @@ impl Pump {
                 }
             }
             StatusItemAction::OpenMeetings => show(&self.window, Destination::Meetings(None)),
-            #[cfg(hex_capture)]
-            StatusItemAction::ToggleOverlaysInRecordings => self.toggle_overlays_in_recordings(),
             StatusItemAction::Quit => {
                 self.runtime_cancel();
                 self.window.quit();
-            }
-        }
-    }
-
-    /// Saves the flipped setting as the window would; the overlays and the
-    /// menu item follow it from [`Pump::tick`].
-    #[cfg(hex_capture)]
-    fn toggle_overlays_in_recordings(&self) {
-        let saved = AppSettings::load().and_then(|mut settings| {
-            settings.capture.show_overlays_in_recordings =
-                !settings.capture.show_overlays_in_recordings;
-            settings.save()
-        });
-        match saved {
-            Ok(()) => {
-                let _ = self.runtime.send(Request::ReloadSettings);
-            }
-            Err(error) => {
-                tracing::warn!(error = %format!("{error:#}"), "could not save the recordings setting");
             }
         }
     }

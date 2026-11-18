@@ -6,6 +6,7 @@ Agent or terminal                                  // control.cli; every OS
 │   OS can't do it -> unsupported at runtime, exit 1
 ├── hex status [--json] -> Listener, capture, meeting, model, features,
 │   permissions, window, update, version, pid, memory
+│   ├── Wayland listener -> its warning names a missing wl-copy before paste fails
 │   └── Hex not running -> exit 3, "Hex is not running; run `hex start`"
 ├── hex start -> Already running: nothing | else open Hex.app (Linux and
 │   Windows: a detached `hex app --hidden`), wait ≤ 20 s
@@ -51,10 +52,12 @@ Agent or terminal                                  // control.cli; every OS
 │       └── Hex stopped -> written to settings.json under the service lock
 │           (Linux); a Hex holding it is waited for (≤ 35 s) instead
 ├── hex model list | use <id> | install [id] | cancel
-│   ├── use -> installed models only; never downloads or repairs; keeps the
-│   │   model's remembered language and hints (--language overrides)
-│   └── Linux/Windows: install with Hex stopped downloads here; status,
-│       devices, check, transcribe run here (macOS: unsupported)
+│   ├── use -> installed models only; needs the running Hex; never downloads
+│   │   or repairs; keeps the model's remembered language and hints
+│   │   (--language overrides)
+│   └── Linux/Windows: install with Hex stopped downloads and selects here
+│       (a Hex that starts meanwhile makes the switch); status, devices,
+│       check, transcribe run here (macOS: unsupported)
 ├── hex window show [pane] | hide
 │   ├── settings -> the General pane (status window.pane stays "settings")
 │   ├── meetings pane with Meetings off -> the pane's opt-in card

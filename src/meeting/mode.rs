@@ -49,7 +49,7 @@ impl Change {
             .clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn fixture_complete(&self, result: Completion) {
         self.complete(result);
     }

@@ -67,7 +67,11 @@ Picker header -> "Use model file where it is…" beside "Add model file…" -> t
 │   SHA-256, receipt and manifest (with the file's path, no Hugging Face origin)
 │   in models/custom/; nothing copied, nothing written near the file
 ├── The same file imported by copy before -> same ID, keeps its name; Hex's
-│   copy is removed
+│   copy is removed only when the OS shows the chosen file is a different
+│   file (links resolved, device and inode or volume and file index); when
+│   unsure, the copy stays
+├── Hex's own copy chosen (a linked folder, a hard link, another case) ->
+│   nothing changes; the import stays a copy
 ├── Card -> "Used where it is" · family · languages · the file's name; Use
 │   loads it from its path; later uses rehash only when size, mtime, or file ID
 │   change, and Check again accepts it when the contents still match
@@ -112,7 +116,9 @@ Picker opens, or onboarding starts -> one scan (found_models::scan)   // setup.f
 ├── A failed check or load -> "Model could not be used." with the reason; the
 │   selection and any recorded audio stay as they were
 └── Delete/Remove on a found file -> Forget: Hex's record goes, the file stays.
-    Hex never writes, moves, or deletes inside the cache
+    Hex never writes, moves, or deletes inside the cache. A forgotten catalog
+    file is noted in models/found/<model>.forgotten.json, so later scans no
+    longer count it as downloaded and its row offers Download (#1366)
 ```
 
 `hex model list` scans too and shows each model's source: `download`, `hex`,
@@ -161,7 +167,8 @@ samples. Not observed: macOS (Metal) and Windows at all, a plain-copy cache
 without symlinks, and the GPU memory warning on a small GPU.
 
 Checks: `transcription::found_models::tests` (scan, cache, catalog match,
-in-place use and forgetting, the full check refusing a mismatched file),
+in-place use and forgetting, a forgotten catalog file no longer counting as
+downloaded, the full check refusing a mismatched file),
 `transcription::gguf_header::tests`, `transcription::custom_models::tests`
 (including `a_relinked_copy_reads_as_changed_and_check_again_accepts_only_the_same_contents`,
 `a_receipt_survives_a_renumbered_volume_but_not_another_file`, and `a_file_added_in_place_is_recorded_by_path_copied_nowhere_and_forgetting_leaves_it`),
@@ -174,3 +181,28 @@ in-place use and forgetting, the full check refusing a mismatched file),
 `rune-onboarding-model-found-downloading-light`,
 `rune-onboarding-model-found-recommended-light`, and
 `rune-onboarding-model-found-back-light`.
+
+## A Download Another Process Runs
+
+```ts
+models/.download.lock held by `hex model install` (a terminal) or another Hex,
+writing models/<file>.gguf.partial  // transcription::models::lock_downloads
+├── Onboarding, Settings, or `hex model install` starts the same model -> it
+│   waits for that lock instead of failing or downloading a second copy
+├── While it waits, downloaded_bytes comes from the partial file's size, so
+│   `hex status --json`, the picker, and onboarding show that process's
+│   progress rather than 0%
+├── The lock covers the whole models folder, so the progress shown is this
+│   model's partial file; while the other process fetches a different model
+│   it stays flat
+├── Cancel stops only the wait; the other process's download continues
+└── The lock is released -> the finished file is verified against its
+    receipt and adopted, with no second download
+```
+
+Checks: `transcription::models::tests::waiting_for_another_processs_download_reports_its_partial_bytes`
+holds the lock and writes three bytes of the partial, then asserts a waiting
+download reports those bytes and stops canceled without fetching anything.
+That a foreign lock makes `hex model install`/onboarding show it in the real
+service has **not** been run; the Linux app's snapshot was checked by reading
+`linux::app::snapshot`.

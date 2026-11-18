@@ -106,6 +106,8 @@ struct InferenceJob {
     prepare_ms: u128,
     target: TranscriptionTarget,
     context: ContextSnapshot,
+    /// The language the model was asked for at submission.
+    language: String,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
 }
@@ -116,6 +118,7 @@ struct ProcessorJob {
     target: TranscriptionTarget,
     text: String,
     context: ContextSnapshot,
+    language: String,
     timings: JobTimings,
     recording: Option<crate::history::Recording>,
 }
@@ -273,21 +276,37 @@ impl DictationWorker {
             pending_pastes: 0,
         }));
 
-        let engine = match TranscriptionEngine::start(WarmTranscriber::default()) {
+        let (_, selection) = crate::app_settings::transcription_selection();
+        // Labs › Unload model when idle parks a GGUF model at launch too:
+        // the first dictation reloads it, so memory stays free until then.
+        // Apple Speech holds no model of Hex's and stays loaded.
+        let parked = crate::labs::unload_idle().is_some()
+            && matches!(
+                validate(&selection).map(|definition| definition.runtime),
+                Ok(crate::transcription::models::ModelRuntime::Gguf(_))
+            );
+        let engine = if parked {
+            TranscriptionEngine::start_parked(selection)
+        } else {
+            TranscriptionEngine::start(WarmTranscriber::default())
+        };
+        let engine = match engine {
             Ok(engine) => {
-                let events = event_sender.clone();
-                let _ = engine.run(move |model| {
-                    prioritize_inference_thread();
-                    match WarmTranscriber::load() {
-                        Ok(loaded) => {
-                            tracing::info!("transcription model loaded");
-                            *model = loaded;
+                if !parked {
+                    let events = event_sender.clone();
+                    let _ = engine.run(move |model| {
+                        prioritize_inference_thread();
+                        match WarmTranscriber::load() {
+                            Ok(loaded) => {
+                                tracing::info!("transcription model loaded");
+                                *model = loaded;
+                            }
+                            Err(error) => {
+                                let _ = events.send(WorkerEvent::ModelFailed(error.to_string()));
+                            }
                         }
-                        Err(error) => {
-                            let _ = events.send(WorkerEvent::ModelFailed(error.to_string()));
-                        }
-                    }
-                });
+                    });
+                }
                 let engine = Arc::new(engine);
                 engine.share();
                 Some(engine)
@@ -382,6 +401,7 @@ impl DictationWorker {
             ..JobControl::default()
         });
         let (_, selection) = crate::app_settings::transcription_selection();
+        let language = selection.language.clone();
         let submitted_at = Instant::now();
         let audio_ms = clip.duration_ms();
         let stream = clip.take_stream();
@@ -420,6 +440,7 @@ impl DictationWorker {
             prepare_ms,
             target,
             context,
+            language,
             recording,
         })
         .map(|()| {
@@ -627,7 +648,12 @@ fn process_job_text(
     if profiles.processes(&job.context) {
         processing();
     }
-    profiles.process_cancellable(&job.text, &job.context, &job.control.cancelled)
+    profiles.process_cancellable(
+        &job.text,
+        &job.language,
+        &job.context,
+        &job.control.cancelled,
+    )
 }
 
 /// The longest audio the capture path hands the model at once; longer
@@ -802,6 +828,7 @@ fn run_inference_worker(
                         target,
                         text,
                         context: job.context,
+                        language: job.language,
                         timings,
                         recording: job.recording,
                     })
@@ -1311,6 +1338,7 @@ mod tests {
             target,
             text: "raw instruction".into(),
             context: ContextSnapshot::default(),
+            language: "en".into(),
             timings: JobTimings {
                 total_started: Instant::now(),
                 queue_ms: 0,
@@ -1666,7 +1694,33 @@ mod tests {
             for (fed_ms, stable, tentative) in &timeline {
                 println!("    audio_ms={fed_ms} stable_words={stable} tentative_words={tentative}");
             }
-            assert_eq!(streamed.source, Source::Stream);
+            let closing_mark = |text: &str| {
+                const CLOSERS: [char; 8] = ['"', '\'', '”', '’', ')', ']', '}', '»'];
+                text.trim_end()
+                    .trim_end_matches(CLOSERS)
+                    .chars()
+                    .last()
+                    .is_some_and(|last| matches!(last, '.' | '?' | '!' | '…'))
+            };
+            // A stream that dropped its closing mark takes the whole-clip
+            // fallback for that reason only (#1933).
+            assert!(
+                streamed.source == Source::Stream
+                    || matches!(
+                        &streamed.source,
+                        Source::Fallback(reason)
+                            if reason.as_str() == "the stream ended without closing sentence punctuation"
+                    ),
+                "unexpected source {}",
+                streamed.source.label()
+            );
+            if closing_mark(&whole.text) {
+                assert!(
+                    closing_mark(&streamed.text),
+                    "the stream dropped the offline text's closing mark: {}",
+                    streamed.text
+                );
+            }
             assert!(differences * 20 <= reference.len().max(20));
         }
     }

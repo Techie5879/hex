@@ -33,14 +33,21 @@ export default bench({
     }
   },
   cases: {
-    // General → History (200 rows of 10,000) → Output → General.
+    // General → History (200 rows of 10,000) → Output → General. Hex keeps
+    // drawing for about a second after a pane switch, and strobe takes no
+    // sample from a click sent while the window still draws, so each click
+    // waits for the window to go idle first. The waits are untimed: the run
+    // counts the clicks and their frames, not the rest after them. strobe
+    // can't take a wait out of gpu.process.3d, so this case leaves it out.
     "switch-panes": {
       expect: { heading: "General" },
       primary: "ui.cpu",
-      metrics: ui,
-      async run({ page }) {
+      metrics: ui.filter((metric) => metric !== "gpu.process.3d"),
+      async run({ page, untimed }) {
         await open(page, "nav-history", "history-list")
+        await untimed(() => page.idle())
         await open(page, "nav-output", "output-content")
+        await untimed(() => page.idle())
         await open(page, "nav-general", "basics")
       },
     },
@@ -61,7 +68,7 @@ export default bench({
       metrics: ui,
       run: ({ page }) => page.type("history-search", "cache key", { delay: 120 }),
       async reset({ page }) {
-        await page.press("Control+a")
+        await page.press("ControlOrMeta+a")
         await page.press("Backspace")
         await page.idle()
       },
@@ -74,9 +81,15 @@ export default bench({
       primary: "ui.cpu",
       metrics: ui,
       async run({ page }) {
+        // The panel scales in and springs to each view's height, so its
+        // header buttons move until it rests; a click before then misses
+        // them (Back did on macOS).
         await page.click("transcription-control", { until: "transcription-picker" })
+        await page.idle()
         await page.click("more-models", { until: "all-view" })
+        await page.idle()
         await page.click("picker-back", { until: "compare-view" })
+        await page.idle()
         await page.click("close-picker", { until: "transcription-control" })
       },
     },

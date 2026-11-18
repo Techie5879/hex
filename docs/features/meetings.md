@@ -225,12 +225,16 @@ Zoom / Teams / Slack huddle / FaceTime / WhatsApp / Discord / browser call uses 
      ├── A call whose page names a meeting code (Google Meet's, from the
      │   address or a code-only tab title) is snoozed by that code: another
      │   code in the same browser is a new call and is offered or recorded;
-     │   a page without a code still counts as the snoozed call (#1113)
+     │   a `/meet/<code>` address (Arc opening a Calendar link) resolves to
+     │   its code, and a page without a code still counts as the snoozed
+     │   call (#1113)
      └── Stopped by hand -> the snooze ends once the call app has been off
          the microphone for 3 s (seen while transcribing too), so the next
          call in the same app is offered; a dismissed offer keeps the minute
          for a muted call dropping off mid-call. Checks:
          `a_different_meet_call_in_the_same_browser_is_not_snoozed_by_the_first`,
+         `meet_prefixed_addresses_are_snoozed_by_their_own_codes`,
+         `extracts_a_meet_code_from_a_meet_prefixed_address`,
          `a_stopped_call_s_app_is_snoozed_only_until_it_leaves_for_a_few_seconds`
   -> "Left the call" prompt after the call app is off the microphone for 3 s
   -> Times are wall-clock runs: observations more than 10 s apart (sleep, a
@@ -499,13 +503,18 @@ Record (offer, menu bar "Record Meeting", Meetings pane, or voice command)
      ├── "Recording · <title> · 12:34" -> Meetings pane
      │   └── title follows the provisional title (see Titles And Summary)
      └── Stop & Transcribe
-     (Idle menu bar: "Record Meeting" + "Copy Last Meeting Transcript")
+     (Idle menu bar: "Record Meeting"; "Copy Last Meeting Transcript" sits
+      under Paste Last Dictation; there is no Meetings… item, Settings… opens
+      the same window)
   -> Floating recording indicator (when Show recording indicator is on) // meetings.indicator
      ├── Rune interactive overlay: a non-activating panel that never becomes key
      ├── Only the drawn pill takes the pointer (OverlayInput::Regions, the
      │   pill `.hit()`); the window is as wide as the open pill, and clicks
      │   in its transparent rest reach the app beneath (#1305; not observed
      │   on a real Mac)
+     ├── Windows: each capsule's window is only as wide as the drawn pill,
+     │   so the area around it stays clickable (not verified on a real
+     │   Windows machine)
      ├── In the saved recording_indicator_corner
      ├── Compact: pulsing red dot · title · mm:ss, plus "+N" when turns wait
      ├── Hover -> widens toward the screen with the actions below; pointer

@@ -871,6 +871,7 @@ pub(super) fn fixture(shortcuts: DesktopShortcuts) -> Ui {
             running: true,
             status: "Enabled".into(),
             warning: None,
+            notice: None,
             shortcuts,
             shortcuts_configurable: false,
         },

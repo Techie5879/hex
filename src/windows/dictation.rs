@@ -50,6 +50,8 @@ pub fn wake() {
 struct Job {
     transcript: PendingTranscript,
     audio_ms: u64,
+    /// The language the model was asked for at submission.
+    language: String,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
     /// Dictate without processing: paste the transcript as heard.
@@ -182,7 +184,13 @@ pub fn run(
     updates: mpsc::Receiver<Box<crate::app_settings::AppSettings>>,
     shutdown: &AtomicBool,
 ) -> Result<()> {
-    let transcriber = LocalTranscriber::load(selection)?;
+    // Labs › Unload model when idle: a launch stays parked until the first
+    // dictation, as after an idle unload.
+    let transcriber = if crate::labs::unload_idle().is_some() {
+        None
+    } else {
+        Some(LocalTranscriber::load(selection)?)
+    };
     let WindowsDictationConfig {
         device,
         hotkey,
@@ -272,7 +280,10 @@ pub fn run(
     let mut audio_suppressor =
         crate::windows::audio_control::AudioSuppressor::start(while_dictating);
     let mut model = crate::transcription::local_transcriber::ModelSwap::new(selection);
-    let mut engine = Arc::new(TranscriptionEngine::start(transcriber)?);
+    let mut engine = match transcriber {
+        Some(transcriber) => Arc::new(TranscriptionEngine::start(transcriber)?),
+        None => Arc::new(TranscriptionEngine::start_parked(selection.clone())?),
+    };
     // The local API transcribes host audio on this engine's model.
     engine.share();
     // The `capture` experiment: its host, the audio it copies from this
@@ -340,10 +351,10 @@ pub fn run(
         }
         // Only the newest saved settings matter; they wait for a moment
         // without a recording.
-        if let Some(next) = updates.try_iter().last()
-            && !recording
+        if !recording
             && !start_pending
             && finishing.is_none()
+            && let Some(next) = updates.try_iter().last()
         {
             let next_config = WindowsDictationConfig::from_settings(&next);
             paste_with_shift.store(next_config.paste_with_shift, Ordering::Relaxed);
@@ -911,7 +922,7 @@ fn process_dictation_job(
                 .read()
                 .unwrap_or_else(|error| error.into_inner())
                 .clone();
-            mode_runtime.process(&raw_text, &context, transformations)
+            mode_runtime.process(&raw_text, &job.language, &context, transformations)
         };
         let text = processed.text.clone();
         if text.trim().is_empty() {
@@ -1168,10 +1179,15 @@ fn submit_capture(
             let audio_ms = clip.duration_ms();
             let stream = clip.take_stream();
             let samples = clip.into_transcription_samples();
+            let language = engine
+                .held_selection()
+                .unwrap_or_else(|| crate::app_settings::transcription_selection().1)
+                .language;
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Job {
                 transcript: engine.finish(stream, samples)?,
                 audio_ms,
+                language,
                 recording,
                 print,
                 raw,

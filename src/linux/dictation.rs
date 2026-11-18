@@ -14,6 +14,7 @@ use crate::control::{PrintReply, PrintedTranscript};
 use crate::desktop::events::{
     DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms,
 };
+use crate::desktop::host::DesktopShortcuts;
 use crate::dictation::service::{DictationControl, Effect, MICROPHONE_LOST, ServiceDictations};
 use crate::dictation::{DictationCapture, Finish, ReleaseWait};
 use crate::feedback::{self, Tone};
@@ -30,6 +31,8 @@ const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 struct Job {
     transcript: PendingTranscript,
     audio_ms: u64,
+    /// The language the model was asked for at submission.
+    language: String,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
     /// `hex dictation stop --print`: the text goes here, never pasted.
@@ -221,6 +224,7 @@ impl DictationOutput {
         &self,
         raw_text: String,
         raw: bool,
+        language: &str,
         paster: Option<&mut LinuxPaster>,
         audio_ms: u64,
         inference_ms: u64,
@@ -236,7 +240,7 @@ impl DictationOutput {
         let processed = if raw {
             crate::dictation::processor::Processed::unchanged(raw_text.trim())
         } else {
-            modes.process(&raw_text, &context, &self.transformations)
+            modes.process(&raw_text, language, &context, &self.transformations)
         };
         if processed.text.trim().is_empty() {
             return Err(eyre!("text replacements produced empty output"));
@@ -268,8 +272,38 @@ impl DictationOutput {
     }
 }
 
+/// The line a listener prints once its shortcuts are settled: what actually
+/// starts dictation from here. `commands` is whether `hex` commands reach
+/// this listener.
+fn readiness_message(
+    device: &str,
+    hotkey: &str,
+    shortcuts: &DesktopShortcuts,
+    commands: bool,
+) -> String {
+    let ready = format!("Hex dictation is ready on {device}.");
+    match shortcuts {
+        DesktopShortcuts::Registered | DesktopShortcuts::Portal(_) => {
+            format!("{ready} Hold {hotkey} to dictate; Ctrl-C stops.")
+        }
+        // A listener sets its status before it reports ready, so no running
+        // listener prints this.
+        DesktopShortcuts::Unregistered => format!("{ready} Ctrl-C stops."),
+        DesktopShortcuts::Commands if commands => format!(
+            "{ready} No shortcut is bound: bind `hex dictation start` and `hex dictation stop` \
+             (or `hex dictation toggle`) in your desktop's keybindings; Ctrl-C stops."
+        ),
+        DesktopShortcuts::Commands => format!(
+            "{ready} No shortcut is bound and this foreground listener can't receive `hex` \
+             commands: run `hex start` and bind `hex dictation toggle` in your desktop's \
+             keybindings; Ctrl-C stops."
+        ),
+    }
+}
+
 /// Runs hotkey dictation until `shutdown`. A prepared transcriber skips the
-/// model load; otherwise the supplied transcription selection is loaded here.
+/// model load; otherwise the supplied transcription selection is loaded here,
+/// or parked until the first dictation with Labs › Unload model when idle.
 /// `updates` change settings, the model, and shortcut registration in place.
 /// `dictations` records a local API client's dictation beside the shortcut:
 /// one capture at a time, and neither ends the other.
@@ -287,18 +321,26 @@ pub(crate) fn run(
     updates: mpsc::Receiver<ListenerUpdate>,
 ) -> Result<()> {
     let mut settings = settings.clone();
-    let transcriber = transcriber.map_or_else(
-        || {
-            LocalTranscriber::load(&crate::transcription::custom_models::runnable(
-                &settings.transcription,
-            ))
-        },
-        Ok,
-    )?;
+    // Labs › Unload model when idle: a launch with no model Settings prepared
+    // for this listener starts parked, as after an idle unload, until the
+    // first dictation. A prepared model starts loaded; the idle timer unloads
+    // it.
+    let transcriber = match transcriber {
+        Some(transcriber) => Some(transcriber),
+        None if crate::labs::unload_idle().is_some() => None,
+        None => Some(LocalTranscriber::load(
+            &crate::transcription::custom_models::runnable(&settings.transcription),
+        )?),
+    };
     crate::transcription::speech_detector::prewarm();
     // The engine outlives the output worker, which waits on its transcripts.
     // Captures transcribe on it too, holding it weakly.
-    let mut engine = Arc::new(TranscriptionEngine::start(transcriber)?);
+    let mut engine = match transcriber {
+        Some(transcriber) => Arc::new(TranscriptionEngine::start(transcriber)?),
+        None => Arc::new(TranscriptionEngine::start_parked(
+            crate::transcription::custom_models::runnable(&settings.transcription),
+        )?),
+    };
     // The local API transcribes host audio on this engine's model.
     engine.share();
     // Drop audio/hotkeys and close the job queue before joining slow output on
@@ -377,6 +419,7 @@ pub(crate) fn run(
                     return output_settings.deliver(
                         text,
                         job.raw,
+                        &job.language,
                         None,
                         job.audio_ms,
                         inference_ms,
@@ -388,6 +431,7 @@ pub(crate) fn run(
                 output_settings.deliver(
                     text,
                     job.raw,
+                    &job.language,
                     Some(paster),
                     job.audio_ms,
                     inference_ms,
@@ -472,7 +516,13 @@ pub(crate) fn run(
     })?;
     emit_state(&mut events, VoiceState::Listening, &device_label)?;
     println!(
-        "Hex dictation is ready on {device_label}. Hold {hotkey_label} to dictate; Ctrl-C stops."
+        "{}",
+        readiness_message(
+            &device_label,
+            &hotkey_label,
+            &hotkey_status.shortcuts(),
+            commands.connected(),
+        )
     );
 
     while !shutdown.load(Ordering::Relaxed) {
@@ -811,7 +861,7 @@ pub(crate) fn run(
                     finishing = Some(Finishing {
                         raw: recording_raw,
                         ..begin_finishing(&capture, released_at, print.take(), || {
-                            suppressor.restore_then(|| feedback::play(Tone::DictationStop))
+                            suppressor.restore_then(feedback::deferred_stop())
                         })
                     });
                 }
@@ -933,7 +983,8 @@ pub(crate) fn run(
                     service.audio(&samples, Instant::now());
                 }
                 if capture.become_intentional(captured_through) && finishing.is_none() {
-                    // Ordinary shortcut chords and short taps never mute or pause.
+                    // Ordinary shortcut chords and short taps never mute,
+                    // lower, or pause audio.
                     suppressor.suppress();
                 }
                 stream_when_due(&mut capture, &engine, toggle);
@@ -1125,10 +1176,15 @@ fn submit_capture(
             let audio_ms = clip.duration_ms();
             let stream = clip.take_stream();
             let samples = clip.into_transcription_samples();
+            let language = engine
+                .held_selection()
+                .unwrap_or_else(|| crate::app_settings::transcription_selection().1)
+                .language;
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Job {
                 transcript: engine.finish(stream, samples)?,
                 audio_ms,
+                language,
                 recording,
                 print,
                 raw,
@@ -1196,6 +1252,41 @@ mod tests {
                 .as_nanos()
         ));
         (EventLog::create(&path).unwrap(), path)
+    }
+
+    #[test]
+    fn the_ready_line_names_what_starts_dictation() {
+        assert_eq!(
+            readiness_message("System default", "Alt", &DesktopShortcuts::Registered, true),
+            "Hex dictation is ready on System default. Hold Alt to dictate; Ctrl-C stops."
+        );
+        assert_eq!(
+            readiness_message(
+                "Yeti",
+                "Alt+Space",
+                &DesktopShortcuts::Portal(Vec::new()),
+                false
+            ),
+            "Hex dictation is ready on Yeti. Hold Alt+Space to dictate; Ctrl-C stops."
+        );
+        let unregistered =
+            readiness_message("Yeti", "Alt+Space", &DesktopShortcuts::Unregistered, true);
+        assert!(!unregistered.contains("Hold"));
+
+        let service = readiness_message("Yeti", "Alt+Space", &DesktopShortcuts::Commands, true);
+        assert!(service.contains("No shortcut is bound"));
+        assert!(service.contains("`hex dictation start`"));
+        assert!(service.contains("`hex dictation stop`"));
+        assert!(service.contains("`hex dictation toggle`"));
+        assert!(service.contains("desktop's keybindings"));
+        assert!(!service.contains("Hold"));
+
+        let foreground = readiness_message("Yeti", "Alt+Space", &DesktopShortcuts::Commands, false);
+        assert!(foreground.contains("No shortcut is bound"));
+        assert!(foreground.contains("can't receive `hex` commands"));
+        assert!(foreground.contains("run `hex start`"));
+        assert!(foreground.contains("`hex dictation toggle`"));
+        assert!(!foreground.contains("Hold"));
     }
 
     /// Records `seconds` of speech-level audio in 100 ms chunks, streaming

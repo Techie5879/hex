@@ -36,7 +36,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 ├── Copy dictation only no labs.copy_only (macOS)    a dictation goes to the clipboard and is never pasted; Paste last dictation still pastes (#629)
 ├── Spoken formatting no labs.spoken_formatting      spoken "new line"/"line break", "new paragraph", "open/close quote", "quote … unquote" become line breaks and quotation marks; Spanish "nuevo párrafo", "nueva línea", "abre/cierra comillas", … too (#630, #1040)
 ├── Spoken symbols  no    labs.spoken_symbols          spoken "hashtag", "underscore", "comma", … become symbols joined to their words: "#release", "my_variable", "done, thanks"; Spanish "arroba", "guion bajo", "coma", … too (#678, #1040)
-├── Remove filler words no labs.filler_words          um, umm, uh, uhh, erm, er, ah leave dictations, with no model (#631)
+├── Remove filler words no labs.filler_words          English dictations lose um, umm, uh, uhh, erm, er, ah, with no model (#631)
 ├── Subtitle export no    labs.subtitle_export         (macOS)   hex meetings show --srt|--vtt writes a meeting as timed subtitles (#633)
 ├── Second dictation shortcut no labs.second_dictation_shortcut + second_dictation_hotkey (macOS)
 │                                        another shortcut dictates like the main one (#627); General shows its recorder while on
@@ -106,7 +106,9 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 ├── Annotate 15 s replay no labs.annotate_replay + capture.replay_hotkey (macOS 27+)
 │                                        keeps a rolling 15 s SCClipBufferingOutput screen buffer for hex capture replay and the replay shortcut;
 │                                        macOS keeps its screen-recording dot lit the whole time it is on
-└── Terminal paste  no    paste_with_shift             (Windows) paste with Ctrl+Shift+V (#477/#478; Linux keeps it in General)
+└── Terminal paste  no    paste_with_shift             (Windows) paste with Ctrl+Shift+V (#477/#478; Linux keeps it in General);
+                                         Java games (javaw/java, e.g. Minecraft) still get Ctrl+V (#1362)
+                                         // check: terminal_paste_sends_plain_control_v_to_java_games (windows/paste.rs)
 
 Settings › Labs                          // labs.page
 ├── "Try unfinished features. They may change or break." + Send feedback -> https://github.com/anomalyco/hex/issues/new
@@ -140,7 +142,9 @@ features on (`Labs` line on macOS, `labs` array in the macOS and Linux JSON,
 
 Every toggle applies at once, from the window or `hex labs on|off` (issue
 568, from @maharshi365): Live text is asked as each dictation starts and its
-plate is always installed (prewarmed only when Live text is on at launch);
+plate is always installed (prewarmed on macOS whatever the setting, so a
+plate turned on after launch never flashes the last dictation's words,
+#1075; elsewhere only when Live text is on at launch);
 the window always attaches the playground with Rune's own ⇧⌘D off, and its
 sidebar item, ⇧⌘D, the macOS View menu, and story links open it only while
 the toggle is on. Live chapters are read when a recording starts. Nothing
@@ -180,7 +184,12 @@ on, its row shows "Unload after" (5, 15, 30, or 60 minutes; default 15).
 has reached it for that long and nothing records (`audio::idle_sleep::held()`: a
 dictation past its hold or a meeting; a macOS capture from its press via
 `dictation_busy`), freeing its RAM and VRAM; between commands no request
-runs. Apple Speech stays loaded. The unloaded model still counts as held
+runs. With the lab on, a launch loads no GGUF model: the first dictation,
+local API request, meeting chunk, or model switch loads it, so memory stays
+free even when nobody dictates. On Linux, a model Settings has just prepared
+for the listener starts loaded and unloads after the idle period. Until it
+loads, whether it can stream comes from the model's definition.
+Apple Speech stays loaded. The unloaded model still counts as held
 (`TranscriptionEngine::holds`), so dictation, meetings, and the local API send
 their work to the engine as before, and the worker reloads it before the
 first command that needs it: audio fed meanwhile waits in the queue, so
@@ -189,7 +198,9 @@ catches up, falling back to the whole clip if it can't finish in time; the
 HUD shows its transcribing state while a released clip waits on the reload,
 with no look of its own. A failed reload fails that job and is retried by the
 next. Check: `unload_idle_carries_its_minutes` in [labs.rs](../../src/labs.rs);
-the unload and reload themselves have no automated check.
+`a_parked_engine_holds_its_selection_and_reloads_it_before_the_first_job` in
+[transcription/engine.rs](../../src/transcription/engine.rs) covers a parked
+start and its first job. The unload itself has no automated check.
 
 Restore shortcut default (`restore-shortcut-default`, issue 613): while on,
 General › Advanced › Paste last dictation shows a Restore default shortcut
@@ -300,8 +311,18 @@ Remove filler words (`filler-words`, issue 631, every OS): while on,
 `Profiles::process_cancellable` in
 [dictation/processor.rs](../../src/dictation/processor.rs) reads
 `labs::filler_words()` as each dictation's processing starts and runs
-`dictation::filler_words::apply` right after spoken formatting and before the mode's
-corrections, OpenCode rewriting, and transformations. It is rule-based, with
+`dictation::filler_words::strip_if` right after spoken formatting and before
+the mode's corrections, OpenCode rewriting, and transformations. It applies
+only when that dictation's language is exactly English
+(`filler_words::applies_to`): Auto and every other language are left
+untouched, because "er" and "um" are ordinary German and Portuguese words.
+The language comes from the submission, not the setting in force while the
+text is processed: macOS reads the saved transcription selection when the
+dictation is submitted, while Linux and Windows read the selection the
+transcription engine holds at submission, falling back to the saved selection
+when none is held. On Linux and Windows, a dictation finished while an
+in-place model reload for a language change is still running uses the previous
+language for this check. It is rule-based, with
 no model and no added latency. The English fillers "um", "umm", "uh", "uhh",
 "erm", "er", and "ah" are removed as whole words, lowercase or capitalised
 only, so "umbrella", "ahead", "error", "Uhura", "uh-huh", and "ER" stay. The
@@ -310,7 +331,12 @@ close up, no space is left before punctuation, a capitalised filler that
 started a sentence passes its capital to the next word ("Um, so I think"
 becomes "So I think"), and line breaks stay. Dictate without processing,
 meetings, and live text are unchanged, and with the toggle off processing is
-exactly as before. Checks: the tests in
+exactly as before. Checks: `only_english_dictations_apply_the_filter`,
+`enabled_english_dictations_strip_their_fillers`,
+`every_other_language_or_a_disabled_switch_keeps_the_words`,
+`fillers_leave_with_their_commas_and_spaces`,
+`a_filler_that_started_a_sentence_hands_on_its_capital`,
+`line_breaks_are_kept`, and `other_words_are_left_alone` in
 [dictation/filler_words.rs](../../src/dictation/filler_words.rs);
 `filler_words_is_its_own_bit_and_off_by_default` in
 [labs.rs](../../src/labs.rs);
@@ -679,12 +705,14 @@ stream hears it (`skip_long_pauses` in
 [engine/streaming.rs](../../src/transcription/engine/streaming.rs), the same
 `PauseCap`): each pause at the noise floor keeps its first 2.5 s and last
 0.3 s, a trailing pause only its first 2.5 s, and shorter pauses pass whole.
+Unified English's trailing silence is appended after that cut, so the trailing
+pause cannot trim it.
 A clip in which no frame rose above the noise floor is left whole, as the
 stream does for #841. The job deadline, History's duration, and the silence
 discard still use the full clip; process.log adds a `skipped long pauses
 before whole-clip transcription` line with `pauses_dropped_ms`. macOS,
-streams, meetings, captures, and the local API are unchanged, and off the
-clip is passed through untouched. Checks:
+streams, meetings, captures, and the local API are unchanged, and off, the
+pause cut leaves the clip untouched. Checks:
 `skipping_pauses_cuts_a_whole_clips_long_pauses_to_their_ends`,
 `skipping_pauses_leaves_short_pauses_and_quiet_only_clips_whole`, and
 `with_skip_pauses_off_the_whole_clip_is_untouched` in
@@ -780,7 +808,9 @@ path (`custom_models::add_in_place`), never copied
 is `model_import::in_place_on`, read when the button draws and again when the
 dialog answers, before the worker starts. Off, the picker is exactly as
 before. Checks:
-`a_file_added_in_place_is_recorded_by_path_copied_nowhere_and_forgetting_leaves_it`
+`a_file_added_in_place_is_recorded_by_path_copied_nowhere_and_forgetting_leaves_it`,
+`hex_s_own_copy_chosen_through_another_path_is_never_deleted`, and
+`an_independent_identical_file_replaces_hex_s_copy`
 in [transcription/custom_models.rs](../../src/transcription/custom_models.rs);
 `every_feature_is_off_by_default_and_round_trips` in
 [labs.rs](../../src/labs.rs). Not yet observed: a real window or a second
@@ -933,8 +963,10 @@ shortcut uses) opens a second copy of Annotate's capture picker
 [capture_capsule/picker.rs](../../src/rune_ui/capture_capsule/picker.rs)):
 
 ```ts
-⌘⇧4            -> the screen dims under a crosshair; a drag draws the area with its W × H
-├── Space      -> window mode: the window under the pointer highlights; Space again -> area
+⌘⇧4            -> the screen dims under a crosshair cursor, even while another app is frontmost;
+│                 a drag draws the area with its W × H beside the pointer, outside the area
+├── Space      -> window mode: a camera replaces the pointer and the window under it highlights;
+│                 Space again -> area
 ├── Click      -> the whole display ("Full screen · Click to capture")
 ├── Escape     -> closes it, nothing shot; Escape reaches no other app or Hex shortcut
 └── Release    -> shot at the display's own pixels (ScreenCaptureKit), Hex's overlays,
@@ -942,7 +974,10 @@ shortcut uses) opens a second copy of Annotate's capture picker
                   ├── PNG (pHYs at the display's scale) -> "Hex Screenshot 2026-11-04 at 14.03.22.png"
                   │   in screenshots.folder (the Desktop when unset); a second shot that second gets " (2)"
                   ├── clipboard -> the PNG and the file's URL, one pasteboard item
-                  └── thumbnail bottom right for 5 s (held while the pointer is on it):
+                  └── thumbnail bottom right for 5 s (held while the pointer is on it), 16 pt in,
+                      its corner concentric with the display's (30 pt, a design constant):
+                      slides in from past the right edge on the HUD's spring and out the same way
+                      (Reduce Motion: a fade); ✕ shows inside its top-left corner on hover;
                       click -> opens it in Preview, drag -> the file, ✕ -> closes
                       a failure -> the error tone; there is no success sound (Hex has no shutter cue)
 ```
@@ -954,6 +989,17 @@ it. With the lab off the tap returns at once and nothing is made: no
 picker window, no thumbnail, no work. Screen Recording is Annotate's: a
 press without it shows Annotate's permission helper instead of the
 picker.
+
+The picker is a non-key overlay, so Hex is usually not the frontmost app
+while it shows, and macOS ignores a background app's cursor. Hex builds
+Rune with `macos-background-cursor`, which sets WindowServer's private
+`SetsCursorInBackground` property so the picker's crosshair (and Window
+mode's hidden arrow under the drawn camera) shows over any app. It is a
+private API, acceptable because Hex isn't sold through the App Store; if a
+macOS release drops the property, Rune skips it and the cursor shows only
+while Hex is frontmost. Checks: `the_badge_stays_on_the_display` in
+[capture_capsule/picker.rs](../../src/rune_ui/capture_capsule/picker.rs).
+Not yet observed: the cursor over another frontmost app on a real Mac.
 
 macOS matches its own screenshot shortcuts (Keyboard Shortcuts ›
 Screenshots, ⌘⇧4 among them) in the window server before any app's event

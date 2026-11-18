@@ -92,7 +92,8 @@ pub struct RouteDest {
     pub directory: Option<PathBuf>,
 }
 
-/// `recent` is every other session the look read, newest first.
+/// `recent` is every other session the look read, newest first as first
+/// listed; a later answer keeps listed rows in place and adds new ones last.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RouteAnswer {
     /// Written; the router is still working.
@@ -1221,9 +1222,10 @@ fn answer_for(
         }
     };
     let mut answered = match decided {
-        // Only a rule the person saved sends on its own; anything else the
-        // router would send is its first suggestion.
-        Decided::Judged(smart::Decision::Send { to, instead }) if policy::saved_rule(&to) => {
+        // Only a rule the person saved, or a page naming its session, sends
+        // on its own; anything else the router would send is its first
+        // suggestion.
+        Decided::Judged(smart::Decision::Send { to, instead }) if policy::explicit(&to) => {
             let dest = smart::destination_of(&to, url);
             let shown = Shown::rule(lead_why(&to));
             let to = scored(&to);
@@ -1322,6 +1324,7 @@ fn recent(candidates: &[smart::Candidate], shown: &[&str], now_ms: u64) -> Vec<R
 fn why(via: &str) -> &str {
     match via {
         "rule" | "app-rule" => "rule",
+        "signed" => "page names it",
         "named" | "speech" => "mentioned",
         "sdk" | "page" => "same page",
         "viewed" => "you were just in it",
@@ -1678,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_saved_rule_sends_on_its_own() {
+    fn only_a_saved_rule_or_a_signed_page_sends_on_its_own() {
         use smart::{Basis, Source};
         for (basis, why, shown) in [
             (Basis::JevHome, "Jev couldn't tell, so HOME", ""),
@@ -1727,6 +1730,10 @@ mod tests {
                 Basis::Clue(Source::AppRule),
                 "routing.apps sends com.example.app to /p/a",
             ),
+            (
+                Basis::Clue(Source::Signed),
+                "/srv/artifacts/demo/index.html names it in a meta tag",
+            ),
         ] {
             let answered = sent_by(basis, why);
             assert_eq!(
@@ -1734,9 +1741,12 @@ mod tests {
                 Some("ses_a".into()),
                 "{why}: sent at once"
             );
-            assert!(
-                matches!(answered.answer, RouteAnswer::Rule { ref to, .. } if to.why == "rule")
-            );
+            let chip = if basis == Basis::Clue(Source::Signed) {
+                "page names it"
+            } else {
+                "rule"
+            };
+            assert!(matches!(answered.answer, RouteAnswer::Rule { ref to, .. } if to.why == chip));
             assert_eq!(answered.shown, Some(Shown::rule(why)));
         }
     }
@@ -2174,6 +2184,47 @@ mod tests {
             }
         }
 
+        /// A site rule for a gallery's whole host once sent pages a session
+        /// had signed elsewhere. The page's own session wins.
+        #[test]
+        fn a_signed_page_sends_ahead_of_a_rule_for_its_host() {
+            let router = router_with(|c| {
+                c.sites
+                    .insert("https://gallery.example".into(), "ses_ruled".into());
+            });
+            let url = "https://gallery.example/2026-01-02-demo/";
+            let live = look::Live {
+                url: Some(url.into()),
+                clues: vec![smart::Clue::new(
+                    smart::Source::Signed,
+                    smart::Pointer::Session {
+                        id: "ses_signer".into(),
+                        directory: None,
+                    },
+                    "index.html names it in a meta tag",
+                )],
+                ..look::Live::default()
+            };
+            let (look, found) = held_look(router, live);
+            let outcomes = SharedOutcomes::default();
+            let mut worker = worker(outcomes.clone());
+            let bundle = written("com.example.browser");
+            lock(&outcomes).fail(bundle.clone(), "test".into());
+            worker.written(bundle, look);
+            let current = worker.current.as_ref().unwrap();
+            assert_eq!(
+                current.destination.as_ref().map(|d| d.session.as_str()),
+                Some("ses_signer")
+            );
+            assert!(
+                matches!(&current.route.answer, RouteAnswer::Rule { to, .. }
+                    if to.session == "ses_signer" && to.why == "page names it"),
+                "{:?}",
+                current.route.answer
+            );
+            drop(found);
+        }
+
         /// A saved app rule to a session id sends before the session server
         /// answers: the pill, the delivery and the bundle still say a name,
         /// never `ses_…`.
@@ -2301,6 +2352,83 @@ mod tests {
             assert!(worker.current.as_ref().unwrap().sent.is_none());
             std::fs::remove_dir_all(first.parent().unwrap()).unwrap();
             std::fs::remove_dir_all(second.parent().unwrap()).unwrap();
+        }
+
+        /// Kit's Nov 5 report: the list appeared, then a later judgement put
+        /// its pick on top and re-sorted the recent sessions, so a click
+        /// landed on another session. Rows already listed stay where they
+        /// are; a session new to the list comes last.
+        #[test]
+        fn a_later_judgement_never_moves_a_listed_row() {
+            let (look, found) = held_look(router_with(|_| {}), look::Live::default());
+            let outcomes = SharedOutcomes::default();
+            let mut worker = worker(outcomes.clone());
+            let bundle = written("com.example.board");
+            lock(&outcomes).fail(bundle.clone(), "test".into());
+            worker.written(bundle.clone(), look);
+            let (updates, pending) = preparation::fed();
+            worker.pending = Some(pending);
+            drop(found);
+            let rows = |worker: &Worker| -> Vec<String> {
+                listed(&worker.current.as_ref().unwrap().route.answer)
+                    .iter()
+                    .map(|dest| dest.session.clone())
+                    .collect()
+            };
+            let live = |candidates| look::Live {
+                candidates,
+                ..Default::default()
+            };
+            updates
+                .send(preparation::Update::judged(
+                    live(vec![
+                        candidate("ses_board", "BOARD", 30),
+                        candidate("ses_home", "HOME", 20),
+                        candidate("ses_hex", "HEX", 10),
+                    ]),
+                    smart::Judgement {
+                        decision: smart::Decision::Keep {
+                            reason: String::new(),
+                        },
+                        ranking: Vec::new(),
+                    },
+                ))
+                .unwrap();
+            worker.prepared();
+            assert_eq!(rows(&worker), ["ses_board", "ses_home", "ses_hex"]);
+            // The model picks the last row; meanwhile HEX moved and a new
+            // session opened.
+            let pick = scored_by(
+                "ses_hex",
+                "HEX",
+                smart::Basis::Clue(smart::Source::Named),
+                "mentioned",
+            );
+            updates
+                .send(preparation::Update::judged(
+                    live(vec![
+                        candidate("ses_hex", "HEX", 40),
+                        candidate("ses_board", "BOARD", 30),
+                        candidate("ses_home", "HOME", 20),
+                        candidate("ses_new", "NEW", 50),
+                    ]),
+                    smart::Judgement {
+                        decision: smart::Decision::Offer {
+                            choices: vec![pick],
+                        },
+                        ranking: Vec::new(),
+                    },
+                ))
+                .unwrap();
+            worker.prepared();
+            assert_eq!(
+                rows(&worker),
+                ["ses_board", "ses_home", "ses_hex", "ses_new"]
+            );
+            let answer = &worker.current.as_ref().unwrap().route.answer;
+            assert!(matches!(answer, RouteAnswer::Guess { .. }), "{answer:?}");
+            worker.pending = None;
+            std::fs::remove_dir_all(bundle.parent().unwrap()).ok();
         }
 
         #[test]

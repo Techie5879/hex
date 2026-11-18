@@ -643,7 +643,13 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> El {
         .view
         .as_ref()
         .and_then(|view| view.listener.warning.clone())
-        .map(|failure| tr_fill("Last dictation failed: {}", &failure));
+        .map(|failure| (tr_fill("Last dictation failed: {}", &failure), p.danger()))
+        .or_else(|| {
+            ui.view
+                .as_ref()
+                .and_then(|view| view.listener.notice.clone())
+                .map(|notice| (notice, p.warning()))
+        });
     let error = ui
         .error
         .clone()
@@ -701,11 +707,11 @@ pub(super) fn listener_card(ui: &Ui, p: Paint) -> El {
                         .color(if no_model { p.danger() } else { p.muted() })
                         .wrap(),
                 )
-                .children(failure.map(|failure| {
+                .children(failure.map(|(failure, color)| {
                     text(failure)
                         .key("failure")
                         .font(DESCRIPTION)
-                        .color(p.danger())
+                        .color(color)
                         .wrap()
                 })),
         )

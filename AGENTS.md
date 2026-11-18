@@ -298,11 +298,18 @@ substitute for source inspection or a second roadmap.
   capture-transcribe-paste loop with Paste Last,
   and paste.
 - `linux/service` also adopts the session's Wayland display at `hex service`
-  start when the unit has none (Hyprland imports nothing into systemd; #756):
-  the user manager's `WAYLAND_DISPLAY`, else the newest answering
-  `$XDG_RUNTIME_DIR/wayland-*` socket the user owns. `linux/rune_hud`'s
-  `limitation()` names the HUD's failure: no display, no layer-shell, or
-  Rune's overlay error.
+  start when the unit has none, or has only Xwayland's `DISPLAY` on a Wayland
+  login (Hyprland imports nothing into systemd; #756): with `DISPLAY` set, an
+  explicit `wayland` `XDG_SESSION_TYPE` (Hex's, else the user manager's) takes
+  the manager's live `WAYLAND_DISPLAY`, else the newest answering
+  `$XDG_RUNTIME_DIR/wayland-*` socket the user owns. Any other explicit type
+  (`x11`, `tty`, `mir`, …) keeps its X display even when the manager still
+  names a nested compositor or another login's display, and only an absent
+  type adopts the manager's live display. Launchers (`hex`, `hex start`'s app,
+  `hex restart`) make the same decision before they compute or write
+  `session.env`, so both sides agree on the session; an explicit non-Wayland
+  type skips the user-manager read entirely. `linux/rune_hud`'s `limitation()`
+  names the HUD's failure: no display, no layer-shell, or Rune's overlay error.
 - `linux/gnome_shortcuts`: on GNOME without a GlobalShortcuts portal
   (GNOME 46, #781), Hex's own custom keybindings under
   `…/media-keys/custom-keybindings/hex-*/` via `gsettings`
@@ -370,6 +377,8 @@ substitute for source inspection or a second roadmap.
   Hex, Paste last dictation, the downloaded-model picker, the update item,
   Enable / Disable Hex, Quit Hex) and the model entries the macOS menu bar
   lists too. Each tray maps a `TrayCommand` onto its own runtime.
+- `desktop/tray_icon`: the tray mark Linux and Windows share: the white Hex
+  mark, drawn black on a light panel or taskbar, where white would vanish.
 - `linux/login_item`: Launch at login on Linux, the managed XDG autostart
   entry the installer also writes; the file is the only state.
 - `net`: Hex's own HTTPS (model downloads, update checks, transformation
@@ -604,10 +613,18 @@ CoreAudio formats, AppleScript details, or event serialization.
 
 - Settings errors never prevent launch. `app_settings/persistence` defaults
   only invalid fields in memory and logs each key and reason; unknown keys
-  are ignored. Invalid JSON or unreadable files use defaults without changing
-  the original. Before any save over invalid settings, preserve the exact
+  are ignored. Invalid JSON or a file that isn't a JSON object uses defaults
+  without changing the original, and launch reports the parse error. An
+  unreadable file also uses defaults without changing it, but reports no
+  launch note. Before any save over invalid fields, preserve the exact
   original beside it as `settings.json.unreadable-<sha256>` (owner-only;
-  identical originals share one backup). A failed backup blocks the save.
+  identical originals share one backup). A failed backup blocks the save. A
+  file that isn't a JSON object is never backed up or replaced: every save is
+  refused until a restart. A process that loaded such a file keeps refusing
+  saves even after the file is fixed, because its in-memory settings may be
+  stale defaults. On Linux only, the two-second poll also clears that refusal
+  when it adopts a valid or removed file. The refusal and launch note use the
+  same wording on every OS.
   Keep saved values readable by older builds: an unchosen
   `meetings.retention` is omitted, not `null`. Do not omit optional fields
   whose absence restores a nonempty default, such as `paste_last_hotkey`.
@@ -699,10 +716,11 @@ CoreAudio formats, AppleScript details, or event serialization.
   fences remain required. Never strip Fn globally from shortcut matching.
 - Hold the shortcut to dictate and release to transcribe. Captures shorter than
   300 ms discard. A 450 ms hotkey pre-roll
-  protects speech onset, except when "While dictating" mutes or pauses other
-  audio: that audio predates the mute and holds whatever was playing, so those
-  hotkey captures keep no pre-roll (#1309; `dictation::hotkey_pre_roll`, every
-  OS). Ducking keeps 450 ms. There is no separate pre-roll setting. Capture has
+  protects speech onset, except when "While dictating" mutes, pauses, or lowers
+  other audio: that audio predates the suppression and holds whatever was
+  playing, so those hotkey captures keep no pre-roll (#1309, #1468;
+  `dictation::hotkey_pre_roll`, every OS). Do nothing keeps 450 ms. There is no
+  separate pre-roll setting. Capture has
   no automatic duration limit; release or
   an explicit stop ends it.
 - Only Toggle mode has a cancel (#786, #1022): its cancel shortcut
@@ -845,6 +863,9 @@ CoreAudio formats, AppleScript details, or event serialization.
 - Cohere's advertised encoder input capacity is not its recommended inference
   window. Both GGUF adapters cap Cohere chunks at the reference processor's
   35 seconds (or a stricter advertised bound); capture duration remains unlimited.
+- macOS `main` sets `GGML_METAL_TENSOR_DISABLE` first thing, because ggml's
+  Metal tensor-API kernels give wrong results on M5-class GPUs; the simdgroup
+  kernels every earlier Mac uses are correct.
 - The microphone is either System default (`microphone` unset) or one saved
   device. System default follows the OS default input live: macOS through
   CoreAudio listeners on the default input and the device list (their callbacks
@@ -1074,7 +1095,8 @@ CoreAudio formats, AppleScript details, or event serialization.
   `capture.routing`'s autoSend on, routed by Scrawl's router in Hex's process
   (`capture_host::routing`): one `capture-look` thread per stop, one
   `capture-route` thread with a bounded queue, a rule's send held 3 s for
-  Undo, guesses sent only when picked. Queued sends retry only while neither
+  Undo (a page naming its session, by meta tag or `.opencode-session`, sends
+  like a rule and beats one), guesses sent only when picked. Queued sends retry only while neither
   Scrawl.app runs nor anything serves the ingest port, and never in tests.
   `capture.routing` never holds a Jev key. A cabled iPhone records through
   `scrawl-helper mirror --no-microphone`, narrated by the dictation timeline
@@ -1102,7 +1124,7 @@ CoreAudio formats, AppleScript details, or event serialization.
   they are shareable, since one non-shareable window blanks every Space's
   Mission Control thumbnail. A capture leaves out all of Hex's chrome, unless
   `capture.show_overlays_in_recordings` (default off; the pane's Show in
-  screen recordings or the menu bar's checkmark) is on; it applies at once
+  screen recordings) is on; it applies at once
   to open overlays and a recording capture, never recreating a window. A
   capture never opens a
   microphone, installs a tap of its own, or loads a model: it copies the dictation
@@ -1260,7 +1282,9 @@ CoreAudio formats, AppleScript details, or event serialization.
   `renamex_np(RENAME_SWAP)` at restart or quit, and the new version removes
   the old bundle at launch.
 - The Wayland beta requires compatible clipboard protocols, and layer-shell or
-  XWayland for the HUD.
+  XWayland for the HUD. Copy and paste need `wl-copy` from `wl-clipboard`,
+  which direct installs don't bring; while it's missing Hex warns in Settings
+  and `hex status`, and a paste fails naming the package.
   Paste sends its shortcut through `wtype` when the compositor advertises
   `zwp_virtual_keyboard_manager_v1`, and otherwise through the
   RemoteDesktop portal, the general injection path: one keyboard-only session
@@ -1544,17 +1568,20 @@ GitHub OIDC token, under app `hex`, artifact `desktop`;
 [`docs/plans/release-service.md`](docs/plans/release-service.md) pins the
 target and file names and the direct-install receipt, and
 [`docs/releasing.md`](docs/releasing.md) owns the workflow, channels, secrets,
-and old clients. The 2.3.1 feeds and appcast at `https://anoma.ly/hex/files`
-(and Kit's `downloads.hex.kitlangton.dev`/`.com`, which must keep redirecting
-there) stay frozen. GitHub app releases use `v<VERSION>` tags (`app-v…`
+and old clients. The 2.3.1 feeds at `https://anoma.ly/hex/files` (and Kit's
+`downloads.hex.kitlangton.dev`/`.com`, which must keep redirecting there)
+stay frozen; the appcast there is `packaging/macos/legacy-appcast.xml`, served
+by the site build. GitHub app releases use `v<VERSION>` tags (`app-v…`
 through 2.3.1); each stable one is created as GitHub's Latest release
 (`--latest=true`, stable only), and SDK releases (`release-typescript.yml`)
 are created with `--latest=false` so they never take the badge. Nothing
 downloads through GitHub's `releases/latest` redirect. Never overwrite a published artifact with different bytes.
 `https://anoma.ly/hex` (in-repo `site/`) is the only Hex website. One
-`site/cloudflare.config.ts` defines the production Worker `hex-production-site` (anoma.ly/hex,
-bucket `hex-production-files`) and the dev Worker `hex-dev-site` (dev.anoma.ly/hex,
-bucket `hex-dev-files`); `cf deploy --prebuilt --mode <mode>` picks one, and
+`site/cloudflare.config.ts` defines the production Worker `hex-production-site` (anoma.ly/hex)
+and the dev Worker `hex-dev-site` (dev.anoma.ly/hex), both reading the frozen
+2.3.1 history from `hex-production-files`; the installers and appcast ship with
+the site build and the dev notes come from the `dev-notes` branch.
+`cf deploy --prebuilt --mode <mode>` picks one, and
 only CI deploys: a push to `dev` touching `site/` deploys dev, a stable
 Release deploys production. No subdomains. The site's download links come
 from the service's stable manifest when it builds. After publishing a version,
@@ -1652,12 +1679,15 @@ check out only `.github/release/`, and run only those scripts and SHA-pinned
 actions on artifacts treated as data (macOS Developer ID signing,
 notarization, and stapling; Azure Authenticode; the release service through
 OIDC; the AUR and Homebrew pushes). Every artifact carries a `SHA256SUMS`
-whose digest its job reports and every consumer checks. Site deploy follows
-the same split: its build job has no secret, and its `release` job runs only
-`.github/release/deploy-site.sh`, which deploys the verified Build Output only
+whose digest its job reports and every consumer checks. Deploy
+(`.github/workflows/deploy.yml`) follows the same split: its build job has no
+secret, and its deploy job (in `dev` or `production`) runs only
+`.github/release/cloudflare-token.sh` (which mints a 15-minute Cloudflare
+token after assuming the environment's role) and `.github/release/deploy-site.sh`,
+which deploys the verified Build Output only
 when it names exactly that mode's site Worker, routes, and bindings, with the
-cf CLI locked in `.github/release/cf/`; Legacy appcast checks out only
-`.github/release/` and the appcast. Keep that boundary:
+cf CLI locked in `.github/release/cf/`; its build job runs the installer test
+and the appcast check on repository code, no secret. Keep that boundary:
 never add a step that builds, installs dependencies, or runs repository code
 to a job that holds a secret or an OIDC token, and pin every action by SHA.
 `.github/` changes need Dax (CODEOWNERS and the "release boundary" ruleset).
@@ -1713,7 +1743,7 @@ q8_0, and q5_0 (NB-Whisper Medium) tensors and no MUL_MAT_ID (`CMAKE_ARGS` in
 use another type, so widen `GGML_VULKAN_SHADER_TYPES` before the catalog
 gains a model that needs one. Release executables are stripped (`[profile.release]`). The
 installers live in the locked `.github/release/` (`install-linux.sh`,
-`install-windows.ps1`; the Installers workflow serves them at
+`install-windows.ps1`; the site build serves them at
 `https://anoma.ly/hex/files/`) and install from the service's manifest,
 checking each file's size and SHA-256 plus the Linux ed25519 signature or the
 Windows Authenticode signature; `scripts/test-install-linux-release.sh`

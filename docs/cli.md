@@ -18,6 +18,10 @@ CLI; `hex status --json` lists the OS's `capabilities`. Today that is
 playground stories (`window story`) outside macOS and the local `model`
 tools on macOS.
 
+On Windows a terminal runs `hex` as `hex.com`, a console program that runs
+the app's `hex.exe` and waits for it, so commands print, return their exit
+code, and can be captured like any other (`docs/windows.md`).
+
 The read-only `hex history` and `hex meetings list|show|chapters|search` commands, and
 `hex mcp`, read files rather than the running Hex; see `docs/transcript-cli.md`.
 
@@ -167,10 +171,11 @@ build and waits for it to answer (#915); one not run by the unit has to be
 quit from its window or tray.
 
 `model install` with Hex running downloads in the background, as Settings
-does; on Linux and Windows with no Hex running it downloads in this process,
-printing progress (the source-install step `hex model install`). `model
-status`, `devices`, `check`, and `transcribe` are local tools on Linux and
-Windows and take the selected model unless one is named; macOS answers
+does; on Linux and Windows with no Hex running it downloads here and then
+selects the model, printing progress (the source-install step `hex model
+install`). A Hex that starts while the download runs makes the switch instead.
+`model status`, `devices`, `check`, and `transcribe` are local tools on Linux
+and Windows and take the selected model unless one is named; macOS answers
 `unsupported`.
 
 `start` and `restart` keep the `HEX_*` environment (`HEX_RETAIN_DICTATION_AUDIO`,
