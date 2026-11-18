@@ -5,15 +5,16 @@
 //! One worker per recording reads the call app every [`POLL_MS`], bounded in
 //! elements and time, and appends what it saw to `speakers.ndjson` on the
 //! system track's own timeline (`timeline.rs`). The transcript names a
-//! system-audio line only when that evidence shows one person throughout it;
-//! everything else stays `Them`, and the microphone stays `You`. Capture,
-//! echo suppression, and the paste cursor never read names.
+//! system-audio line only when that evidence shows one person through most of
+//! what could be read of it; everything else stays `Them`, and the microphone
+//! stays `You`. Capture, echo suppression, and the paste cursor never read
+//! names.
 //!
 //! The adapters (`teams.rs`, `slack.rs`) read synthetic trees in tests and
 //! the real app through `native.rs`. Nothing here clicks, focuses, asks for a
 //! permission, reads captions or rosters, or talks to a service.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -39,7 +40,7 @@ pub use names::is_valid as is_valid_name;
 use timeline::FILE;
 pub use timeline::{ClockSync, Follower, Timeline};
 
-use ax::{NoCall, Reading};
+use ax::{Doubt, NoCall, Reading};
 use timeline::{Observed, POLL_MS, Recorder};
 
 /// A reading that took longer than this says too little about any moment.
@@ -266,6 +267,8 @@ fn run(
 struct Writer {
     directory: PathBuf,
     recorder: Option<Recorder>,
+    /// Every reading of the recording by kind, stored or not.
+    counts: BTreeMap<String, u64>,
 }
 
 impl Writer {
@@ -273,6 +276,7 @@ impl Writer {
         Self {
             directory,
             recorder: None,
+            counts: BTreeMap::new(),
         }
     }
 
@@ -287,24 +291,32 @@ impl Writer {
         let (binding, observed, status) = match sample {
             Sample::Call { binding, reading } => {
                 let observed = match reading {
-                    _ if finished.saturating_sub(started) > MAX_READ_MS => Observed::Uncertain,
+                    _ if finished.saturating_sub(started) > MAX_READ_MS => {
+                        Observed::Uncertain(Some(Doubt::Slow))
+                    }
                     Reading::Speaking(name) => Observed::Speaking(name),
+                    Reading::Several(names) => Observed::Several(names),
                     Reading::Silent => Observed::Silent,
-                    Reading::Uncertain => Observed::Uncertain,
+                    Reading::Uncertain(doubt) => Observed::Uncertain(Some(doubt)),
                 };
                 (binding, observed, Status::Reading)
             }
             // Binding 0 is no call: a stretch never continues across it.
-            Sample::NoCall(reason) => (
+            Sample::NoCall(NoCall::Absent) => {
+                (0, Observed::Uncertain(Some(Doubt::NoCall)), Status::Waiting)
+            }
+            Sample::NoCall(NoCall::Unknown) => (
                 0,
-                Observed::Uncertain,
-                match reason {
-                    NoCall::Absent => Status::Waiting,
-                    NoCall::Unknown => Status::Unavailable,
-                },
+                Observed::Uncertain(Some(Doubt::CallUnknown)),
+                Status::Unavailable,
             ),
-            Sample::PermissionRequired => (0, Observed::Uncertain, Status::PermissionRequired),
+            Sample::PermissionRequired => (
+                0,
+                Observed::Uncertain(Some(Doubt::Permission)),
+                Status::PermissionRequired,
+            ),
         };
+        *self.counts.entry(observed.kind()).or_default() += 1;
         // Before the call audio starts there is nothing to name.
         let Some((origin, at)) = sync.track_time(started + (finished - started) / 2) else {
             return Ok(status);
@@ -322,7 +334,19 @@ impl Writer {
         Ok(status)
     }
 
+    /// Saves the last reading and logs how many readings of each kind there
+    /// were, without names, so a recording's naming can be judged from the
+    /// log even when no call was ever found.
     fn finish(self) -> std::io::Result<()> {
+        if !self.counts.is_empty() {
+            let readings = self
+                .counts
+                .iter()
+                .map(|(kind, count)| format!("{kind} {count}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::info!(%readings, "meeting speaker readings");
+        }
         self.recorder.map_or(Ok(()), Recorder::finish)
     }
 }
@@ -519,11 +543,37 @@ mod tests {
                 )
                 .unwrap();
         }
+        assert_eq!(writer.counts, BTreeMap::from([("slow".to_owned(), 8)]));
         writer.finish().unwrap();
         assert_eq!(
             Timeline::load(directory.path()).speaker_for(500, 2_500),
             None
         );
+    }
+
+    #[test]
+    fn readings_are_counted_even_when_no_call_is_ever_found() {
+        let directory = TestDir::new();
+        let mut writer = Writer::new(directory.path().to_path_buf());
+        for (at, sample) in [
+            Sample::PermissionRequired,
+            Sample::NoCall(NoCall::Unknown),
+            Sample::NoCall(NoCall::Unknown),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = at as u64 * 500;
+            writer
+                .accept(Some(Provider::Teams), sample, at, at + 100, &synced())
+                .unwrap();
+        }
+        assert_eq!(
+            writer.counts,
+            BTreeMap::from([("call_unknown".to_owned(), 2), ("permission".to_owned(), 1)])
+        );
+        writer.finish().unwrap();
+        assert!(!directory.path().join(FILE).exists());
     }
 
     #[test]
