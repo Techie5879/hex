@@ -2,6 +2,25 @@
 use super::*;
 
 impl Ui {
+    /// Keep pending edits based on the old profile when the host adopts a sync.
+    pub(super) fn adopt_profile_drafts(&mut self, service: &AppSettings, drafts: &Drafts) {
+        if !(service.labs.profile_sync || self.settings.labs.profile_sync)
+            || !(drafts.modes || drafts.vocabulary)
+        {
+            self.modes.adopt(service, drafts.modes);
+            return;
+        }
+        let mut rebased = self.drafted();
+        crate::profile_sync::adapter::rebase_editor(&self.settings, &mut rebased, service);
+        self.modes.adopt(service, drafts.modes);
+        if drafts.modes && self.modes.selected == modes::Selection::Default {
+            self.modes.adopt(&rebased, false);
+        }
+        if drafts.vocabulary {
+            self.vocabulary.reload(&rebased.vocabulary);
+        }
+    }
+
     pub(super) fn rebase_profile_candidate(
         &self,
         candidate: &mut AppSettings,

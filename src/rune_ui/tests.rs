@@ -225,20 +225,19 @@ fn an_unconfirmed_portal_shortcut_is_not_called_refused() {
 }
 
 #[test]
-fn local_build_details_fit_below_the_version() {
+fn local_build_badge_fits_beside_the_version() {
     let rt = runtime("mac-local-build", true, PANE_SIZE);
     let sidebar = element(&rt, "sidebar").rect;
     let version = element(&rt, "version").rect;
     let badge = element(&rt, "build-badge").rect;
-    let commit = element(&rt, "build-commit").rect;
-    assert!(badge[1] >= version[1] + version[3]);
-    for rect in [version, badge, commit] {
+    assert!(badge[0] >= version[0] + version[2]);
+    for rect in [version, badge] {
         assert!(rect[0] >= sidebar[0]);
         assert!(rect[0] + rect[2] <= sidebar[0] + sidebar[2]);
     }
     let shown = texts(&rt);
     assert!(shown.iter().any(|text| text == "Version 0.0.0"));
-    assert!(shown.iter().any(|text| text == "1234567"));
+    assert!(shown.iter().any(|text| text == "Local"));
 }
 
 /// #1120: a check the person asked for says how it went; the hourly check

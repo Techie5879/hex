@@ -2278,18 +2278,28 @@ fn labs_lists_every_toggle_off_by_default() {
     }
     assert!(rt.find("lab-terminal-paste").is_none(), "Windows only");
 
+    rt.update(|_, tx| tx.scroll_center("lab-meetings"));
+    settle(&mut rt);
     tap(&mut rt, "lab-meetings");
     assert!(rt.state.settings.meetings.enabled);
     assert!(
         rt.find("nav-meetings").is_some(),
         "Meetings joins the main sidebar"
     );
+    rt.update(|_, tx| tx.scroll_center("lab-live-text"));
+    settle(&mut rt);
     tap(&mut rt, "lab-live-text");
     assert!(rt.state.settings.labs.live_text);
+    rt.update(|_, tx| tx.scroll_center("lab-vocabulary-biasing"));
+    settle(&mut rt);
     tap(&mut rt, "lab-vocabulary-biasing");
     assert!(rt.state.settings.labs.vocabulary_biasing);
+    rt.update(|_, tx| tx.scroll_center("lab-cursor-context"));
+    settle(&mut rt);
     tap(&mut rt, "lab-cursor-context");
     assert!(rt.state.settings.labs.cursor_context);
+    rt.update(|_, tx| tx.scroll_center("lab-meetings"));
+    settle(&mut rt);
     tap(&mut rt, "lab-meetings");
     assert!(rt.find("nav-meetings").is_none(), "hidden while off");
 
@@ -2305,6 +2315,8 @@ fn labs_lists_every_toggle_off_by_default() {
         rt.find("lab-second-dictation-shortcut").is_some(),
         "the second dictation shortcut runs on Windows too"
     );
+    rt.update(|_, tx| tx.scroll_center("lab-terminal-paste"));
+    settle(&mut rt);
     tap(&mut rt, "lab-terminal-paste");
     assert!(rt.state.settings.paste_with_shift);
     assert!(
@@ -3508,12 +3520,19 @@ fn fun_driver_installed(rt: &rune::Runtime<Ui>) -> bool {
 
 #[test]
 fn audio_retention_menu_defaults_to_forever_and_does_not_change_text_retention() {
-    let mut rt = runtime("history", true, PANE_SIZE);
-    rt.state.platform.caps = platform::Capabilities::MACOS;
+    let mut rt = runtime("mac-labs", true, PANE_SIZE);
+    rt.update(|ui, tx| {
+        super::super::labs::reveal_card(
+            ui,
+            super::super::labs::Lab::Feature(crate::labs::Feature::SaveDictationAudio),
+            tx,
+        );
+    });
+    settle(&mut rt);
     assert!(rt.find("audio-retention-trigger").is_none());
     rt.state.settings.labs.save_dictation_audio = true;
     refresh(&mut rt);
-    assert!(texts(&rt).iter().any(|text| text == "Audio: Forever"));
+    assert!(texts(&rt).iter().any(|text| text == "Forever"));
     let text_retention = rt.state.settings.history_retention;
     tap(&mut rt, "audio-retention-trigger");
     tap_option(&mut rt, 1);

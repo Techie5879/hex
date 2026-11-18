@@ -3676,7 +3676,11 @@ companion's profile and token hashes without removing its files.
 Only shared vocabulary and the Global cleanup prompt and policy are applied;
 other modes and settings, audio, history, and account tokens stay local. ETags
 fence stale writes, local settings are absorbed before each exchange, and a
-persisted pending apply survives a failed save. The phone syncs after edits,
+persisted pending apply survives a failed save. An open desktop vocabulary or Global cleanup draft is rebased onto incoming
+profile settings before the editor baseline changes, preserving both local edits
+and phone additions. The `pending_desktop_draft_keeps_phone_edits_after_adoption_and_save`
+fixture covers this adoption path; it does not prove native sync.
+The phone syncs after edits,
 on opening, manually, and approximately hourly when Android allows the job.
 The Mac must be awake with Hex running. Existing WebDAV client commands
 `hex profile connect` and `hex profile sync` remain available.

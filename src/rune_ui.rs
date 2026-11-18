@@ -1139,7 +1139,7 @@ impl Ui {
         let changed = service != self.settings;
         if changed {
             let drafts = self.drafts();
-            self.modes.adopt(&service, drafts.modes);
+            self.adopt_profile_drafts(&service, &drafts);
             if service.dictation_processing != self.settings.dictation_processing {
                 self.open = None;
             }
