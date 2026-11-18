@@ -41,7 +41,11 @@ const RELEASE_MS: u64 = 1_500;
 const RELEASE_TOLERANCE_MS: u64 = 500;
 /// The ends of a line, where the previous and next speaker's marks can lie.
 const EDGE_TRIM_MS: u64 = 400;
-/// The share of a line the one speaker must be marked for.
+/// The share of a line the speaker must be marked alone for: most of it.
+const MIN_LINE_PERCENT: u64 = 50;
+/// The share of the line's readable time the speaker must be marked alone
+/// for, so a line split between two people names neither. Uncertain readings
+/// and marks that include the speaker among others aren't readable time.
 const MIN_SPEAKING_PERCENT: u64 = 60;
 
 /// Maps the capture clock onto the system track's own timeline, which is what
@@ -96,10 +100,57 @@ impl ClockSync {
 pub enum Observed {
     /// One remote participant, by name, was marked as speaking.
     Speaking(String),
+    /// Several remote participants, by name, were marked at once.
+    Several(Vec<String>),
     /// A verified call marked no remote participant.
     Silent,
-    /// Unreadable or contradictory: nothing may be assumed for this time.
-    Uncertain,
+    /// Unreadable or contradictory: nothing is known about this time. Files
+    /// written before reasons were stored have none.
+    Uncertain(Option<Doubt>),
+}
+
+impl Observed {
+    /// What kind of reading this is, as the log counts it: the stored reason
+    /// for an uncertain one.
+    pub fn kind(&self) -> String {
+        match self {
+            Self::Speaking(_) => "speaking".into(),
+            Self::Several(_) => "several".into(),
+            Self::Silent => "silent".into(),
+            Self::Uncertain(doubt) => serde_json::to_value(doubt)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "uncertain".into()),
+        }
+    }
+}
+
+/// Why a reading said nothing. Stored for diagnosis only; naming treats
+/// every reason alike.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Doubt {
+    /// A speaking mark outside any participant.
+    LooseMark,
+    /// A marked participant whose label isn't one readable name.
+    Label,
+    /// A marked participant shown as muted.
+    Muted,
+    /// A marked Slack tile still resolving its participant.
+    Pending,
+    /// Two views of the same call disagree.
+    Conflicting,
+    /// The reading took longer than a reading may.
+    Slow,
+    /// No call of the provider's was found.
+    NoCall,
+    /// A call that couldn't be read completely, or more than one.
+    CallUnknown,
+    /// Hex isn't trusted for Accessibility.
+    Permission,
+    /// A reason written by a later Hex.
+    #[serde(other)]
+    Other,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -116,8 +167,12 @@ enum Line {
         binding: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         speaking: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        several: Vec<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         silent: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uncertain: Option<Doubt>,
     },
 }
 
@@ -139,7 +194,15 @@ impl Run {
                 Observed::Speaking(name) => Some(name.clone()),
                 _ => None,
             },
+            several: match &self.state {
+                Observed::Several(names) => names.clone(),
+                _ => Vec::new(),
+            },
             silent: self.state == Observed::Silent,
+            uncertain: match self.state {
+                Observed::Uncertain(doubt) => doubt,
+                _ => None,
+            },
         }
     }
 }
@@ -279,13 +342,22 @@ impl Timeline {
                 to_ms,
                 binding,
                 speaking,
+                several,
                 silent,
+                uncertain,
             } if from_ms <= to_ms => {
+                let unreadable = Observed::Uncertain(Some(Doubt::Label));
                 let state = match speaking {
                     Some(name) if names::is_valid(&name) => Observed::Speaking(name),
-                    Some(_) => Observed::Uncertain,
-                    None if silent => Observed::Silent,
-                    None => Observed::Uncertain,
+                    Some(_) => unreadable,
+                    None if several.is_empty() && silent => Observed::Silent,
+                    None if several.is_empty() => Observed::Uncertain(uncertain),
+                    None if several.len() > 1
+                        && several.iter().all(|name| names::is_valid(name)) =>
+                    {
+                        Observed::Several(several)
+                    }
+                    None => unreadable,
                 };
                 self.push(Run {
                     from_ms,
@@ -323,11 +395,14 @@ impl Timeline {
     }
 
     /// The one person this timeline positively shows speaking the audio from
-    /// `start_ms` to `end_ms` on the system track's timeline. Anything less
-    /// than that is `None`: a gap in the readings, a changed window or
-    /// session, an uncertain reading, or two people; too little of the line
-    /// marked; or, for a line shorter than a mark lasts, a mark left over
-    /// from before the line.
+    /// `start_ms` to `end_ms` on the system track's timeline: whoever is
+    /// marked alone for most of the line and for most of what could be read
+    /// of it. Uncertain readings, and marks that include them among others,
+    /// say nothing either way; someone else marked, alone or with others
+    /// without them, counts against them. Anything less is `None`: a gap in
+    /// the readings, a changed window or session; too little marked; or, for
+    /// a line shorter than a mark lasts, a mark left over from before the
+    /// line.
     pub fn speaker_for(&self, start_ms: u64, end_ms: u64) -> Option<&str> {
         let duration = end_ms.saturating_sub(start_ms);
         let trim = (duration / 4).min(EDGE_TRIM_MS);
@@ -342,12 +417,9 @@ impl Timeline {
             return None;
         }
         let binding = self.runs[first].binding;
-        let mut speaker: Option<&Run> = None;
-        // Where the marked person's last stretch in the line ends.
-        let mut marked_until = 0;
-        let mut marked_ms = 0;
         let mut covered_until = from;
         let mut previous_to = self.runs[first].from_ms;
+        let mut overlaps = Vec::new();
         for (index, run) in self.runs.iter().enumerate().skip(first) {
             if run.from_ms >= to {
                 break;
@@ -356,38 +428,55 @@ impl Timeline {
                 return None;
             }
             let until = self.known_until(index);
-            let overlap = until.min(to).saturating_sub(run.from_ms.max(from));
-            match &run.state {
-                Observed::Uncertain => return None,
-                Observed::Silent => {}
-                Observed::Speaking(_) => {
-                    if speaker.is_some_and(|known| known.state != run.state) {
-                        return None;
-                    }
-                    speaker = speaker.or(Some(run));
-                    marked_until = run.to_ms;
-                    marked_ms += overlap;
-                }
-            }
+            overlaps.push((run, until.min(to).saturating_sub(run.from_ms.max(from))));
             covered_until = until;
             previous_to = run.to_ms;
         }
-        if covered_until < to || marked_ms * 100 < (to - from) * MIN_SPEAKING_PERCENT {
+        if covered_until < to {
             return None;
         }
-        let speaker = speaker?;
+        // The person marked alone longest in the line.
+        let mut marked: Vec<(&str, u64)> = Vec::new();
+        for (run, overlap) in &overlaps {
+            if let Observed::Speaking(name) = &run.state {
+                match marked.iter_mut().find(|(known, _)| known == name) {
+                    Some((_, total)) => *total += overlap,
+                    None => marked.push((name, *overlap)),
+                }
+            }
+        }
+        let (speaker, marked_ms) = marked.into_iter().max_by_key(|(_, total)| *total)?;
+        let unknown_ms = overlaps
+            .iter()
+            .filter(|(run, _)| match &run.state {
+                Observed::Uncertain(_) => true,
+                Observed::Several(names) => names.iter().any(|name| name == speaker),
+                _ => false,
+            })
+            .map(|(_, overlap)| overlap)
+            .sum::<u64>();
+        let window = to - from;
+        let readable = window.saturating_sub(unknown_ms);
+        if marked_ms * 100 < window * MIN_LINE_PERCENT
+            || marked_ms * 100 < readable * MIN_SPEAKING_PERCENT
+        {
+            return None;
+        }
         // A mark that began before the line and ends as soon as a lingering
         // one would is a previous speaker's, whoever spoke this short line.
+        let marks = overlaps
+            .iter()
+            .filter(|(run, _)| run.state == Observed::Speaking(speaker.to_owned()));
+        let marked_from = marks.clone().map(|(run, _)| run.from_ms).min()?;
+        // Where the marked person's last stretch in the line ends.
+        let marked_until = marks.map(|(run, _)| run.to_ms).max()?;
         if duration < RELEASE_MS
-            && speaker.from_ms < start_ms
+            && marked_from < start_ms
             && marked_until + RELEASE_TOLERANCE_MS < end_ms + RELEASE_MS
         {
             return None;
         }
-        match &speaker.state {
-            Observed::Speaking(name) => Some(name),
-            _ => None,
-        }
+        Some(speaker)
     }
 
     /// Names the system-audio entries this timeline can identify. Entries
@@ -605,16 +694,156 @@ pub(super) mod tests {
         assert_eq!(timeline.speaker_for(6_000, 8_500), Some(ADA));
     }
 
+    const UNREADABLE: Observed = Observed::Uncertain(Some(Doubt::Label));
+
+    fn several(names: &[&str]) -> Observed {
+        Observed::Several(names.iter().map(|name| (*name).to_owned()).collect())
+    }
+
     #[test]
-    fn an_uncertain_reading_inside_a_line_leaves_it_unnamed() {
+    fn an_uncertain_reading_inside_a_line_says_nothing_either_way() {
+        // Teams flickers to unreadable for a poll or two while Ada talks.
         let timeline = timeline(
             stretch(0, 4_000, 1, speaking(ADA))
                 .into_iter()
-                .chain(stretch(4_000, 5_000, 1, Observed::Uncertain))
+                .chain(stretch(4_000, 5_000, 1, UNREADABLE))
                 .chain(stretch(5_000, 9_000, 1, speaking(ADA))),
         );
-        assert_eq!(timeline.speaker_for(2_000, 7_000), None);
+        assert_eq!(timeline.speaker_for(2_000, 7_000), Some(ADA));
         assert_eq!(timeline.speaker_for(0, 3_000), Some(ADA));
+        // A poll in four flickering to uncertain still leaves Ada most of it.
+        let flickering = super::tests::timeline((0..20_000).step_by(POLL_MS as usize).map(|at| {
+            let state = if at % 2_000 < 1_500 {
+                speaking(ADA)
+            } else {
+                UNREADABLE
+            };
+            (at, 1, state)
+        }));
+        assert_eq!(flickering.speaker_for(2_000, 9_000), Some(ADA));
+    }
+
+    #[test]
+    fn a_line_mostly_unreadable_stays_unnamed() {
+        let timeline = timeline(
+            stretch(0, 2_000, 1, speaking(ADA))
+                .into_iter()
+                .chain(stretch(2_000, 9_000, 1, UNREADABLE)),
+        );
+        assert_eq!(timeline.speaker_for(1_000, 7_000), None);
+        // Nothing but uncertain readings names nobody.
+        let unknown = super::tests::timeline(stretch(0, 9_000, 1, UNREADABLE));
+        assert_eq!(unknown.speaker_for(1_000, 7_000), None);
+    }
+
+    #[test]
+    fn several_marks_including_the_speaker_say_nothing_and_others_count_against() {
+        let with_ada = timeline(
+            stretch(0, 4_000, 1, speaking(ADA))
+                .into_iter()
+                .chain(stretch(4_000, 5_000, 1, several(&[ADA, GRACE])))
+                .chain(stretch(5_000, 9_000, 1, speaking(ADA))),
+        );
+        assert_eq!(with_ada.speaker_for(1_000, 8_000), Some(ADA));
+        // Ada's open mic lights her tile beside Grace, who is talking: one
+        // poll of Ada alone doesn't make the line hers.
+        let open_mic = timeline(stretch(0, 500, 1, speaking(ADA)).into_iter().chain(stretch(
+            500,
+            9_000,
+            1,
+            several(&[ADA, GRACE]),
+        )));
+        assert_eq!(open_mic.speaker_for(0, 8_000), None);
+        // Others marked without Ada count against her, briefly or not.
+        let brief = |others: Observed| {
+            timeline(
+                stretch(0, 4_000, 1, speaking(ADA))
+                    .into_iter()
+                    .chain(stretch(4_000, 4_500, 1, others))
+                    .chain(stretch(4_500, 9_000, 1, speaking(ADA))),
+            )
+        };
+        assert_eq!(brief(speaking(GRACE)).speaker_for(1_000, 8_000), Some(ADA));
+        assert_eq!(
+            brief(several(&[GRACE, "Cara Diaz"])).speaker_for(1_000, 8_000),
+            Some(ADA)
+        );
+        let long = timeline(
+            stretch(0, 3_000, 1, speaking(ADA))
+                .into_iter()
+                .chain(stretch(3_000, 6_000, 1, several(&[GRACE, "Cara Diaz"])))
+                .chain(stretch(6_000, 9_000, 1, speaking(ADA))),
+        );
+        assert_eq!(long.speaker_for(1_000, 8_000), None);
+    }
+
+    #[test]
+    fn the_speaker_must_be_marked_for_most_of_the_line() {
+        // Ada marked for 40 % of the line, the rest silent or unknown.
+        let timeline = timeline(
+            stretch(0, 3_000, 1, speaking(ADA))
+                .into_iter()
+                .chain(stretch(3_000, 6_000, 1, UNREADABLE))
+                .chain(stretch(6_000, 9_000, 1, Observed::Silent)),
+        );
+        assert_eq!(timeline.speaker_for(500, 8_500), None);
+    }
+
+    #[test]
+    fn reasons_and_several_names_are_stored_and_read_back() {
+        let directory = TestDir::new();
+        let mut recorder = Recorder::new(directory.path(), Provider::Teams);
+        recorder.observe(0, 0, 1, several(&[ADA, GRACE])).unwrap();
+        recorder
+            .observe(0, 500, 1, Observed::Uncertain(Some(Doubt::Slow)))
+            .unwrap();
+        recorder
+            .observe(0, 1_000, 0, Observed::Uncertain(Some(Doubt::NoCall)))
+            .unwrap();
+        recorder.finish().unwrap();
+        let stored = fs::read_to_string(directory.path().join(FILE)).unwrap();
+        assert!(
+            stored.contains(r#""several":["Ada Lovelace","Grace Hopper"]"#),
+            "{stored}"
+        );
+        assert!(stored.contains(r#""uncertain":"slow""#), "{stored}");
+        assert!(stored.contains(r#""uncertain":"no_call""#), "{stored}");
+        let timeline = Timeline::load(directory.path());
+        let states = timeline
+            .runs
+            .iter()
+            .map(|run| run.state.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            [
+                several(&[ADA, GRACE]),
+                Observed::Uncertain(Some(Doubt::Slow)),
+                Observed::Uncertain(Some(Doubt::NoCall)),
+            ]
+        );
+    }
+
+    #[test]
+    fn files_from_before_reasons_and_hostile_several_names_read_as_uncertain() {
+        let directory = TestDir::new();
+        std::fs::write(
+            directory.path().join(FILE),
+            concat!(
+                "{\"version\":1,\"provider\":\"teams\",\"system_origin_ms\":0}\n",
+                "{\"from_ms\":0,\"to_ms\":1000,\"binding\":1}\n",
+                "{\"from_ms\":1500,\"to_ms\":2000,\"binding\":1,\"several\":[\"Ada Lovelace\",\"You\"]}\n",
+                "{\"from_ms\":5000,\"to_ms\":5500,\"binding\":1,\"several\":[\"Ada Lovelace\"]}\n",
+            ),
+        )
+        .unwrap();
+        let timeline = Timeline::load(directory.path());
+        let states = timeline
+            .runs
+            .iter()
+            .map(|run| run.state.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(states, [Observed::Uncertain(None), UNREADABLE, UNREADABLE]);
     }
 
     #[test]

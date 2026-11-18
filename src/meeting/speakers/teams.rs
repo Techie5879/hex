@@ -17,7 +17,7 @@
 //! verified meeting window; their trailing states are parsed in English, and
 //! any other ending names nobody.
 
-use super::ax::{AxNode, Budget, Call, NoCall, Reading, has_class};
+use super::ax::{AxNode, Budget, Call, Doubt, NoCall, Reading, has_class};
 use super::names;
 
 pub const BUNDLE_ID: &str = "com.microsoft.teams2";
@@ -55,14 +55,19 @@ const NOT_NAMES: &[&str] = &[
     "speaking",
     "you",
 ];
+/// Badges Teams appends to a name, in any letter case: "Ana Ruiz External
+/// Unfamiliar" is Ana Ruiz from another organization she hasn't met before.
 const NAME_TAGS: &[&str] = &[
-    " (Guest)",
-    " (External)",
-    " (Unverified)",
-    " Unverified",
-    " (Organizer)",
+    " (guest)",
+    " (external)",
+    " external",
+    " (unfamiliar)",
+    " unfamiliar",
+    " (unverified)",
+    " unverified",
+    " (organizer)",
 ];
-const SELF_TAGS: &[&str] = &[" (You)", " (Me)", " (me)", " (you)"];
+const SELF_TAGS: &[&str] = &[" (you)", " (me)"];
 
 struct Window<N> {
     window: N,
@@ -108,18 +113,27 @@ fn read_windows<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<
     {
         return Err(NoCall::Absent);
     }
-    let mut speaking = Vec::new();
-    let mut uncertain = false;
+    // Who each window (main, then compact) marks.
+    let mut views = Vec::new();
+    let mut doubt = None;
     let mut compact_silent = false;
     for window in main.iter().chain(&compact) {
-        uncertain |= window.loose_frame;
+        let mut speaking = Vec::new();
+        if window.loose_frame {
+            doubt.get_or_insert(Doubt::LooseMark);
+        }
         for tile in &window.framed {
             match label(tile).as_deref().map(parse_tile) {
                 Some(Some(Tile { is_self: true, .. })) => {}
                 Some(Some(Tile {
                     name, muted: false, ..
                 })) => speaking.push(name),
-                _ => uncertain = true,
+                Some(Some(Tile { muted: true, .. })) => {
+                    doubt.get_or_insert(Doubt::Muted);
+                }
+                _ => {
+                    doubt.get_or_insert(Doubt::Label);
+                }
             }
         }
         for group in &window.groups {
@@ -133,20 +147,34 @@ fn read_windows<N: AxNode>(windows: Vec<N>, budget: &mut Budget) -> Result<Call<
                 match clean_name(name) {
                     Some((name, false)) => speaking.push(name),
                     Some((_, true)) => {}
-                    None => uncertain = true,
+                    None => {
+                        doubt.get_or_insert(Doubt::Label);
+                    }
                 }
             }
         }
+        speaking.sort();
+        speaking.dedup();
+        views.push(speaking);
     }
-    speaking.dedup();
-    speaking.sort();
-    speaking.dedup();
-    uncertain |= compact_silent && !speaking.is_empty();
-    let reading = match (uncertain, speaking.len()) {
-        (true, _) => Reading::Uncertain,
-        (false, 0) => Reading::Silent,
-        (false, 1) => Reading::Speaking(speaking.remove(0)),
-        (false, _) => Reading::Uncertain,
+    // Views that mark people narrow each other down: the gallery lighting
+    // Ana and Ben while the compact view names Ana is Ana.
+    let mut marked = views.into_iter().filter(|view| !view.is_empty());
+    let mut speaking = marked.next().unwrap_or_default();
+    for view in marked {
+        speaking.retain(|name| view.contains(name));
+        if speaking.is_empty() {
+            doubt.get_or_insert(Doubt::Conflicting);
+        }
+    }
+    if compact_silent && !speaking.is_empty() {
+        doubt.get_or_insert(Doubt::Conflicting);
+    }
+    let reading = match (doubt, speaking.len()) {
+        (Some(doubt), _) => Reading::Uncertain(doubt),
+        (None, 0) => Reading::Silent,
+        (None, 1) => Reading::Speaking(speaking.remove(0)),
+        (None, _) => Reading::Several(speaking),
     };
     let region = main
         .into_iter()
@@ -288,15 +316,25 @@ fn parse_tile(label: &str) -> Option<Tile> {
     })
 }
 
+/// Whether `name` ends with the ASCII `tag` in any letter case.
+fn ends_with_tag(name: &str, tag: &str) -> bool {
+    name.len()
+        .checked_sub(tag.len())
+        .and_then(|start| name.get(start..))
+        .is_some_and(|end| end.eq_ignore_ascii_case(tag))
+}
+
 /// A display name without Teams' tags, and whether a tag marks the user.
 fn clean_name(raw: &str) -> Option<(String, bool)> {
-    let mut name = raw.trim().to_owned();
+    // Spacing and invisible marks are normalized first, so a badge after a
+    // no-break space or a direction mark is still found.
+    let mut name = names::clean(raw)?;
     let mut is_self = false;
     loop {
-        if let Some(tag) = SELF_TAGS.iter().find(|tag| name.ends_with(*tag)) {
+        if let Some(tag) = SELF_TAGS.iter().find(|tag| ends_with_tag(&name, tag)) {
             name.truncate(name.len() - tag.len());
             is_self = true;
-        } else if let Some(tag) = NAME_TAGS.iter().find(|tag| name.ends_with(*tag)) {
+        } else if let Some(tag) = NAME_TAGS.iter().find(|tag| ends_with_tag(&name, tag)) {
             name.truncate(name.len() - tag.len());
         } else {
             break;
@@ -380,6 +418,28 @@ mod tests {
                 "Ana Ruiz Unverified, Organizer, Video is off, Has context menu",
                 "Ana Ruiz",
             ),
+            (
+                "Ana Ruiz External unfamiliar, Context menu is available",
+                "Ana Ruiz",
+            ),
+            (
+                "Ana Ruiz External Unfamiliar, unmuted More options",
+                "Ana Ruiz",
+            ),
+            (
+                "Ben Okafor (EXTERNAL), Context menu is available",
+                "Ben Okafor",
+            ),
+            // Chromium may put a badge in its own span after a no-break
+            // space, a double space, or a direction mark.
+            (
+                "Ana Ruiz\u{a0}External\u{a0}Unfamiliar, Context menu is available",
+                "Ana Ruiz",
+            ),
+            (
+                "Ana Ruiz  External unfamiliar\u{200e}, Context menu is available",
+                "Ana Ruiz",
+            ),
         ] {
             let window = meeting("Sync | Microsoft Teams", [tile(label, true)]);
             assert_eq!(
@@ -420,7 +480,11 @@ mod tests {
             "",
         ] {
             let window = meeting("Sync | Microsoft Teams", [tile(label, true)]);
-            assert_eq!(reading(vec![window]), Ok(Reading::Uncertain), "{label}");
+            assert_eq!(
+                reading(vec![window]),
+                Ok(Reading::Uncertain(Doubt::Label)),
+                "{label}"
+            );
         }
     }
 
@@ -430,7 +494,7 @@ mod tests {
             "Sync | Microsoft Teams",
             [tile("Ana Ruiz, muted, Context menu is available", true)],
         );
-        assert_eq!(reading(vec![muted]), Ok(Reading::Uncertain));
+        assert_eq!(reading(vec![muted]), Ok(Reading::Uncertain(Doubt::Muted)));
         let mine = meeting(
             "Sync | Microsoft Teams",
             [
@@ -444,10 +508,18 @@ mod tests {
             [tile("Cara Diaz (You), Context menu is available", true)],
         );
         assert_eq!(reading(vec![tagged]), Ok(Reading::Silent));
+        let badged = meeting(
+            "Sync | Microsoft Teams",
+            [tile(
+                "Cara Diaz External (you), Context menu is available",
+                true,
+            )],
+        );
+        assert_eq!(reading(vec![badged]), Ok(Reading::Silent));
     }
 
     #[test]
-    fn two_frames_or_a_frame_outside_a_tile_is_uncertain() {
+    fn two_frames_are_several_and_a_frame_outside_a_tile_is_uncertain() {
         let two = meeting(
             "Sync | Microsoft Teams",
             [
@@ -455,14 +527,23 @@ mod tests {
                 tile("Ben Okafor, Context menu is available", true),
             ],
         );
-        assert_eq!(reading(vec![two]), Ok(Reading::Uncertain));
+        assert_eq!(
+            reading(vec![two]),
+            Ok(Reading::Several(vec![
+                "Ana Ruiz".into(),
+                "Ben Okafor".into()
+            ]))
+        );
         let loose = Node::element("AXWindow")
             .title("Sync | Microsoft Teams")
             .child(Node::element("AXButton").id(HANGUP))
             .child(tile("Ana Ruiz, Context menu is available", false))
             .child(Node::element("AXGroup").class(FRAME))
             .build();
-        assert_eq!(reading(vec![loose]), Ok(Reading::Uncertain));
+        assert_eq!(
+            reading(vec![loose]),
+            Ok(Reading::Uncertain(Doubt::LooseMark))
+        );
     }
 
     #[test]
@@ -511,7 +592,7 @@ mod tests {
         );
         assert_eq!(
             reading(vec![compact("Sync", " is speaking")]),
-            Ok(Reading::Uncertain)
+            Ok(Reading::Uncertain(Doubt::Label))
         );
         // Different live views cannot establish one speaker.
         assert_eq!(
@@ -519,7 +600,7 @@ mod tests {
                 meeting("Sync", [tile("Ana Ruiz, Context menu is available", true)]),
                 compact("Sync", "Nobody is speaking"),
             ]),
-            Ok(Reading::Uncertain)
+            Ok(Reading::Uncertain(Doubt::Conflicting))
         );
         // Windows of two different meetings.
         assert_eq!(
@@ -529,13 +610,27 @@ mod tests {
             ]),
             Err(NoCall::Unknown)
         );
+        // A compact view naming one of the gallery's marked people is them.
+        assert_eq!(
+            reading(vec![
+                meeting(
+                    "Sync",
+                    [
+                        tile("Ana Ruiz, Context menu is available", true),
+                        tile("Ben Okafor, Context menu is available", true),
+                    ]
+                ),
+                compact("Sync", "Ana Ruiz is speaking"),
+            ]),
+            Ok(Reading::Speaking("Ana Ruiz".into()))
+        );
         // The windows disagree.
         assert_eq!(
             reading(vec![
                 meeting("Sync", [tile("Ana Ruiz, Context menu is available", true)]),
                 compact("Sync", "Ben Okafor is speaking"),
             ]),
-            Ok(Reading::Uncertain)
+            Ok(Reading::Uncertain(Doubt::Conflicting))
         );
         assert_eq!(
             reading(vec![compact("Sync", "You are speaking")]),

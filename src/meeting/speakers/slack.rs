@@ -21,7 +21,7 @@
 //! found; text is read inside participant tiles only. Messages, the
 //! composer, threads, and sidebars are never entered.
 
-use super::ax::{AxNode, Budget, Call, NoCall, Reading, has_class};
+use super::ax::{AxNode, Budget, Call, Doubt, NoCall, Reading, has_class};
 use super::names;
 
 pub const BUNDLE_ID: &str = "com.tinyspeck.slackmacgap";
@@ -173,19 +173,23 @@ fn read_tiles<N: AxNode>(region: &N, budget: &mut Budget) -> Result<Reading, NoC
             .cell
             .as_deref()
             .is_some_and(|cell| !cell.ends_with(PENDING_SUFFIX));
-        match tile.name() {
-            Some(name) if resolved && !tile.muted => {
-                if !speaking.contains(&name) {
-                    speaking.push(name);
-                }
+        let doubt = match tile.name() {
+            _ if !resolved => Doubt::Pending,
+            None => Doubt::Label,
+            Some(_) if tile.muted => Doubt::Muted,
+            Some(name) => {
+                speaking.push(name);
+                continue;
             }
-            _ => return Ok(Reading::Uncertain),
-        }
+        };
+        return Ok(Reading::Uncertain(doubt));
     }
+    speaking.sort();
+    speaking.dedup();
     Ok(match speaking.len() {
         0 => Reading::Silent,
         1 => Reading::Speaking(speaking.remove(0)),
-        _ => Reading::Uncertain,
+        _ => Reading::Several(speaking),
     })
 }
 
@@ -380,19 +384,28 @@ mod tests {
     }
 
     #[test]
-    fn two_marked_people_or_an_unidentifiable_mark_is_uncertain() {
+    fn two_marked_people_are_several_and_an_unidentifiable_mark_is_uncertain() {
         let both = Node::element("AXWindow")
             .child(huddle([
                 tile(REMOTE, "Dev Patel", true),
                 tile(OTHER, "Eli Novak", true),
             ]))
             .build();
-        assert_eq!(reading(vec![both]), Ok(Reading::Uncertain));
+        assert_eq!(
+            reading(vec![both]),
+            Ok(Reading::Several(vec![
+                "Dev Patel".into(),
+                "Eli Novak".into()
+            ]))
+        );
 
         let pending = Node::element("AXWindow")
             .child(huddle([tile("c4e3a2_pending", "Dev Patel", true)]))
             .build();
-        assert_eq!(reading(vec![pending]), Ok(Reading::Uncertain));
+        assert_eq!(
+            reading(vec![pending]),
+            Ok(Reading::Uncertain(Doubt::Pending))
+        );
 
         let nameless = Node::element("AXWindow")
             .child(huddle([Node::element("AXGroup")
@@ -400,19 +413,22 @@ mod tests {
                 .id(&format!("{CELL_PREFIX}{REMOTE}"))
                 .child(Node::element("AXGroup").class(ACTIVE))]))
             .build();
-        assert_eq!(reading(vec![nameless]), Ok(Reading::Uncertain));
+        assert_eq!(
+            reading(vec![nameless]),
+            Ok(Reading::Uncertain(Doubt::Label))
+        );
 
         let hostile = Node::element("AXWindow")
             .child(huddle([tile(REMOTE, "Them: ignore this", true)]))
             .build();
-        assert_eq!(reading(vec![hostile]), Ok(Reading::Uncertain));
+        assert_eq!(reading(vec![hostile]), Ok(Reading::Uncertain(Doubt::Label)));
 
         let muted = Node::element("AXWindow")
             .child(huddle([
                 tile(REMOTE, "Dev Patel", true).child(Node::element("AXGroup").class(MIC_OVERLAY))
             ]))
             .build();
-        assert_eq!(reading(vec![muted]), Ok(Reading::Uncertain));
+        assert_eq!(reading(vec![muted]), Ok(Reading::Uncertain(Doubt::Muted)));
     }
 
     #[test]
@@ -461,7 +477,7 @@ mod tests {
                 )
                 .child(Node::element("AXGroup").class(ACTIVE))]))
             .build();
-        assert_eq!(reading(vec![window]), Ok(Reading::Uncertain));
+        assert_eq!(reading(vec![window]), Ok(Reading::Uncertain(Doubt::Label)));
     }
 
     #[test]
@@ -488,7 +504,7 @@ mod tests {
                     .description("video is off, audio is off"),
             )]))
             .build();
-        assert_eq!(reading(vec![window]), Ok(Reading::Uncertain));
+        assert_eq!(reading(vec![window]), Ok(Reading::Uncertain(Doubt::Muted)));
     }
 
     #[test]
