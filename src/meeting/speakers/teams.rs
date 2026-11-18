@@ -327,8 +327,9 @@ fn ends_with_tag(name: &str, tag: &str) -> bool {
 /// A display name without Teams' tags, and whether a tag marks the user.
 fn clean_name(raw: &str) -> Option<(String, bool)> {
     // Spacing and invisible marks are normalized first, so a badge after a
-    // no-break space or a direction mark is still found.
-    let mut name = names::clean(raw)?;
+    // no-break space or a direction mark is still found; the name is judged
+    // only once its badges are gone.
+    let mut name = names::normalize(raw);
     let mut is_self = false;
     loop {
         if let Some(tag) = SELF_TAGS.iter().find(|tag| ends_with_tag(&name, tag)) {
@@ -439,6 +440,11 @@ mod tests {
             (
                 "Ana Ruiz  External unfamiliar\u{200e}, Context menu is available",
                 "Ana Ruiz",
+            ),
+            // A name at the length limit keeps it once its badge is gone.
+            (
+                &format!("{} Unverified, Context menu is available", "A".repeat(80)),
+                &"A".repeat(80),
             ),
         ] {
             let window = meeting("Sync | Microsoft Teams", [tile(label, true)]);

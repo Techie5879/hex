@@ -466,7 +466,7 @@ impl Timeline {
         // one would is a previous speaker's, whoever spoke this short line.
         let marks = overlaps
             .iter()
-            .filter(|(run, _)| run.state == Observed::Speaking(speaker.to_owned()));
+            .filter(|(run, _)| matches!(&run.state, Observed::Speaking(name) if name == speaker));
         let marked_from = marks.clone().map(|(run, _)| run.from_ms).min()?;
         // Where the marked person's last stretch in the line ends.
         let marked_until = marks.map(|(run, _)| run.to_ms).max()?;
@@ -779,14 +779,20 @@ pub(super) mod tests {
 
     #[test]
     fn the_speaker_must_be_marked_for_most_of_the_line() {
-        // Ada marked for 40 % of the line, the rest silent or unknown.
-        let timeline = timeline(
-            stretch(0, 3_000, 1, speaking(ADA))
+        // Ada is all that could be read, but under half the line.
+        let short = timeline(
+            stretch(0, 4_000, 1, speaking(ADA))
                 .into_iter()
-                .chain(stretch(3_000, 6_000, 1, UNREADABLE))
-                .chain(stretch(6_000, 9_000, 1, Observed::Silent)),
+                .chain(stretch(4_000, 9_000, 1, UNREADABLE)),
         );
-        assert_eq!(timeline.speaker_for(500, 8_500), None);
+        assert_eq!(short.speaker_for(500, 8_500), None);
+        // Just over half is enough.
+        let half = timeline(
+            stretch(0, 5_500, 1, speaking(ADA))
+                .into_iter()
+                .chain(stretch(5_500, 9_000, 1, UNREADABLE)),
+        );
+        assert_eq!(half.speaker_for(500, 8_500), Some(ADA));
     }
 
     #[test]

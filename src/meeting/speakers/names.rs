@@ -48,6 +48,17 @@ fn is_format_mark(character: char) -> bool {
     )
 }
 
+/// `raw` without invisible format marks, its whitespace runs (control
+/// characters included) collapsed to single spaces; nothing is judged.
+pub fn normalize(raw: &str) -> String {
+    raw.chars()
+        .filter(|character| !is_format_mark(*character))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `raw` as a transcript may show it, or `None` when it can't name a person:
 /// control characters, Markup, role words, an anonymous `Speaker 2`, or no
 /// letters at all.
@@ -55,13 +66,7 @@ pub fn clean(raw: &str) -> Option<String> {
     if raw.len() > MAX_CHARS * 8 || raw.chars().any(char::is_control) {
         return None;
     }
-    let name = raw
-        .chars()
-        .filter(|character| !is_format_mark(*character))
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let name = normalize(raw);
     let acceptable = !name.is_empty()
         && name.chars().count() <= MAX_CHARS
         && !name.contains(REJECTED)
